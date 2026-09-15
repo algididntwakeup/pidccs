@@ -1,0 +1,76 @@
+============================================================
+  P&ID STUDIO
+  Otomasi Corrosion System & Circuit pada P&ID (API RP 970)
+
+  Razi Delviar Farrukhi - 13722048
+  Teknik Material, FTMD, Institut Teknologi Bandung
+============================================================
+
+
+APA INI
+-------
+Aplikasi yang membaca gambar P&ID kosongan, mendeteksi komponennya
+(pipa, valve, instrumen, equipment, dan line number), lalu
+mengelompokkan pipa menjadi corrosion system dan corrosion circuit
+dan mewarnainya di atas gambar - berdasarkan API RP 970.
+
+
+YANG DIBUTUHKAN
+---------------
+- Windows
+- Python 3.13 (installer otomatis memilih versi ini)
+  Kalau belum ada, unduh di: https://www.python.org/downloads/
+  PENTING: saat memasang Python, centang kotak "Add Python to PATH".
+- Koneksi internet (hanya untuk pemasangan pertama)
+
+Kartu grafis NVIDIA TIDAK wajib. Tanpa GPU aplikasi tetap jalan,
+hanya proses deteksi sedikit lebih lama.
+
+
+CARA MENJALANKAN
+----------------
+  Langkah 1.  Dobel-klik  "1 - Install (jalankan sekali).bat"
+              Tunggu sampai selesai (5-15 menit, sekali saja).
+
+  Langkah 2.  Dobel-klik  "2 - Buka GUI.bat"
+              Jendela aplikasi akan muncul dalam beberapa detik.
+
+Untuk pemakaian berikutnya cukup Langkah 2 saja.
+
+
+CARA MEMAKAI (SINGKAT)
+----------------------
+  1. Klik  "Open P&ID"  dan pilih salah satu berkas di folder
+     "Contoh P&ID".  Disarankan mulai dari:
+        BCD3-605-42-PID-1-001-01 REV.6J0-CCD2.png
+
+  2. Klik  "Detect".  Sistem akan mendeteksi semua komponen dan
+     membaca line number-nya. (Gambar contoh di atas sudah punya
+     hasil tersimpan, jadi muncul seketika.)
+
+  3. Buka menu (tombol tiga garis di kiri atas) untuk berpindah
+     antara tampilan Digitization, Corrosion System, dan
+     Corrosion Circuit.
+
+  4. Panel "Report" menampilkan performa model AI dan
+     perbandingan pengelompokan terhadap data engineer.
+
+
+ISI FOLDER
+----------
+  gui.py ................... program utama
+  pidcorr/ ................. modul-modul sistem
+  runs/ .................... model AI yang sudah dilatih
+  Contoh P&ID/ ............. gambar P&ID untuk dicoba
+  combined_dataset/ ........ data acuan engineer (untuk panel Report)
+  data/ .................... data uji equipment (untuk panel Report)
+  .pidcache/ ............... hasil deteksi tersimpan
+  requirements.txt ......... daftar komponen yang dipasang otomatis
+
+
+KALAU ADA MASALAH
+-----------------
+Screenshot jendela hitam yang menampilkan pesan error, lalu
+kirim ke Razi. Sebagian besar masalah pemasangan bisa diatasi
+dengan menjalankan ulang Langkah 1.
+============================================================

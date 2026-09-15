@@ -1,0 +1,97 @@
+import os
+from typing import Callable, Dict, Any, List, Optional
+import numpy as np
+
+from ..interfaces.perception import BaseSymbolDetector
+from ..detect import predict_tiled, Det
+from ..layout import detect_fullpage, suppress_nested
+from ..pipeline import classify_boxes, merge_equipment, detect_boxes
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_WEIGHTS = os.path.join(_ROOT, "runs", "detect", "pid3_finetune", "weights", "best.pt")
+EQUIP_BIG_WEIGHTS = os.path.join(_ROOT, "runs", "detect", "equip_big", "weights", "best.pt")
+
+
+class YOLOTiledDetector(BaseSymbolDetector):
+    """Standard tiled YOLO detector wrapping Ultralytics YOLO11 model with 640px sliding tiles."""
+
+    def __init__(self, weights_path: str = DEFAULT_WEIGHTS, equip_big_weights: str = EQUIP_BIG_WEIGHTS):
+        self.weights_path = weights_path
+        self.equip_big_weights = equip_big_weights
+        self._model = None
+        self._equip_big_model = None
+
+    def load_weights(self, weights_path: str) -> None:
+        self.weights_path = weights_path
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None and os.path.exists(self.weights_path):
+            from ultralytics import YOLO
+            self._model = YOLO(self.weights_path)
+        return self._model
+
+    def detect(
+        self,
+        img_bgr: np.ndarray,
+        conf: float = 0.3,
+        progress: Optional[Callable[[str], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Detect equipment, valves, and instruments using tiled inference."""
+        if progress:
+            progress("YOLO tiled detection on P&ID drawing...")
+
+        # 1. Tiled inference (640px tiles with NMS)
+        model = self._get_model()
+        if model is not None:
+            try:
+                import torch
+                dev = 0 if torch.cuda.is_available() else "cpu"
+            except Exception:
+                dev = "cpu"
+            dets, _ = predict_tiled(
+                model=model,
+                img_bgr=img_bgr,
+                tile=640,
+                overlap=0.20,
+                conf=conf,
+                device=dev,
+            )
+        else:
+            dets = []
+
+        # 2. Contour-based box detection for equipment & details
+        boxes = detect_boxes(img_bgr)
+        eq_boxes, _ = classify_boxes(img_bgr, boxes)
+        for b, name in eq_boxes:
+            dets.append(Det("equipment", name or "box_contour", 0.95, b[0], b[1], b[2], b[3]))
+
+        # 3. Full-page detection for large equipment (vessels, towers)
+        if os.path.exists(self.equip_big_weights):
+            eq_big = detect_fullpage(
+                img_bgr,
+                weights=self.equip_big_weights,
+                imgsz=1024,
+                conf=0.25,
+                verbose=False,
+            )
+            for b in eq_big:
+                dets.append(Det("equipment", "equip_big", b[4], b[0], b[1], b[2], b[3]))
+
+        # Format to list of dictionaries
+        raw_syms = [
+            {
+                "coarse": d.coarse,
+                "cls": d.cls,
+                "conf": round(float(d.conf), 3),
+                "x1": float(d.x1),
+                "y1": float(d.y1),
+                "x2": float(d.x2),
+                "y2": float(d.y2),
+            }
+            for d in dets
+        ]
+
+        # Merge overlapping equipment
+        final_syms = merge_equipment(raw_syms, overlap=0.25)
+        return final_syms

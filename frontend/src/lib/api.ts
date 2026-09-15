@@ -1,0 +1,90 @@
+import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport } from '@/types/schema';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+export async function fetchProjects(): Promise<ProjectResponse[]> {
+  const res = await fetch(`${API_BASE}/api/v1/projects`);
+  if (!res.ok) throw new Error('Failed to fetch projects');
+  return res.json();
+}
+
+export async function createProject(name: string, description: string = ''): Promise<ProjectResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  });
+  if (!res.ok) throw new Error('Failed to create project');
+  return res.json();
+}
+
+export async function fetchProject(projectId: string): Promise<ProjectResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}`);
+  if (!res.ok) throw new Error('Failed to fetch project');
+  return res.json();
+}
+
+export async function uploadSheet(projectId: string, file: File, dpi: number = 350): Promise<SheetResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('dpi', dpi.toString());
+
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) throw new Error('Failed to upload drawing sheet');
+  return res.json();
+}
+
+export async function triggerDetection(projectId: string, sheetId: string, dpi?: number, rot?: number) {
+  const params = new URLSearchParams();
+  if (dpi) params.append('dpi', dpi.toString());
+  if (rot !== undefined) params.append('rot', rot.toString());
+
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/detect?${params}`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to trigger detection');
+  return res.json();
+}
+
+export async function fetchResult(projectId: string, sheetId: string): Promise<DigitizationResult> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result`);
+  if (!res.ok) throw new Error('Failed to fetch sheet result');
+  return res.json();
+}
+
+export async function patchResult(projectId: string, sheetId: string, updatedResult: DigitizationResult): Promise<DigitizationResult> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updatedResult),
+  });
+  if (!res.ok) throw new Error('Failed to patch result');
+  return res.json();
+}
+
+export async function fetchSystems(projectId: string, sheetId: string): Promise<CorrosionSystem[]> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/systems`);
+  if (!res.ok) throw new Error('Failed to fetch corrosion systems');
+  return res.json();
+}
+
+export async function fetchValidation(projectId: string, sheetId: string): Promise<ValidationReport> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/validate`);
+  if (!res.ok) throw new Error('Failed to fetch validation report');
+  return res.json();
+}
+
+export function getExportUrl(projectId: string, sheetId: string, format: 'xlsx' | 'docx' | 'pdf' | 'png', mode: 'system' | 'circuit' = 'system'): string {
+  return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/export?format=${format}&mode=${mode}`;
+}
+
+export function getRawImageUrl(projectId: string, sheetId: string): string {
+  return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/raw`;
+}
+
+export function getDziUrl(projectId: string, sheetId: string): string {
+  return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/dzi`;
+}

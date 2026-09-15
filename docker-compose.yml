@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pidstudio-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pidstudio
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pidstudio"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pidstudio-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pidstudio-api
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pidstudio
+      - DATABASE_SYNC_URL=postgresql://postgres:postgres@postgres:5432/pidstudio
+      - REDIS_URL=redis://redis:6379/0
+      - STORAGE_DIR=/app/data/storage
+      - WEIGHTS_DIR=/app/runs
+      - OMP_NUM_THREADS=1
+      - KMP_DUPLICATE_LIB_OK=TRUE
+    volumes:
+      - ./backend:/app
+      - ./pidcorr:/pidcorr
+      - ./runs:/app/runs
+      - ./data:/app/data
+      - ./Contoh P&ID:/app/Contoh P&ID
+      - ./.pidcache:/app/.pidcache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pidstudio-worker
+    restart: unless-stopped
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pidstudio
+      - DATABASE_SYNC_URL=postgresql://postgres:postgres@postgres:5432/pidstudio
+      - REDIS_URL=redis://redis:6379/0
+      - STORAGE_DIR=/app/data/storage
+      - WEIGHTS_DIR=/app/runs
+      - OMP_NUM_THREADS=1
+      - KMP_DUPLICATE_LIB_OK=TRUE
+    volumes:
+      - ./backend:/app
+      - ./pidcorr:/pidcorr
+      - ./runs:/app/runs
+      - ./data:/app/data
+      - ./Contoh P&ID:/app/Contoh P&ID
+      - ./.pidcache:/app/.pidcache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pidstudio-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
