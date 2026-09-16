@@ -23,6 +23,7 @@ redis>=5.2.0
 numpy>=1.26,<2.3
 opencv-python>=4.9
 ultralytics==8.4.70
+sahi>=0.11.18
 rapidocr-onnxruntime==1.2.3
 onnxruntime>=1.17
 

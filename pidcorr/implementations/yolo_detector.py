@@ -64,7 +64,8 @@ class YOLOTiledDetector(BaseSymbolDetector):
         boxes = detect_boxes(img_bgr)
         eq_boxes, _ = classify_boxes(img_bgr, boxes)
         for b, name in eq_boxes:
-            dets.append(Det("equipment", name or "box_contour", 0.95, b[0], b[1], b[2], b[3]))
+            dets.append(Det(b[0], b[1], b[2], b[3], 0.95,
+                            name or "box_contour", "equipment"))
 
         # 3. Full-page detection for large equipment (vessels, towers)
         if os.path.exists(self.equip_big_weights):
@@ -73,10 +74,10 @@ class YOLOTiledDetector(BaseSymbolDetector):
                 weights=self.equip_big_weights,
                 imgsz=1024,
                 conf=0.25,
-                verbose=False,
+                with_conf=True,
             )
             for b in eq_big:
-                dets.append(Det("equipment", "equip_big", b[4], b[0], b[1], b[2], b[3]))
+                dets.append(Det(b[0], b[1], b[2], b[3], b[4], "equip_big", "equipment"))
 
         # Format to list of dictionaries
         raw_syms = [

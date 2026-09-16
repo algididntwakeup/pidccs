@@ -21,6 +21,5 @@ class RapidOCRExtractor(BaseTextExtractor):
             overlap=0.25,
             progress=progress,
             tokens_out=tokens_out,
-            verbose=False,
         )
         return pids, tokens_out

@@ -3,7 +3,7 @@ from typing import Callable, Dict, Any, List, Optional
 import numpy as np
 
 from ..interfaces.perception import BaseSymbolDetector
-from ..detect import COARSE
+from ..detect import COARSE, coarse_of
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_WEIGHTS = os.path.join(_ROOT, "runs", "detect", "pid3_finetune", "weights", "best.pt")
@@ -77,11 +77,11 @@ class SAHISymbolDetector(BaseSymbolDetector):
             syms = []
             for obj in sliced_result.object_prediction_list:
                 bbox = obj.bbox
-                raw_cls = obj.category.name.lower()
-                coarse = COARSE.get(raw_cls, "equipment" if "equip" in raw_cls else "other")
+                raw_cls = obj.category.name.strip()
+                coarse = coarse_of(raw_cls.lower()) if raw_cls.lower() in ("equipment", "instrument", "valve") else coarse_of(raw_cls)
                 syms.append({
                     "coarse": coarse,
-                    "cls": raw_cls,
+                    "cls": raw_cls.lower(),
                     "conf": round(float(obj.score.value), 3),
                     "x1": float(bbox.minx),
                     "y1": float(bbox.miny),

@@ -48,6 +48,25 @@ class PipeRun:
     def segments(self):
         return list(zip(self.points, self.points[1:]))
 
+    def __getitem__(self, key):
+        if key == "points": return self.points
+        if key == "axis": return self.axis
+        if key == "pid": return self.pid
+        if key == "fluid": return self.fluid
+        if key == "underline": return self.underline
+        if key == "x1": return min(p[0] for p in self.points)
+        if key == "y1": return min(p[1] for p in self.points)
+        if key == "x2": return max(p[0] for p in self.points)
+        if key == "y2": return max(p[1] for p in self.points)
+        if key == "length": return self.length
+        raise KeyError(key)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
 
 # --------------------------------------------------- 1) ekstraksi segmen ----------
 def extract_segments(img_bgr, dpi=350, min_len_pt=26, gap_pt=10, border_pt=24):

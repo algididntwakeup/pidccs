@@ -135,6 +135,63 @@ def test_paddleocr_extractor_single_pass():
     print(f"[PASS] PaddleOCRExtractor single-pass test passed ({len(pids)} PIDs, {len(tokens)} tokens)!")
 
 
+def test_skeleton_tracer_extracts_graph_edges():
+    """Verify B.08 extracts graph edges for a line, T-junction, and diagonal."""
+    import cv2
+
+    img = np.full((240, 320, 3), 255, dtype=np.uint8)
+    cv2.line(img, (30, 120), (290, 120), (0, 0, 0), 5)
+    cv2.line(img, (160, 120), (160, 45), (0, 0, 0), 5)
+    cv2.line(img, (35, 205), (125, 150), (0, 0, 0), 5)
+
+    runs = SkeletonLineTracer(min_length_px=25).trace(img, dpi=350)
+
+    assert len(runs) >= 3
+    assert any(run["axis"] == "h" for run in runs)
+    assert any(run["axis"] == "v" for run in runs)
+    assert any(run["axis"] == "d" for run in runs)
+    for run in runs:
+        assert len(run["points"]) >= 2
+        assert run["x1"] <= run["x2"]
+        assert run["y1"] <= run["y2"]
+        assert run["underline"] is False
+
+    print(f"[PASS] Skeleton graph tracer extracted {len(runs)} runs with H/V/diagonal axes!")
+
+
+def test_crossover_and_t_junction_classification():
+    """Verify B.09 accurately resolves 4-way crossover into 2 independent through-pipes and preserves T-junction."""
+    import cv2
+    tracer = SkeletonLineTracer(min_length_px=20)
+
+    # Create canvas with:
+    # 1. Horizontal main line: (30, 100) -> (270, 100)
+    # 2. Vertical line crossing it at (150, 100): (150, 30) -> (150, 270)  <-- 4-way Crossover
+    # 3. T-junction branch off the vertical line: (150, 200) -> (230, 200)  <-- 3-way T-junction
+    img = np.full((300, 300, 3), 255, dtype=np.uint8)
+    cv2.line(img, (30, 100), (270, 100), (0, 0, 0), 4)
+    cv2.line(img, (150, 30), (150, 270), (0, 0, 0), 4)
+    cv2.line(img, (150, 200), (230, 200), (0, 0, 0), 4)
+
+    runs = tracer.trace(img, dpi=350)
+
+    # We expect:
+    # - At least 1 horizontal through-run spanning ~240px (from ~30 to ~270)
+    # - At least 1 vertical through-run spanning ~240px (from ~30 to ~270)
+    # - 1 branch run extending to the right at y=200
+    h_spans = [r for r in runs if r["axis"] == "h" and (r["x2"] - r["x1"]) >= 200]
+    v_spans = [r for r in runs if r["axis"] == "v" and (r["y2"] - r["y1"]) >= 200]
+    branches = [r for r in runs if r["axis"] == "h" and (r["x2"] - r["x1"]) < 120]
+
+    assert len(h_spans) >= 1, f"Expected horizontal through-run, got {len(h_spans)}"
+    assert len(v_spans) >= 1, f"Expected vertical through-run, got {len(v_spans)}"
+    assert len(branches) >= 1, f"Expected T-junction branch run, got {len(branches)}"
+
+    # Crossover verification: The horizontal and vertical through-runs must be distinct objects!
+    assert h_spans[0] is not v_spans[0]
+    print(f"[PASS] B.09 Junction Classifier verified: 4-way crossover split into 2 through-pipes, T-branch preserved!")
+
+
 def test_factory_config():
     """Verify get_configured_orchestrator picks up environment variables."""
     os.environ["DETECTOR_IMPL"] = "sahi"
@@ -163,4 +220,6 @@ if __name__ == "__main__":
     test_piping_id_parser_regex()
     test_mock_orchestrator_dependency_injection()
     test_paddleocr_extractor_single_pass()
+    test_skeleton_tracer_extracts_graph_edges()
+    test_crossover_and_t_junction_classification()
     test_factory_config()
