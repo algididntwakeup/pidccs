@@ -44,20 +44,31 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - STORAGE_DIR=/app/data/storage
       - WEIGHTS_DIR=/app/runs
+      - DETECTOR_IMPL=yolo
+      - OCR_IMPL=rapidocr
+      - TRACER_IMPL=skeleton
+      - PYTHONPATH=/app:/pidcorr:/app/..
       - OMP_NUM_THREADS=1
       - KMP_DUPLICATE_LIB_OK=TRUE
     volumes:
       - ./backend:/app
       - ./pidcorr:/pidcorr
+      - ./pidcorr:/app/pidcorr
       - ./runs:/app/runs
       - ./data:/app/data
-      - ./Contoh P&ID:/app/Contoh P&ID
+      - "./Contoh P&ID:/app/Contoh P&ID"
       - ./.pidcache:/app/.pidcache
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   worker:
     build:
@@ -72,14 +83,19 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - STORAGE_DIR=/app/data/storage
       - WEIGHTS_DIR=/app/runs
+      - DETECTOR_IMPL=yolo
+      - OCR_IMPL=rapidocr
+      - TRACER_IMPL=skeleton
+      - PYTHONPATH=/app:/pidcorr:/app/..
       - OMP_NUM_THREADS=1
       - KMP_DUPLICATE_LIB_OK=TRUE
     volumes:
       - ./backend:/app
       - ./pidcorr:/pidcorr
+      - ./pidcorr:/app/pidcorr
       - ./runs:/app/runs
       - ./data:/app/data
-      - ./Contoh P&ID:/app/Contoh P&ID
+      - "./Contoh P&ID:/app/Contoh P&ID"
       - ./.pidcache:/app/.pidcache
     depends_on:
       postgres:
@@ -99,7 +115,8 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - NEXT_PUBLIC_WS_URL=ws://localhost:8000
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   postgres_data:

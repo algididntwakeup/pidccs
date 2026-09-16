@@ -29,13 +29,20 @@ hanya proses deteksi sedikit lebih lama.
 
 CARA MENJALANKAN
 ----------------
-  Langkah 1.  Dobel-klik  "1 - Install (jalankan sekali).bat"
-              Tunggu sampai selesai (5-15 menit, sekali saja).
+Pilihan A: MODERN WEB PLATFORM (Sangat Direkomendasikan)
+  1. Menggunakan Docker (On-Premise Containerized):
+     - Pastikan Docker Desktop sudah aktif.
+     - Dobel-klik "start_docker.bat".
+     - Buka browser di http://localhost:3000.
+     - Backend API & Dokumentasi Swagger otomatis tersedia di http://localhost:8000/docs.
 
-  Langkah 2.  Dobel-klik  "2 - Buka GUI.bat"
-              Jendela aplikasi akan muncul dalam beberapa detik.
+  2. Menggunakan Mode Lokal (Tanpa Docker):
+     - Dobel-klik "start_local.bat".
+     - Backend FastAPI (Port 8000) dan Next.js Web UI (Port 3000) akan berjalan di terminal terpisah.
 
-Untuk pemakaian berikutnya cukup Langkah 2 saja.
+Pilihan B: DESKTOP GUI LAMA (Legacy)
+  Langkah 1. Dobel-klik "1 - Install (jalankan sekali).bat" (hanya sekali).
+  Langkah 2. Dobel-klik "2 - Buka GUI.bat" untuk membuka jendela desktop PyQt5.
 
 
 CARA MEMAKAI (SINGKAT)
