@@ -1,0 +1,3 @@
+# Robots.txt for P&ID Studio
+User-agent: *
+Disallow: /api/
