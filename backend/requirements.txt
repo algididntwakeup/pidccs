@@ -38,3 +38,10 @@ pandas>=2.2.0
 Pillow>=10.4.0
 shapely>=2.0.0
 httpx>=0.27.0
+
+# Database Testing (SQLite async adapter)
+aiosqlite>=0.20.0
+
+# Automated Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
