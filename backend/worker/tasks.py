@@ -39,6 +39,52 @@ def publish_progress(redis_client, job_id: str, step: str, current: int, total: 
         pass
 
 
+async def _save_detection_to_db(job_id: str, sheet_id: str, result: dict, systems: list):
+    """Persist completed detection and API RP 970 circuits to database."""
+    from app.db.session import AsyncSessionLocal
+    from app.models.sheet import Sheet
+    from app.models.job import Job
+
+    async with AsyncSessionLocal() as session:
+        sheet = await session.get(Sheet, sheet_id)
+        if sheet:
+            sheet.result_json = result
+            sheet.systems_json = systems
+            sheet.status = "detected"
+            sheet.width = result.get("w")
+            sheet.height = result.get("h")
+        job = await session.get(Job, job_id)
+        if job:
+            job.status = "completed"
+            job.progress_pct = 100
+            job.step = "completed"
+            job.message = "Digitasi & Sistemisasi selesai."
+            job.completed_at = datetime.utcnow()
+        await session.commit()
+
+
+async def _save_error_to_db(job_id: str, sheet_id: str, err_msg: str):
+    """Persist job failure to database."""
+    from app.db.session import AsyncSessionLocal
+    from app.models.sheet import Sheet
+    from app.models.job import Job
+
+    try:
+        async with AsyncSessionLocal() as session:
+            sheet = await session.get(Sheet, sheet_id)
+            if sheet:
+                sheet.status = "error"
+            job = await session.get(Job, job_id)
+            if job:
+                job.status = "failed"
+                job.error = err_msg
+                job.message = f"Error: {err_msg}"
+                job.completed_at = datetime.utcnow()
+            await session.commit()
+    except Exception as e:
+        print(f"[Worker] Failed to write error to DB: {e}")
+
+
 @celery_app.task(bind=True, name="detect_sheet_task")
 def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi: int = 350, rot: int = 0):
     """Celery background task for P&ID digitization & systemization."""
@@ -79,6 +125,13 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
             # Tiling failure is non-fatal to detection results
             pass
 
+        # 4. Save results to PostgreSQL database
+        publish_progress(r_client, job_id, "saving", 98, 100, "Menyimpan hasil ke database...")
+        try:
+            asyncio.run(_save_detection_to_db(job_id, sheet_id, result, systems))
+        except Exception as db_err:
+            print(f"[Worker] DB commit error: {db_err}")
+
         publish_progress(r_client, job_id, "completed", 100, 100, "Digitasi & Sistemisasi selesai.")
 
         return {
@@ -91,5 +144,9 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
 
     except Exception as exc:
         err_msg = str(exc)
+        try:
+            asyncio.run(_save_error_to_db(job_id, sheet_id, err_msg))
+        except Exception:
+            pass
         publish_progress(r_client, job_id, "failed", 0, 100, f"Error: {err_msg}")
         raise exc

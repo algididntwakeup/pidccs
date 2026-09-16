@@ -21,6 +21,29 @@ async def validate_sheet(
         raise HTTPException(status_code=404, detail="Sheet not found")
 
     if not sheet.result_json:
+        # Fallback: check Redis for completed Celery task results
+        try:
+            import redis, json
+            from ..config import settings
+            r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            for key in r.keys("celery-task-meta-*"):
+                raw = r.get(key)
+                if not raw:
+                    continue
+                meta = json.loads(raw)
+                data = meta.get("result")
+                if isinstance(data, dict) and data.get("sheet_id") == sheet_id and "result" in data:
+                    sheet.result_json = data["result"]
+                    sheet.systems_json = data.get("systems") or GroupingService.compute_circuits(data["result"])
+                    sheet.status = "detected"
+                    sheet.width = data["result"].get("w")
+                    sheet.height = data["result"].get("h")
+                    await db.commit()
+                    break
+        except Exception as rec_err:
+            print(f"[ValidationRouter] Redis recovery fallback error: {rec_err}")
+
+    if not sheet.result_json:
         raise HTTPException(status_code=400, detail="Sheet has not been processed yet")
 
     report = GroupingService.validate(sheet.result_json)

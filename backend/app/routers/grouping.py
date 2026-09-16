@@ -25,6 +25,29 @@ async def get_corrosion_systems(
         return sheet.systems_json
 
     if not sheet.result_json:
+        # Fallback: check Redis for completed Celery task results
+        try:
+            import redis, json
+            from ..config import settings
+            r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            for key in r.keys("celery-task-meta-*"):
+                raw = r.get(key)
+                if not raw:
+                    continue
+                meta = json.loads(raw)
+                data = meta.get("result")
+                if isinstance(data, dict) and data.get("sheet_id") == sheet_id and "result" in data:
+                    sheet.result_json = data["result"]
+                    sheet.systems_json = data.get("systems") or GroupingService.compute_circuits(data["result"])
+                    sheet.status = "detected"
+                    sheet.width = data["result"].get("w")
+                    sheet.height = data["result"].get("h")
+                    await db.commit()
+                    return sheet.systems_json
+        except Exception as rec_err:
+            print(f"[GroupingRouter] Redis recovery fallback error: {rec_err}")
+
+    if not sheet.result_json:
         raise HTTPException(status_code=400, detail="Sheet has no detection results")
 
     circuits = GroupingService.compute_circuits(sheet.result_json)

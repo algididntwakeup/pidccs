@@ -180,19 +180,51 @@ export default function ProjectWorkspace() {
       const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${job.job_id}`;
       const ws = new WebSocket(wsUrl);
 
+      let completedHandled = false;
+      let pollInterval: any = null;
+
+      const onCompleted = () => {
+        if (completedHandled) return;
+        completedHandled = true;
+        if (pollInterval) clearInterval(pollInterval);
+        try { ws.close(); } catch (e) {}
+        setDetecting(false);
+        setProgressPct(100);
+        setProgressMsg('Digitasi & Sistemisasi selesai.');
+
+        // Refresh project and active sheet state
+        fetchProject(projectId).then((p) => {
+          setProject(p);
+          const updatedSheet = p.sheets?.find((sh) => sh.id === activeSheet.id);
+          if (updatedSheet) {
+            setActiveSheet(updatedSheet);
+          }
+        });
+        fetchResult(projectId, activeSheet.id).then(setResult).catch(console.error);
+        fetchSystems(projectId, activeSheet.id).then(setSystems).catch(console.error);
+        fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
+      };
+
+      // Periodic polling fallback in case WebSocket drops or times out
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await fetchProject(projectId);
+          const s = res.sheets?.find((sh) => sh.id === activeSheet.id);
+          if (s && s.status === 'detected') {
+            onCompleted();
+          }
+        } catch (e) {}
+      }, 3000);
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.pct !== undefined) setProgressPct(data.pct);
           if (data.message) setProgressMsg(data.message);
           if (data.step === 'completed') {
-            ws.close();
-            setDetecting(false);
-            // Reload sheet data
-            fetchResult(projectId, activeSheet.id).then(setResult);
-            fetchSystems(projectId, activeSheet.id).then(setSystems);
-            fetchValidation(projectId, activeSheet.id).then(setValidation);
+            onCompleted();
           } else if (data.step === 'failed') {
+            if (pollInterval) clearInterval(pollInterval);
             ws.close();
             setDetecting(false);
             alert('Detection error: ' + data.message);
@@ -201,16 +233,7 @@ export default function ProjectWorkspace() {
       };
 
       ws.onerror = () => {
-        // Fallback polling if WS is not reachable
-        const interval = setInterval(async () => {
-          const res = await fetchProject(projectId);
-          const s = res.sheets.find((sh) => sh.id === activeSheet.id);
-          if (s && s.status === 'detected') {
-            clearInterval(interval);
-            setDetecting(false);
-            setActiveSheet(s);
-          }
-        }, 3000);
+        // WebSocket error, fallback polling continues to monitor progress
       };
     } catch (err) {
       setDetecting(false);
