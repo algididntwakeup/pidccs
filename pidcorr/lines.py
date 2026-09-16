@@ -424,6 +424,139 @@ def suppress_box_outlines(segs, boxes, dpi=350, band_pt=7):
     return out
 
 
+def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038):
+    """Buang segmen yang berada di atau sangat dekat dengan margin perimeter kertas luar.
+    Garis tepi bingkai gambar (drawing frame border), tick koordinat tepi, dan garis batas
+    kertas terluar adalah artifak drafting lembar gambar, BUKAN pipa proses."""
+    if not segs:
+        return []
+    W, H = page_wh
+    mx = int(W * margin_ratio)
+    my = int(H * margin_ratio)
+    out = []
+    for s in segs:
+        xs = [p[0] for p in s.points]
+        ys = [p[1] for p in s.points]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+
+        # 1. Terletak seluruhnya di dalam pita margin tepi kertas
+        if y_max <= my or y_min >= H - my or x_max <= mx or x_min >= W - mx:
+            continue
+
+        # 2. Garis panjang yang membentang di dekat perimeter (bingkai tepi gambar)
+        if (y_max <= int(my * 1.8) or y_min >= H - int(my * 1.8)) and (x_max - x_min) >= 0.35 * W:
+            continue
+        if (x_max <= int(mx * 1.8) or x_min >= W - int(mx * 1.8)) and (y_max - y_min) >= 0.35 * H:
+            continue
+
+        out.append(s)
+    return out
+
+
+def suppress_revision_clouds(segs):
+    """Buang polyline yang membentuk awan revisi (scalloped revision clouds) atau loop tertutup.
+    Pipa proses adalah garis ortogonal (lurus / siku), sedangkan awan revisi berbentuk lengkungan bergelombang."""
+    if not segs:
+        return []
+    out = []
+    for s in segs:
+        pts = s.points
+        if len(pts) < 5:
+            out.append(s)
+            continue
+
+        p0, p1 = pts[0], pts[-1]
+        disp = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2) ** 0.5
+        total_len = s.length
+
+        # 1. Closed/semi-closed loop dengan perimeter panjang
+        if disp < 60 and total_len > 120:
+            continue
+
+        # 2. Tortuosity tinggi (bergelombang rapat / zigzag berkelok)
+        if disp > 0 and (total_len / disp) > 2.8:
+            continue
+
+        # 3. Proporsi segmen non-ortogonal yang dominan
+        non_ortho = 0
+        for (xa, ya), (xb, yb) in zip(pts[:-1], pts[1:]):
+            dx, dy = abs(xb - xa), abs(yb - ya)
+            if dx > 3 and dy > 3 and min(dx, dy) / max(dx, dy) > 0.35:
+                non_ortho += 1
+        if len(pts) >= 7 and (non_ortho / (len(pts) - 1)) > 0.50:
+            continue
+
+        out.append(s)
+    return out
+
+
+def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
+    """Sambungkan segmen pipa kolinear yang terpotong celah kecil (gap di sekitar label/nozzle/header).
+    Menjaga kontinuitas pipa panjang seperti HP/LP Production Headers."""
+    if not segs or len(segs) < 2:
+        return segs
+
+    out = list(segs)
+    merged = True
+    while merged:
+        merged = False
+        n = len(out)
+        for i in range(n):
+            if merged:
+                break
+            s1 = out[i]
+            if len(s1.points) != 2:
+                continue
+            (x1a, y1a), (x1b, y1b) = s1.points[0], s1.points[-1]
+            s1_vert = abs(x1a - x1b) <= tol_px
+            s1_horiz = abs(y1a - y1b) <= tol_px
+
+            for j in range(i + 1, n):
+                s2 = out[j]
+                if len(s2.points) != 2:
+                    continue
+                (x2a, y2a), (x2b, y2b) = s2.points[0], s2.points[-1]
+                s2_vert = abs(x2a - x2b) <= tol_px
+                s2_horiz = abs(y2a - y2b) <= tol_px
+
+                # Kolinear vertikal
+                if s1_vert and s2_vert and abs((x1a + x1b) / 2 - (x2a + x2b) / 2) <= tol_px:
+                    y1_min, y1_max = min(y1a, y1b), max(y1a, y1b)
+                    y2_min, y2_max = min(y2a, y2b), max(y2a, y2b)
+                    gap1 = y2_min - y1_max
+                    gap2 = y1_min - y2_max
+                    if (0 <= gap1 <= max_gap_px) or (0 <= gap2 <= max_gap_px):
+                        xm = int(round((x1a + x1b + x2a + x2b) / 4.0))
+                        new_y_min = min(y1_min, y2_min)
+                        new_y_max = max(y1_max, y2_max)
+                        merged_run = PipeRun([(xm, new_y_min), (xm, new_y_max)], axis="v")
+                        out.pop(j)
+                        out.pop(i)
+                        out.append(merged_run)
+                        merged = True
+                        break
+
+                # Kolinear horizontal
+                elif s1_horiz and s2_horiz and abs((y1a + y1b) / 2 - (y2a + y2b) / 2) <= tol_px:
+                    x1_min, x1_max = min(x1a, x1b), max(x1a, x1b)
+                    x2_min, x2_max = min(x2a, x2b), max(x2a, x2b)
+                    gap1 = x2_min - x1_max
+                    gap2 = x1_min - x2_max
+                    if (0 <= gap1 <= max_gap_px) or (0 <= gap2 <= max_gap_px):
+                        ym = int(round((y1a + y1b + y2a + y2b) / 4.0))
+                        new_x_min = min(x1_min, x2_min)
+                        new_x_max = max(x1_max, x2_max)
+                        merged_run = PipeRun([(new_x_min, ym), (new_x_max, ym)], axis="h")
+                        out.pop(j)
+                        out.pop(i)
+                        out.append(merged_run)
+                        merged = True
+                        break
+
+    return out
+
+
 def extract_pipe_runs(img_bgr, dpi=350, detections=None, furniture=None, diagonal=False,
                       boxes=None, **kw):
     """Pipeline lengkap: segmen -> buang tepi-box simbol -> buang interior equipment ->
@@ -437,6 +570,12 @@ def extract_pipe_runs(img_bgr, dpi=350, detections=None, furniture=None, diagona
     if boxes is None:
         boxes = detect_boxes(img_bgr, dpi=dpi)
     segs = suppress_box_outlines(segs, boxes, dpi=dpi)
+
+    # Drafting suppressions & header continuity
+    segs = suppress_drawing_margins(segs, page_wh=(img_bgr.shape[1], img_bgr.shape[0]))
+    segs = suppress_revision_clouds(segs)
+    segs = bridge_collinear_headers(segs)
+
     if diagonal:
         nodes = [pt for s in segs for pt in (s.points[0], s.points[-1])]
         segs += extract_diagonal_segments(img_bgr, dpi, nodes, detections)

@@ -85,6 +85,10 @@ export function getRawImageUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/raw`;
 }
 
+export function getMarkedImageUrl(projectId: string, sheetId: string, mode: 'system' | 'circuit' = 'system'): string {
+  return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/export?format=png&mode=${mode}`;
+}
+
 export function getDziUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/dzi`;
 }

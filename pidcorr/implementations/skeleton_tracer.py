@@ -12,6 +12,9 @@ from ..lines import (
     suppress_furniture,
     suppress_box_outlines,
     detect_boxes,
+    suppress_drawing_margins,
+    suppress_revision_clouds,
+    bridge_collinear_headers,
 )
 
 
@@ -380,5 +383,10 @@ class SkeletonLineTracer(BaseLineTracer):
         boxes = detect_boxes(img_bgr)
         if boxes:
             filtered = suppress_box_outlines(filtered, boxes)
+
+        # Drafting suppressions & header continuity
+        filtered = suppress_drawing_margins(filtered, page_wh=(W, H))
+        filtered = suppress_revision_clouds(filtered)
+        filtered = bridge_collinear_headers(filtered)
 
         return filtered

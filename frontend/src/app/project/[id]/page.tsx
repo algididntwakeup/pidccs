@@ -43,6 +43,7 @@ import {
   fetchValidation,
   triggerDetection,
   getRawImageUrl,
+  getMarkedImageUrl,
   getExportUrl,
   uploadLineList,
   fetchProjectTopology,
@@ -68,6 +69,7 @@ export default function ProjectWorkspace() {
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [topology, setTopology] = useState<ProjectTopologyResponse | null>(null);
 
+  const [showOverlay, setShowOverlay] = useState<boolean>(true);
   const [detecting, setDetecting] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [progressPct, setProgressPct] = useState(0);
@@ -135,12 +137,16 @@ export default function ProjectWorkspace() {
         viewerRef.current.destroy();
       }
 
+      const initialUrl = showOverlay && result
+        ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
+        : getRawImageUrl(projectId, activeSheet.id);
+
       viewer = OpenSeadragon.default({
         element: canvasRef.current,
         prefixUrl: 'https://cdnjs.cloudflare.com/ajax/libs/openseadragon/4.1.1/images/',
         tileSources: {
           type: 'image',
-          url: getRawImageUrl(projectId, activeSheet.id),
+          url: initialUrl,
         },
         showNavigationControl: false,
         animationTime: 0.3,
@@ -164,7 +170,33 @@ export default function ProjectWorkspace() {
         viewerRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, activeSheet]);
+
+  // Dynamically swap between Raw P&ID and Marked Overlay while preserving viewport
+  const hasResult = Boolean(result);
+  useEffect(() => {
+    if (!viewerRef.current || !activeSheet || !projectId) return;
+    const viewer = viewerRef.current;
+    if (!viewer.viewport) return;
+
+    const targetUrl = showOverlay && hasResult
+      ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
+      : getRawImageUrl(projectId, activeSheet.id);
+
+    const bounds = viewer.viewport.getBounds();
+    viewer.open({
+      type: 'image',
+      url: targetUrl,
+    });
+    const onOpen = () => {
+      if (viewer.viewport && bounds) {
+        viewer.viewport.fitBounds(bounds, true);
+      }
+      viewer.removeHandler('open', onOpen);
+    };
+    viewer.addHandler('open', onOpen);
+  }, [showOverlay, mode, hasResult, projectId, activeSheet]);
 
   // Trigger Detection Pipeline
   const handleRunDetection = async () => {
@@ -519,6 +551,23 @@ export default function ProjectWorkspace() {
             >
               <Maximize2 className="w-4 h-4" />
             </button>
+            {result && (
+              <>
+                <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-1" />
+                <button
+                  onClick={() => setShowOverlay(!showOverlay)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
+                    showOverlay
+                      ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                  title="Toggle Color-Coded Circuit Marking on Canvas"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>{showOverlay ? 'Overlay: ON' : 'Overlay: OFF'}</span>
+                </button>
+              </>
+            )}
           </div>
 
           {/* Canvas Overlay Legend */}
