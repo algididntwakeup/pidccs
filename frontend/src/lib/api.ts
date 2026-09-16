@@ -88,3 +88,32 @@ export function getRawImageUrl(projectId: string, sheetId: string): string {
 export function getDziUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/dzi`;
 }
+
+export async function uploadLineList(projectId: string, file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/linelist`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) throw new Error('Failed to upload line list spreadsheet');
+  return res.json();
+}
+
+export async function fetchLineList(projectId: string) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/linelist`);
+  if (!res.ok) throw new Error('Failed to fetch project line list');
+  return res.json();
+}
+
+export async function fetchProjectTopology(projectId: string) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/topology`);
+  if (!res.ok) throw new Error('Failed to fetch project topology');
+  return res.json();
+}
+
+export async function fetchProjectCircuits(projectId: string) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/circuits`);
+  if (!res.ok) throw new Error('Failed to fetch project circuits');
+  return res.json();
+}

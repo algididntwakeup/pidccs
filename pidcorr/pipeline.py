@@ -397,6 +397,18 @@ def run_pipeline(img_bgr, image_path="", dpi=350, rot=0, weights=FINETUNE_WEIGHT
         split_at_connection_points(out, dpi=dpi)
         if len(out["runs"]) != n0:
             say(f"run dipecah di spec break: {n0} -> {len(out['runs'])}")
+
+    # 6) deteksi off-page connector (OPC)
+    opcs = []
+    try:
+        from .opc_detector import detect_off_page_connectors
+        opcs = detect_off_page_connectors(out, tokens=tokens, dpi=dpi)
+        if opcs:
+            say(f"off-page connector: {len(opcs)} ditemukan")
+    except Exception:
+        pass
+    out["opcs"] = opcs
+
     say("selesai.")
     return out
 

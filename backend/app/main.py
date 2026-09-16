@@ -11,7 +11,7 @@ if _ROOT not in sys.path:
 
 from .config import settings
 from .db.session import init_db
-from .routers import projects, detection, results, grouping, validation, export, tiles, ws, linelist
+from .routers import projects, detection, results, grouping, validation, export, tiles, ws, linelist, topology
 
 
 @asynccontextmanager
@@ -51,6 +51,7 @@ app.include_router(validation.router, prefix=api_prefix)
 app.include_router(export.router, prefix=api_prefix)
 app.include_router(tiles.router, prefix=api_prefix)
 app.include_router(linelist.router, prefix=api_prefix)
+app.include_router(topology.router, prefix=api_prefix)
 app.include_router(ws.router)
 
 

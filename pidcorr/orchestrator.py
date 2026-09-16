@@ -193,6 +193,15 @@ class PipelineOrchestrator:
             except Exception:
                 pass
 
+        # Detect Off-Page Connectors (OPC)
+        opcs = []
+        try:
+            from .opc_detector import detect_off_page_connectors
+            opcs = detect_off_page_connectors(result, tokens=tokens, dpi=dpi)
+        except Exception:
+            pass
+        result["opcs"] = opcs
+
         if progress:
             progress(f"Selesai dalam {time.time() - t0:.1f} detik.")
 
