@@ -28,11 +28,24 @@ def execute_sheet_detection(
     """
     abs_path = storage.get_file_path(file_rel_path)
     if not os.path.exists(abs_path):
-        raise FileNotFoundError(f"Drawing file not found at: {abs_path}")
+        if os.path.isabs(file_rel_path) and os.path.exists(file_rel_path):
+            abs_path = file_rel_path
+        elif os.path.exists(os.path.join(_ROOT, file_rel_path)):
+            abs_path = os.path.join(_ROOT, file_rel_path)
+        else:
+            raise FileNotFoundError(f"Drawing file not found at: {abs_path}")
 
-    def _say(msg: str):
+    def _say(*args, **kwargs):
         if not progress_callback:
             return
+        if len(args) == 2 and isinstance(args[0], (int, float)) and isinstance(args[1], (int, float)):
+            current, total = int(args[0]), int(args[1])
+            step = "ocr_tiled"
+            msg = f"OCR tile {current}/{total}"
+            progress_callback(step, current, total, msg)
+            return
+
+        msg = str(args[0]) if args else ""
         step = "processing"
         current, total = 0, 100
         if "OCR tile" in msg:
