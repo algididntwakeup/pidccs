@@ -1,6 +1,7 @@
+from typing import Optional, Dict, Any
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime
+from sqlalchemy import String, Text, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..db.base import Base
@@ -15,6 +16,9 @@ class Project(Base):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    # Line List operating data payload
+    linelist_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

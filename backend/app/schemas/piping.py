@@ -20,6 +20,16 @@ class PipingID(BaseModel):
         default="none", description="Association linkage mechanism"
     )
     manual: bool = Field(default=False, description="True if manually created or adjusted by engineer")
+    # Operating Data Enrichment (Phase C - API RP 970)
+    operating_pressure: Optional[float] = Field(default=None, description="Operating pressure from line list (barg/psig)")
+    operating_temperature: Optional[float] = Field(default=None, description="Operating temperature from line list (C/F)")
+    design_pressure: Optional[float] = Field(default=None, description="Design pressure from line list / spec")
+    design_temperature: Optional[float] = Field(default=None, description="Design temperature from line list / spec")
+    fluid_phase: Optional[Literal["L", "G", "2P", ""]] = Field(default="", description="Process fluid phase (Liquid/Gas/2-Phase)")
+    material: Optional[str] = Field(default="", description="Base material (e.g. CS, SS) from line list / class")
+    insulation: Optional[str] = Field(default="", description="Insulation flag from line list")
+    corrosion_allowance: Optional[float] = Field(default=None, description="Corrosion allowance (mm)")
+    corrosion_loop: Optional[str] = Field(default="", description="Corrosion loop / circuit tag from line list")
 
 
 class PipingIDPatch(BaseModel):
@@ -37,3 +47,12 @@ class PipingIDPatch(BaseModel):
     extra_runs: Optional[List[int]] = None
     state: Optional[Literal["attached", "leader", "none", "manual", "propagated"]] = None
     manual: Optional[bool] = True
+    operating_pressure: Optional[float] = None
+    operating_temperature: Optional[float] = None
+    design_pressure: Optional[float] = None
+    design_temperature: Optional[float] = None
+    fluid_phase: Optional[Literal["L", "G", "2P", ""]] = None
+    material: Optional[str] = None
+    insulation: Optional[str] = None
+    corrosion_allowance: Optional[float] = None
+    corrosion_loop: Optional[str] = None

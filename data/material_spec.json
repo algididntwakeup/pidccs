@@ -1,0 +1,110 @@
+{
+  "classes": {
+    "CDA": {
+      "material": "SS",
+      "name": "316L Stainless Steel Class 150",
+      "design_pressure_barg": 19.6,
+      "design_temperature_c": 120.0,
+      "corrosion_allowance_mm": 0.0
+    },
+    "CDE": {
+      "material": "SS",
+      "name": "316 Stainless Steel Class 150",
+      "design_pressure_barg": 19.6,
+      "design_temperature_c": 120.0,
+      "corrosion_allowance_mm": 0.0
+    },
+    "CCC": {
+      "material": "CS",
+      "name": "Carbon Steel A106-B Class 150",
+      "design_pressure_barg": 15.3,
+      "design_temperature_c": 90.0,
+      "corrosion_allowance_mm": 3.0
+    },
+    "CCB": {
+      "material": "CS",
+      "name": "Carbon Steel Class 150",
+      "design_pressure_barg": 15.3,
+      "design_temperature_c": 90.0,
+      "corrosion_allowance_mm": 3.0
+    },
+    "ASA": {
+      "material": "CS",
+      "name": "Carbon Steel Low-Temperature A333-6",
+      "design_pressure_barg": 25.0,
+      "design_temperature_c": 150.0,
+      "corrosion_allowance_mm": 3.0
+    },
+    "ASB": {
+      "material": "CS",
+      "name": "Carbon Steel Class 300",
+      "design_pressure_barg": 25.0,
+      "design_temperature_c": 150.0,
+      "corrosion_allowance_mm": 3.0
+    },
+    "DSA": {
+      "material": "SS",
+      "name": "Duplex Stainless Steel 2205",
+      "design_pressure_barg": 50.0,
+      "design_temperature_c": 80.0,
+      "corrosion_allowance_mm": 0.0
+    },
+    "DSE": {
+      "material": "SS",
+      "name": "Duplex Stainless Steel 2205 High-Pressure",
+      "design_pressure_barg": 50.0,
+      "design_temperature_c": 80.0,
+      "corrosion_allowance_mm": 0.0
+    },
+    "DDE": {
+      "material": "SS",
+      "name": "Duplex Stainless Steel High-Pressure",
+      "design_pressure_barg": 50.0,
+      "design_temperature_c": 80.0,
+      "corrosion_allowance_mm": 0.0
+    },
+    "A1A2": {
+      "material": "CS",
+      "name": "ASME B31.3 Class 150 Carbon Steel",
+      "design_pressure_barg": 19.6,
+      "design_temperature_c": 100.0,
+      "corrosion_allowance_mm": 3.2
+    },
+    "B1A2": {
+      "material": "CS",
+      "name": "ASME B31.3 Class 300 Carbon Steel",
+      "design_pressure_barg": 51.1,
+      "design_temperature_c": 100.0,
+      "corrosion_allowance_mm": 3.2
+    },
+    "C1A2": {
+      "material": "CS",
+      "name": "ASME B31.3 Class 600 Carbon Steel",
+      "design_pressure_barg": 102.1,
+      "design_temperature_c": 100.0,
+      "corrosion_allowance_mm": 3.2
+    },
+    "A3A2": {
+      "material": "SS",
+      "name": "ASME B31.3 Class 150 304L Stainless Steel",
+      "design_pressure_barg": 19.0,
+      "design_temperature_c": 100.0,
+      "corrosion_allowance_mm": 0.0
+    },
+    "A4A2": {
+      "material": "SS",
+      "name": "ASME B31.3 Class 150 316L Stainless Steel",
+      "design_pressure_barg": 19.0,
+      "design_temperature_c": 100.0,
+      "corrosion_allowance_mm": 0.0
+    }
+  },
+  "generic_materials": {
+    "CS": "Carbon Steel",
+    "SS": "Stainless Steel",
+    "LTCS": "Low-Temperature Carbon Steel",
+    "DSS": "Duplex Stainless Steel",
+    "ALLOY": "Corrosion Resistant Alloy",
+    "GALV": "Galvanized Carbon Steel"
+  }
+}

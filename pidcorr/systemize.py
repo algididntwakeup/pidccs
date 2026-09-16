@@ -254,9 +254,14 @@ def run_color_map(systems):
 # piping_class,material). User bisa edit di Excel — mis. isi spec resmi perusahaan
 # (ASA -> CS dst). Class yg tak terdaftar fallback ke huruf ke-2 kode class (asumsi
 # baseline). Auto-reload bila file berubah (cek mtime) — tak perlu restart GUI.
+from datetime import datetime
+
 _MATMAP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "material_map.csv")
+_MATSPEC_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "data", "material_spec.json")
 _matmap, _matmap_mtime = {}, None
+_matspec, _matspec_mtime = {}, None
 
 
 def _load_matmap():
@@ -281,17 +286,46 @@ def _load_matmap():
     return _matmap
 
 
-def material_of(pclass):
-    """Token MATERIAL dari kode piping class. Urutan: (1) material_map.csv bila class
-    terdaftar (mapping resmi perusahaan, editable); (2) fallback ASUMSI baseline =
-    huruf ke-2 kode class (CDA→D, CCC→C, ASA→S — dari contoh penulis). Kode dipakai
-    apa adanya, tidak diterjemahkan ke nama material."""
+def _load_matspec():
+    global _matspec, _matspec_mtime
+    try:
+        mt = os.path.getmtime(_MATSPEC_PATH)
+    except OSError:
+        return _matspec or {}
+    if mt != _matspec_mtime:
+        try:
+            with open(_MATSPEC_PATH, "r", encoding="utf-8") as f:
+                _matspec = json.load(f)
+            _matspec_mtime = mt
+        except Exception:
+            pass
+    return _matspec or {}
+
+
+def material_of(pclass, explicit_mat=""):
+    """Token MATERIAL dari kode piping class atau data operasi line list.
+    Urutan prioritas:
+      (1) explicit_mat dari Line List / user edit bila ada.
+      (2) data/material_spec.json (spesifikasi resmi piping class).
+      (3) material_map.csv bila class terdaftar.
+      (4) fallback ASUMSI baseline = huruf ke-2 kode class (CDA->D, CCC->C).
+    """
+    if explicit_mat and str(explicit_mat).strip():
+        return str(explicit_mat).strip().upper()
+
     pc = (pclass or "").strip().upper()
     if not pc:
         return ""
+
+    spec = _load_matspec()
+    classes = spec.get("classes", {})
+    if pc in classes and classes[pc].get("material"):
+        return str(classes[pc]["material"]).strip().upper()
+
     m = _load_matmap().get(pc)
     if m:
-        return m
+        return m.upper()
+
     return pc[1] if len(pc) >= 2 else ""
 
 
@@ -308,38 +342,145 @@ _CIRCUIT_SHADES = [0.0, 0.5, -0.4, 0.7, -0.6, 0.3, -0.25]   # circuit-1 = warna 
 
 
 def circuitize(result):
-    """Pecah tiap corrosion system menjadi CIRCUIT berdasarkan kesamaan MATERIAL
-    (dari kode piping class) — API RP 970 5.6: circuit butuh 'common materials of
-    construction'. Deterministik. Return list system (spt systemize) + tambahan:
-      index (1-based), circuits: [{code '01.02', material, classes, color, run_idxs,
-      pid_idxs}]. System dgn 1 material -> 1 circuit = system itu sendiri (warna SAMA
-    dgn marking corrosion system); beda material -> warna gradasi dari warna system."""
+    """Pecah tiap corrosion system menjadi CIRCUIT berdasarkan:
+       1. Kesamaan MATERIAL konstruksi (API RP 970 5.6)
+       2. Batas FASA FLUIDA (Liquid vs Gas vs 2-Phase per API RP 970 5.6.1)
+       3. Corrosion Loop resmi dari Line List engineering.
+
+    Deterministik & auditable. Return list system + circuits: [{
+        code '01.02', material, classes, fluid_phase, color, run_idxs, pid_idxs,
+        operating_summary, provenance: {rule, evidence, source, confidence, timestamp}
+    }].
+    """
     pids = result.get("piping_ids", [])
     systems = systemize(result)
     lab = run_labels(result)
     out = []
+
+    # Helper map for accessing piping ID by index safely
+    pid_by_idx = {i: p for i, p in enumerate(pids)}
+
     for si, s in enumerate(systems):
-        # kelompokkan RUN (bukan hanya pid) menurut material — run hasil propagasi ikut,
-        # dan batas circuit jatuh persis di connection point karena run sudah dipecah di situ
+        # Kelompokkan run berdasarkan kriteria API RP 970
         groups = defaultdict(list)
+        run_meta = {}
+
         for ri in s["run_idxs"]:
-            groups[material_of((lab[ri] or {}).get("pclass"))].append(ri)
-        mats = sorted(groups, key=lambda m: (-len(groups[m]), m))
+            L = lab[ri] or {}
+            src_idx = L.get("src_idx")
+            p = pid_by_idx.get(src_idx, {}) if src_idx is not None else {}
+
+            p_pclass = (L.get("pclass") or p.get("pclass") or "").strip().upper()
+            p_mat = material_of(p_pclass, p.get("material"))
+            p_phase = str(p.get("fluid_phase") or "").strip().upper()
+            p_loop = str(p.get("corrosion_loop") or "").strip()
+
+            # Partition key: (material, fluid_phase, corrosion_loop)
+            key = (p_mat, p_phase, p_loop)
+            groups[key].append(ri)
+            run_meta[ri] = {"mat": p_mat, "phase": p_phase, "loop": p_loop, "pclass": p_pclass}
+
+        # Urutkan circuit: jumlah pipa terbanyak dulu
+        sorted_keys = sorted(groups.keys(), key=lambda k: (-len(groups[k]), k[0], k[1], k[2]))
         circuits = []
-        for ci, m in enumerate(mats):
-            run_idxs = sorted(groups[m])
-            pidx = [pi for pi in s["pid_idxs"]
-                    if material_of(pids[pi].get("pclass")) == m]
+
+        for ci, key in enumerate(sorted_keys):
+            k_mat, k_phase, k_loop = key
+            run_idxs = sorted(groups[key])
+
+            # Hubungkan piping IDs yang cocok dengan key circuit ini
+            pidx = []
+            for pi in s["pid_idxs"]:
+                p = pids[pi]
+                p_pclass = (p.get("pclass") or "").strip().upper()
+                p_mat = material_of(p_pclass, p.get("material"))
+                p_phase = str(p.get("fluid_phase") or "").strip().upper()
+                p_loop = str(p.get("corrosion_loop") or "").strip()
+
+                if (p_mat, p_phase, p_loop) == key:
+                    pidx.append(pi)
+                elif not k_phase and not k_loop and p_mat == k_mat:
+                    pidx.append(pi)
+
+            # Hitung ringkasan data operasi across member PIDs
+            member_temps = [
+                pids[pi].get("operating_temperature")
+                for pi in pidx
+                if pids[pi].get("operating_temperature") is not None
+            ]
+            member_press = [
+                pids[pi].get("operating_pressure")
+                for pi in pidx
+                if pids[pi].get("operating_pressure") is not None
+            ]
+            member_cas = [
+                pids[pi].get("corrosion_allowance")
+                for pi in pidx
+                if pids[pi].get("corrosion_allowance") is not None
+            ]
+
+            op_summary = {
+                "avg_temperature_c": round(sum(member_temps) / len(member_temps), 1) if member_temps else None,
+                "avg_pressure_barg": round(sum(member_press) / len(member_press), 1) if member_press else None,
+                "corrosion_allowance_mm": min(member_cas) if member_cas else None,
+                "corrosion_loop": k_loop or None,
+            }
+
+            # Buat Circuit Code (e.g. '01.01')
+            code = f"{si + 1:02d}.{ci + 1:02d}"
+            circuit_classes = sorted({(lab[ri] or {}).get("pclass", "") for ri in run_idxs
+                                      if (lab[ri] or {}).get("pclass")})
+
+            # Tentukan Jejak Audit (Provenance) per API RP 970
+            now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+            if k_loop:
+                rule = "LINE_LIST_CORROSION_LOOP"
+                evidence = f"Direct match from engineering Line List loop tag '{k_loop}'"
+                source = "linelist"
+                conf = 1.0
+            elif k_phase:
+                rule = "API_RP_970_PHASE_BOUNDARY"
+                phase_label = {"L": "Liquid", "G": "Gas/Vapor", "2P": "Two-Phase"}.get(k_phase, k_phase)
+                evidence = f"Partitioned per API RP 970 §5.6.1 fluid phase boundary ({phase_label}, Material: {k_mat})"
+                source = "linelist" if any(pids[pi].get("fluid_phase") for pi in pidx) else "heuristic"
+                conf = 0.95
+            elif any(c in _load_matspec().get("classes", {}) for c in circuit_classes):
+                rule = "API_RP_970_MATERIAL_SPEC"
+                matching_classes = [c for c in circuit_classes if c in _load_matspec().get("classes", {})]
+                evidence = f"Material '{k_mat}' verified from structured specification data/material_spec.json for class {matching_classes}"
+                source = "material_spec"
+                conf = 0.95
+            else:
+                rule = "API_RP_970_MATERIAL_SPLIT"
+                evidence = f"Partitioned by material class '{k_mat}'"
+                source = "piping_class"
+                conf = 0.85
+
+            provenance = {
+                "circuit_code": code,
+                "rule": rule,
+                "evidence": evidence,
+                "source": source,
+                "confidence": conf,
+                "timestamp": now_iso,
+            }
+
             circuits.append({
-                "code": f"{si + 1:02d}.{ci + 1:02d}",
-                "material": m,
-                "classes": sorted({(lab[ri] or {}).get("pclass", "") for ri in run_idxs
-                                   if (lab[ri] or {}).get("pclass")}),
-                "color": s["color"] if len(mats) == 1
+                "code": code,
+                "material": k_mat,
+                "fluid_phase": k_phase,
+                "classes": circuit_classes,
+                "color": s["color"] if len(sorted_keys) == 1
                          else _shade(s["color"], _CIRCUIT_SHADES[ci % len(_CIRCUIT_SHADES)]),
                 "run_idxs": run_idxs,
                 "pid_idxs": pidx,
+                "operating_summary": op_summary,
+                "provenance": provenance,
             })
-        s2 = dict(s); s2["index"] = si + 1; s2["circuits"] = circuits
+
+        s2 = dict(s)
+        s2["index"] = si + 1
+        s2["circuits"] = circuits
         out.append(s2)
+
     return out
