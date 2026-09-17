@@ -25,15 +25,20 @@ import {
   X,
   Check,
   ArrowRight,
+  Crosshair,
+  Eye,
+  Component,
 } from 'lucide-react';
 import {
   ProjectResponse,
   SheetResponse,
   DigitizationResult,
   CorrosionSystem,
+  CorrosionCircuit,
   ValidationReport,
   PipingID,
   OffPageConnector,
+  SymbolDetection,
   ProjectTopologyResponse,
 } from '@/types/schema';
 import {
@@ -75,6 +80,9 @@ export default function ProjectWorkspace() {
   const [progressPct, setProgressPct] = useState(0);
 
   const [selectedPidIdx, setSelectedPidIdx] = useState<number | null>(null);
+  const [selectedSystemIdx, setSelectedSystemIdx] = useState<number | null>(null);
+  const [selectedCircuitCode, setSelectedCircuitCode] = useState<string | null>(null);
+  const [digitizeSubTab, setDigitizeSubTab] = useState<'lines' | 'symbols' | 'opcs'>('lines');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterFluid, setFilterFluid] = useState<string>('all');
 
@@ -88,6 +96,7 @@ export default function ProjectWorkspace() {
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
+  const osdModuleRef = useRef<any>(null);
 
   // Load project & sheets
   useEffect(() => {
@@ -132,6 +141,7 @@ export default function ProjectWorkspace() {
 
     import('openseadragon').then((OpenSeadragon) => {
       if (isCancelled || !canvasRef.current) return;
+      osdModuleRef.current = OpenSeadragon.default || OpenSeadragon;
 
       if (viewerRef.current) {
         viewerRef.current.destroy();
@@ -198,6 +208,220 @@ export default function ProjectWorkspace() {
     };
     viewer.addHandler('open', onOpen);
   }, [showOverlay, mode, isDetected, projectId, activeSheet]);
+
+  // Zoom & Pan to Bounding Box on OpenSeadragon Canvas with High-Visibility Overlay
+  const zoomToBbox = (minX: number, minY: number, maxX: number, maxY: number) => {
+    if (!viewerRef.current || !viewerRef.current.viewport) return;
+    const viewer = viewerRef.current;
+    const w = Math.max(maxX - minX, 60);
+    const h = Math.max(maxY - minY, 60);
+
+    // Padding around target for comfortable view (min 160px)
+    const padX = Math.max(w * 0.45, 160);
+    const padY = Math.max(h * 0.45, 160);
+    const targetX = Math.max(0, minX - padX);
+    const targetY = Math.max(0, minY - padY);
+    const targetW = w + padX * 2;
+    const targetH = h + padY * 2;
+
+    try {
+      let viewRect: any = null;
+      let targetRect: any = null;
+      const OSD = osdModuleRef.current || (window as any).OpenSeadragon;
+
+      if (viewer.viewport.imageToViewportRectangle) {
+        viewRect = viewer.viewport.imageToViewportRectangle(targetX, targetY, targetW, targetH);
+        targetRect = viewer.viewport.imageToViewportRectangle(minX, minY, maxX - minX, maxY - minY);
+      } else if (OSD && OSD.Rect) {
+        const item = viewer.world?.getItemAt(0);
+        const contentSize = item?.getContentSize() || { x: activeSheet?.width || 3000, y: activeSheet?.height || 2000 };
+        const normX = targetX / contentSize.x;
+        const normY = (targetY / contentSize.y) * (contentSize.y / contentSize.x);
+        const normW = targetW / contentSize.x;
+        const normH = (targetH / contentSize.y) * (contentSize.y / contentSize.x);
+        viewRect = new OSD.Rect(normX, normY, normW, normH);
+
+        const tNormX = minX / contentSize.x;
+        const tNormY = (minY / contentSize.y) * (contentSize.y / contentSize.x);
+        const tNormW = (maxX - minX) / contentSize.x;
+        const tNormH = ((maxY - minY) / contentSize.y) * (contentSize.y / contentSize.x);
+        targetRect = new OSD.Rect(tNormX, tNormY, tNormW, tNormH);
+      }
+
+      if (viewRect) {
+        viewer.viewport.fitBounds(viewRect, false);
+      }
+
+      // Add high-visibility glowing target overlay on the exact feature
+      if (targetRect && viewer.clearOverlays && viewer.addOverlay) {
+        viewer.clearOverlays();
+        const highlightEl = document.createElement('div');
+        highlightEl.style.border = '3px solid #6366f1'; // Indigo-500
+        highlightEl.style.backgroundColor = 'rgba(99, 102, 241, 0.18)';
+        highlightEl.style.borderRadius = '8px';
+        highlightEl.style.boxShadow = '0 0 25px rgba(99, 102, 241, 0.8), inset 0 0 15px rgba(99, 102, 241, 0.3)';
+        highlightEl.style.pointerEvents = 'none';
+        highlightEl.style.zIndex = '50';
+        highlightEl.className = 'animate-pulse';
+
+        viewer.addOverlay({
+          element: highlightEl,
+          location: targetRect,
+        });
+      }
+    } catch (e) {
+      console.error('Failed to zoom to bbox:', e);
+    }
+  };
+
+  const handleSelectPipingId = (p: PipingID, idx: number) => {
+    setSelectedPidIdx(idx);
+    if (!result) return;
+    const allXs = [p.x1, p.x2];
+    const allYs = [p.y1, p.y2];
+
+    if (p.run_idx >= 0 && result.runs && result.runs[p.run_idx]) {
+      const r = result.runs[p.run_idx];
+      if (r.points && r.points.length > 0) {
+        for (const pt of r.points) {
+          allXs.push(pt[0]);
+          allYs.push(pt[1]);
+        }
+      } else {
+        allXs.push(r.x1, r.x2);
+        allYs.push(r.y1, r.y2);
+      }
+    }
+
+    if (p.extra_runs && p.extra_runs.length > 0 && result.runs) {
+      for (const erIdx of p.extra_runs) {
+        const er = result.runs[erIdx];
+        if (er) {
+          if (er.points && er.points.length > 0) {
+            for (const pt of er.points) {
+              allXs.push(pt[0]);
+              allYs.push(pt[1]);
+            }
+          } else {
+            allXs.push(er.x1, er.x2);
+            allYs.push(er.y1, er.y2);
+          }
+        }
+      }
+    }
+
+    zoomToBbox(
+      Math.min(...allXs),
+      Math.min(...allYs),
+      Math.max(...allXs),
+      Math.max(...allYs)
+    );
+  };
+
+  const handleFocusOpc = (opc: OffPageConnector) => {
+    zoomToBbox(opc.x1, opc.y1, opc.x2, opc.y2);
+  };
+
+  const handleSelectSymbol = (s: SymbolDetection) => {
+    zoomToBbox(s.x1, s.y1, s.x2, s.y2);
+  };
+
+  const handleSelectSystem = (s: CorrosionSystem, idx: number) => {
+    setSelectedSystemIdx(idx);
+    if (!result) return;
+    const allXs: number[] = [];
+    const allYs: number[] = [];
+
+    for (const rIdx of s.run_idxs || []) {
+      const r = result.runs?.[rIdx];
+      if (r) {
+        if (r.points && r.points.length > 0) {
+          for (const pt of r.points) {
+            allXs.push(pt[0]);
+            allYs.push(pt[1]);
+          }
+        } else {
+          allXs.push(r.x1, r.x2);
+          allYs.push(r.y1, r.y2);
+        }
+      }
+    }
+
+    for (const pIdx of s.pid_idxs || []) {
+      const p = result.piping_ids?.[pIdx];
+      if (p) {
+        allXs.push(p.x1, p.x2);
+        allYs.push(p.y1, p.y2);
+      }
+    }
+
+    if (allXs.length > 0 && allYs.length > 0) {
+      zoomToBbox(
+        Math.min(...allXs),
+        Math.min(...allYs),
+        Math.max(...allXs),
+        Math.max(...allYs)
+      );
+    }
+  };
+
+  const handleSelectCircuit = (c: CorrosionCircuit) => {
+    setSelectedCircuitCode(c.code);
+    if (!result) return;
+    const allXs: number[] = [];
+    const allYs: number[] = [];
+
+    for (const rIdx of c.run_idxs || []) {
+      const r = result.runs?.[rIdx];
+      if (r) {
+        if (r.points && r.points.length > 0) {
+          for (const pt of r.points) {
+            allXs.push(pt[0]);
+            allYs.push(pt[1]);
+          }
+        } else {
+          allXs.push(r.x1, r.x2);
+          allYs.push(r.y1, r.y2);
+        }
+      }
+    }
+
+    for (const pIdx of c.pid_idxs || []) {
+      const p = result.piping_ids?.[pIdx];
+      if (p) {
+        allXs.push(p.x1, p.x2);
+        allYs.push(p.y1, p.y2);
+      }
+    }
+
+    if (allXs.length > 0 && allYs.length > 0) {
+      zoomToBbox(
+        Math.min(...allXs),
+        Math.min(...allYs),
+        Math.max(...allXs),
+        Math.max(...allYs)
+      );
+    }
+  };
+
+  const handleFocusFlag = (f: Record<string, any>) => {
+    if (!result) return;
+    if (f.pid) {
+      const target = result.piping_ids.find((p) => p.pid === f.pid);
+      if (target) {
+        handleSelectPipingId(target, result.piping_ids.indexOf(target));
+        return;
+      }
+    }
+    if (f.x1 != null && f.y1 != null && f.x2 != null && f.y2 != null) {
+      zoomToBbox(f.x1, f.y1, f.x2, f.y2);
+      return;
+    }
+    if (f.run_idx != null && result.runs?.[f.run_idx]) {
+      const r = result.runs[f.run_idx];
+      zoomToBbox(r.x1, r.y1, r.x2, r.y2);
+    }
+  };
 
   // Trigger Detection Pipeline
   const handleRunDetection = async () => {
@@ -658,19 +882,65 @@ export default function ProjectWorkspace() {
             ) : null}
           </div>
 
-          {/* Search bar for tables */}
+          {/* Search bar for tables & Sub-tabs */}
           {mode === 'digitize' && (
-            <div className="p-3 border-b border-slate-100 bg-slate-50">
-              <div className="relative">
-                <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-2.5" />
-                <input
-                  type="text"
-                  placeholder="Filter by line, fluid, or class..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
+            <div className="border-b border-slate-200 bg-slate-50">
+              <div className="p-3">
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder={
+                      digitizeSubTab === 'lines'
+                        ? 'Filter by line, fluid, or class...'
+                        : digitizeSubTab === 'symbols'
+                        ? 'Filter by tag, equipment, or valve...'
+                        : 'Filter by connector or target...'
+                    }
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
               </div>
+
+              {/* Sub-Tabs: Lines / Symbols / OPCs */}
+              {result && (
+                <div className="flex border-t border-slate-200 bg-slate-100/70 p-1 text-[11px] font-semibold text-slate-600 gap-1">
+                  <button
+                    onClick={() => setDigitizeSubTab('lines')}
+                    className={`flex-1 py-1 px-2 rounded-md transition text-center ${
+                      digitizeSubTab === 'lines'
+                        ? 'bg-white text-indigo-700 shadow-sm font-bold'
+                        : 'hover:text-slate-900'
+                    }`}
+                  >
+                    Lines ({result.piping_ids.length})
+                  </button>
+                  <button
+                    onClick={() => setDigitizeSubTab('symbols')}
+                    className={`flex-1 py-1 px-2 rounded-md transition text-center ${
+                      digitizeSubTab === 'symbols'
+                        ? 'bg-white text-indigo-700 shadow-sm font-bold'
+                        : 'hover:text-slate-900'
+                    }`}
+                  >
+                    Symbols ({result.symbols?.length || 0})
+                  </button>
+                  {result.opcs && result.opcs.length > 0 && (
+                    <button
+                      onClick={() => setDigitizeSubTab('opcs')}
+                      className={`py-1 px-2 rounded-md transition text-center ${
+                        digitizeSubTab === 'opcs'
+                          ? 'bg-white text-indigo-700 shadow-sm font-bold'
+                          : 'hover:text-slate-900'
+                      }`}
+                    >
+                      OPCs ({result.opcs.length})
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -773,137 +1043,286 @@ export default function ProjectWorkspace() {
                 Click &quot;Detect P&amp;ID&quot; to digitize components and generate corrosion circuits.
               </div>
             ) : mode === 'digitize' ? (
-              <div className="flex flex-col h-full">
-                <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">
-                  {result.piping_ids
-                    .filter((p) => {
-                      if (!searchQuery) return true;
-                      const q = searchQuery.toLowerCase();
-                      return (
-                        p.pid.toLowerCase().includes(q) ||
-                        p.fluid.toLowerCase().includes(q) ||
-                        p.pclass.toLowerCase().includes(q)
-                      );
-                    })
-                    .map((p, idx) => (
-                      <div
-                        key={p.pid + idx}
-                        onClick={() => setSelectedPidIdx(idx)}
-                        className={`p-3 cursor-pointer transition text-xs ${
-                          selectedPidIdx === idx
-                            ? 'bg-indigo-50 border-l-4 border-indigo-600'
-                            : 'hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-slate-900">{p.pid}</span>
-                          <div className="flex items-center space-x-1.5">
-                            {p.manual && (
-                              <span className="text-[9px] bg-purple-100 text-purple-700 font-bold px-1.5 py-0.5 rounded">
-                                OVERRIDDEN
-                              </span>
-                            )}
-                            <span
-                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
-                                p.state === 'attached'
-                                  ? 'bg-emerald-100 text-emerald-700'
-                                  : p.state === 'leader'
-                                  ? 'bg-blue-100 text-blue-700'
-                                  : 'bg-amber-100 text-amber-700'
-                              }`}
-                            >
-                              {p.state}
-                            </span>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setEditingPid(p);
-                              }}
-                              className="p-1 hover:bg-slate-200 text-slate-500 hover:text-indigo-600 rounded transition"
-                              title="Edit / Override Line Data"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                        <div className="mt-1 flex items-center space-x-3 text-slate-500 text-[11px]">
-                          <span>Fluid: <b className="text-slate-700">{p.fluid || '—'}</b></span>
-                          <span>Class: <b className="text-slate-700">{p.pclass || '—'}</b></span>
-                          <span>Size: <b className="text-slate-700">{p.size || '—'}</b></span>
-                        </div>
-                        {(p.operating_temp_c != null || p.operating_press_barg != null || p.corrosion_loop) && (
-                          <div className="mt-1 pt-1 border-t border-slate-100 flex items-center space-x-2 text-[10px] text-slate-500">
-                            {p.operating_temp_c != null && <span>T: <b className="text-slate-700">{p.operating_temp_c}°C</b></span>}
-                            {p.operating_press_barg != null && <span>P: <b className="text-slate-700">{p.operating_press_barg} barg</b></span>}
-                            {p.corrosion_loop && <span>Loop: <b className="text-indigo-600">{p.corrosion_loop}</b></span>}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+              <div className="flex flex-col h-full overflow-hidden">
+                {/* Digitize Sub-tabs (Lines, Symbols, OPCs) */}
+                <div className="flex border-b border-slate-200 bg-slate-50 px-3 pt-2 gap-1.5 shrink-0">
+                  <button
+                    onClick={() => setDigitizeSubTab('lines')}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
+                      digitizeSubTab === 'lines'
+                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
+                        : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <span>Lines</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 font-semibold">
+                      {result.piping_ids?.length || 0}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setDigitizeSubTab('symbols')}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
+                      digitizeSubTab === 'symbols'
+                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
+                        : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <span>Symbols</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 font-semibold">
+                      {result.symbols?.length || 0}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setDigitizeSubTab('opcs')}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
+                      digitizeSubTab === 'opcs'
+                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
+                        : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <span>OPCs</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 font-semibold">
+                      {result.opcs?.length || 0}
+                    </span>
+                  </button>
                 </div>
 
-                {/* Off-Page Connectors Section */}
-                {result.opcs && result.opcs.length > 0 && (
-                  <div className="p-3 bg-slate-50 border-t border-slate-200">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                        <ExternalLink className="w-3.5 h-3.5 text-indigo-600" />
-                        Off-Page Connectors ({result.opcs.length})
-                      </span>
-                    </div>
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {result.opcs.map((opc, oIdx) => (
+                {/* Sub-tab 1: Piping Lines */}
+                {digitizeSubTab === 'lines' && (
+                  <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">
+                    {result.piping_ids
+                      .filter((p) => {
+                        if (!searchQuery) return true;
+                        const q = searchQuery.toLowerCase();
+                        return (
+                          p.pid.toLowerCase().includes(q) ||
+                          p.fluid.toLowerCase().includes(q) ||
+                          p.pclass.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((p, idx) => (
                         <div
-                          key={oIdx}
-                          className="p-2 bg-white border border-slate-200 rounded-lg shadow-sm text-xs flex flex-col gap-1"
+                          key={p.pid + idx}
+                          onClick={() => handleSelectPipingId(p, idx)}
+                          className={`p-3 cursor-pointer transition text-xs group ${
+                            selectedPidIdx === idx
+                              ? 'bg-indigo-50 border-l-4 border-indigo-600'
+                              : 'hover:bg-slate-50'
+                          }`}
                         >
                           <div className="flex items-center justify-between">
-                            <span className="font-bold text-slate-800 truncate">
-                              {opc.line_number || opc.text || `OPC #${oIdx + 1}`}
-                            </span>
-                            <span
-                              className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded uppercase ${
-                                opc.direction === 'incoming'
-                                  ? 'bg-blue-100 text-blue-700'
-                                  : 'bg-indigo-100 text-indigo-700'
-                              }`}
-                            >
-                              {opc.direction}
-                            </span>
+                            <div className="flex items-center space-x-1.5">
+                              <Crosshair className="w-3.5 h-3.5 text-slate-400 group-hover:text-indigo-600 transition shrink-0" />
+                              <span className="font-bold text-slate-900 group-hover:text-indigo-700 transition">
+                                {p.pid}
+                              </span>
+                            </div>
+                            <div className="flex items-center space-x-1.5">
+                              {p.manual && (
+                                <span className="text-[9px] bg-purple-100 text-purple-700 font-bold px-1.5 py-0.5 rounded">
+                                  OVERRIDDEN
+                                </span>
+                              )}
+                              <span
+                                className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                                  p.state === 'attached'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : p.state === 'leader'
+                                    ? 'bg-blue-100 text-blue-700'
+                                    : 'bg-amber-100 text-amber-700'
+                                }`}
+                              >
+                                {p.state}
+                              </span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingPid(p);
+                                }}
+                                className="p-1 hover:bg-slate-200 text-slate-500 hover:text-indigo-600 rounded transition"
+                                title="Edit / Override Line Data"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
-                          <div className="text-[11px] text-slate-500 flex items-center justify-between">
-                            <span>Target: <b className="text-slate-700">{opc.target_drawing || opc.target_sheet_number || 'Unknown'}</b></span>
-                            <button
-                              onClick={() => handleSelectOpc(opc)}
-                              className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[10px] font-semibold flex items-center gap-1 transition"
-                            >
-                              <span>Navigate</span>
-                              <ArrowRight className="w-3 h-3" />
-                            </button>
+                          <div className="mt-1 flex items-center space-x-3 text-slate-500 text-[11px]">
+                            <span>Fluid: <b className="text-slate-700">{p.fluid || '—'}</b></span>
+                            <span>Class: <b className="text-slate-700">{p.pclass || '—'}</b></span>
+                            <span>Size: <b className="text-slate-700">{p.size || '—'}</b></span>
                           </div>
+                          {(p.operating_temp_c != null || p.operating_press_barg != null || p.corrosion_loop) && (
+                            <div className="mt-1 pt-1 border-t border-slate-100 flex items-center space-x-2 text-[10px] text-slate-500">
+                              {p.operating_temp_c != null && <span>T: <b className="text-slate-700">{p.operating_temp_c}°C</b></span>}
+                              {p.operating_press_barg != null && <span>P: <b className="text-slate-700">{p.operating_press_barg} barg</b></span>}
+                              {p.corrosion_loop && <span>Loop: <b className="text-indigo-600">{p.corrosion_loop}</b></span>}
+                            </div>
+                          )}
                         </div>
                       ))}
-                    </div>
+                  </div>
+                )}
+
+                {/* Sub-tab 2: Symbols / Valves / Equipment */}
+                {digitizeSubTab === 'symbols' && (
+                  <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">
+                    {result.symbols && result.symbols.length > 0 ? (
+                      result.symbols
+                        .filter((s) => {
+                          if (!searchQuery) return true;
+                          const q = searchQuery.toLowerCase();
+                          return (
+                            s.cls.toLowerCase().includes(q) ||
+                            s.coarse.toLowerCase().includes(q) ||
+                            (s.tag && s.tag.toLowerCase().includes(q))
+                          );
+                        })
+                        .map((s, sIdx) => {
+                          const coarseColor =
+                            s.coarse === 'valve'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : s.coarse === 'equipment'
+                              ? 'bg-purple-100 text-purple-800'
+                              : s.coarse === 'instrument'
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-slate-100 text-slate-700';
+
+                          return (
+                            <div
+                              key={sIdx}
+                              onClick={() => handleSelectSymbol(s)}
+                              className="p-3 cursor-pointer hover:bg-indigo-50/60 transition text-xs group"
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center space-x-2 truncate">
+                                  <Crosshair className="w-3.5 h-3.5 text-slate-400 group-hover:text-indigo-600 transition shrink-0" />
+                                  <span className="font-bold text-slate-900 group-hover:text-indigo-700 truncate capitalize">
+                                    {s.cls.replace(/_/g, ' ')}
+                                  </span>
+                                  {s.tag && (
+                                    <span className="font-mono text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                      {s.tag}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center space-x-1.5 shrink-0">
+                                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded capitalize ${coarseColor}`}>
+                                    {s.coarse}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-slate-400">
+                                    {(s.conf * 100).toFixed(0)}%
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="mt-1 text-[11px] text-slate-400 flex items-center justify-between">
+                                <span>Box: [{Math.round(s.x1)}, {Math.round(s.y1)}] – [{Math.round(s.x2)}, {Math.round(s.y2)}]</span>
+                                <span className="text-[10px] text-indigo-600 font-medium group-hover:underline">
+                                  Click to Zoom
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })
+                    ) : (
+                      <div className="p-8 text-center text-slate-400 text-xs">
+                        No symbols detected on this sheet.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-tab 3: Off-Page Connectors */}
+                {digitizeSubTab === 'opcs' && (
+                  <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">
+                    {result.opcs && result.opcs.length > 0 ? (
+                      result.opcs
+                        .filter((opc) => {
+                          if (!searchQuery) return true;
+                          const q = searchQuery.toLowerCase();
+                          return (
+                            (opc.line_number && opc.line_number.toLowerCase().includes(q)) ||
+                            (opc.text && opc.text.toLowerCase().includes(q)) ||
+                            (opc.target_drawing && opc.target_drawing.toLowerCase().includes(q)) ||
+                            (opc.target_sheet_number && opc.target_sheet_number.toLowerCase().includes(q))
+                          );
+                        })
+                        .map((opc, oIdx) => (
+                          <div
+                            key={oIdx}
+                            onClick={() => handleFocusOpc(opc)}
+                            className="p-3 cursor-pointer hover:bg-indigo-50/60 transition text-xs flex flex-col gap-1.5 group"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-1.5 truncate">
+                                <Crosshair className="w-3.5 h-3.5 text-slate-400 group-hover:text-indigo-600 transition shrink-0" />
+                                <span className="font-bold text-slate-900 group-hover:text-indigo-700 truncate">
+                                  {opc.line_number || opc.text || `OPC #${oIdx + 1}`}
+                                </span>
+                              </div>
+                              <span
+                                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded uppercase shrink-0 ${
+                                  opc.direction === 'incoming'
+                                    ? 'bg-blue-100 text-blue-700'
+                                    : 'bg-indigo-100 text-indigo-700'
+                                }`}
+                              >
+                                {opc.direction}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                              <span>Target: <b className="text-slate-700">{opc.target_drawing || opc.target_sheet_number || 'Unknown'}</b></span>
+                              <div className="flex items-center space-x-1">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSelectOpc(opc);
+                                  }}
+                                  className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[10px] font-semibold flex items-center gap-1 transition"
+                                  title="Open Target P&ID Sheet"
+                                >
+                                  <span>Open Drawing</span>
+                                  <ArrowRight className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                    ) : (
+                      <div className="p-8 text-center text-slate-400 text-xs">
+                        No off-page connectors detected on this sheet.
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             ) : mode === 'system' ? (
-              <div className="p-4 space-y-3">
+              <div className="p-4 space-y-3 overflow-y-auto h-full">
                 {systems.map((s) => (
-                  <div key={s.fluid} className="border border-slate-200 rounded-xl p-3 bg-slate-50">
+                  <div
+                    key={s.fluid}
+                    onClick={() => handleSelectSystem(s, s.index)}
+                    className={`border rounded-xl p-3 cursor-pointer transition ${
+                      selectedSystemIdx === s.index
+                        ? 'border-indigo-600 bg-indigo-50/80 shadow-sm ring-2 ring-indigo-500/20'
+                        : 'border-slate-200 bg-slate-50 hover:bg-slate-100/80'
+                    }`}
+                  >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-2">
                         <span
-                          className="w-3.5 h-3.5 rounded"
+                          className="w-3.5 h-3.5 rounded shadow-sm"
                           style={{ backgroundColor: `rgb(${s.color.join(',')})` }}
                         />
                         <span className="font-bold text-slate-900 text-sm">
                           System #{String(s.index).padStart(2, '0')}
                         </span>
                       </div>
-                      <span className="font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded text-xs">
-                        {s.fluid}
-                      </span>
+                      <div className="flex items-center space-x-1.5">
+                        <span className="font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded text-xs">
+                          {s.fluid}
+                        </span>
+                        <Crosshair className="w-3.5 h-3.5 text-slate-400" />
+                      </div>
                     </div>
                     <div className="mt-2 text-xs text-slate-600 flex justify-between">
                       <span>Piping Lines: <b>{s.pid_idxs.length}</b></span>
@@ -914,21 +1333,32 @@ export default function ProjectWorkspace() {
                 ))}
               </div>
             ) : mode === 'circuit' ? (
-              <div className="p-4 space-y-3">
+              <div className="p-4 space-y-3 overflow-y-auto h-full">
                 {systems.flatMap((s) =>
                   s.circuits.map((c) => (
-                    <div key={c.code} className="border border-slate-200 rounded-xl p-3 bg-slate-50 space-y-2">
+                    <div
+                      key={c.code}
+                      onClick={() => handleSelectCircuit(c)}
+                      className={`border rounded-xl p-3 cursor-pointer transition space-y-2 ${
+                        selectedCircuitCode === c.code
+                          ? 'border-indigo-600 bg-indigo-50/80 shadow-sm ring-2 ring-indigo-500/20'
+                          : 'border-slate-200 bg-slate-50 hover:bg-slate-100/80'
+                      }`}
+                    >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center space-x-2">
                           <span
-                            className="w-3.5 h-3.5 rounded"
+                            className="w-3.5 h-3.5 rounded shadow-sm"
                             style={{ backgroundColor: `rgb(${c.color.join(',')})` }}
                           />
                           <span className="font-bold text-slate-900 text-sm">Circuit {c.code}</span>
                         </div>
-                        <span className="font-semibold text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded text-xs">
-                          {s.fluid} - {c.material || 'General'}
-                        </span>
+                        <div className="flex items-center space-x-1.5">
+                          <span className="font-semibold text-slate-700 bg-white border border-slate-200 px-2 py-0.5 rounded text-xs">
+                            {s.fluid} - {c.material || 'General'}
+                          </span>
+                          <Crosshair className="w-3.5 h-3.5 text-slate-400" />
+                        </div>
                       </div>
                       <div className="text-xs text-slate-600">
                         <div>Piping Classes: <b>{c.classes.join(', ') || '—'}</b></div>
@@ -965,7 +1395,7 @@ export default function ProjectWorkspace() {
                 )}
               </div>
             ) : (
-              <div className="p-4 space-y-4">
+              <div className="p-4 space-y-4 overflow-y-auto h-full">
                 {validation && (
                   <>
                     <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-center">
@@ -1007,12 +1437,21 @@ export default function ProjectWorkspace() {
                         {validation.flags.map((f, i) => (
                           <div
                             key={i}
-                            className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900"
+                            onClick={() => handleFocusFlag(f)}
+                            className="p-2.5 bg-amber-50 hover:bg-amber-100/80 border border-amber-200 rounded-lg text-xs text-amber-900 cursor-pointer transition flex flex-col gap-1 group"
                           >
-                            <span className="font-bold uppercase text-[10px] bg-amber-200 px-1 rounded mr-1.5">
-                              {f.kind}
-                            </span>
-                            {f.msg_en || f.msg}
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold uppercase text-[10px] bg-amber-200 px-1.5 py-0.5 rounded text-amber-800">
+                                {f.kind}
+                              </span>
+                              <span className="text-[10px] text-amber-700 flex items-center gap-1 opacity-80 group-hover:opacity-100">
+                                <Crosshair className="w-3 h-3" />
+                                <span>Zoom</span>
+                              </span>
+                            </div>
+                            <p className="text-[11px] leading-relaxed">
+                              {f.msg_en || f.msg}
+                            </p>
                           </div>
                         ))}
                       </div>
