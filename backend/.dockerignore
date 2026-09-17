@@ -1,0 +1,13 @@
+﻿__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+.git
+.vscode
+.pidcache
+data
+runs
+Contoh P&ID

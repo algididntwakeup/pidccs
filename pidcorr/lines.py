@@ -491,6 +491,36 @@ def suppress_revision_clouds(segs):
     return out
 
 
+def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
+    """Buang garis diagonal artifak drafting (bukan pipa proses).
+    Pipa proses dalam standar P&ID selalu ortogonal (horizontal/vertikal).
+    Garis miring/diagonal yang membentang sangat panjang (> 300px atau > 0.08 dari dimensi lembar)
+    atau berada di area margin/title block adalah artifak noise/drawing frame/border."""
+    if not segs:
+        return []
+    W, H = page_wh
+    if min(W, H) < 800:
+        return segs
+
+    max_len = min(max_diag_len, 0.10 * max(W, H))
+    out = []
+    for s in segs:
+        pts = s.points
+        p0, p1 = pts[0], pts[-1]
+        dx = abs(p1[0] - p0[0])
+        dy = abs(p1[1] - p0[1])
+        is_diagonal = (s.axis == "d") or (dx > 50 and dy > 50 and min(dx, dy) / max(dx, dy) > 0.3)
+        if is_diagonal:
+            if s.length > max_len or dx > 0.08 * W or dy > 0.08 * H:
+                continue
+            if min(p0[1], p1[1]) >= 0.85 * H:
+                continue
+            if min(p0[0], p1[0]) <= 0.05 * W and max(p0[0], p1[0]) >= 0.20 * W:
+                continue
+        out.append(s)
+    return out
+
+
 def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
     """Sambungkan segmen pipa kolinear yang terpotong celah kecil (gap di sekitar label/nozzle/header).
     Menjaga kontinuitas pipa panjang seperti HP/LP Production Headers."""
@@ -574,6 +604,7 @@ def extract_pipe_runs(img_bgr, dpi=350, detections=None, furniture=None, diagona
     # Drafting suppressions & header continuity
     segs = suppress_drawing_margins(segs, page_wh=(img_bgr.shape[1], img_bgr.shape[0]))
     segs = suppress_revision_clouds(segs)
+    segs = suppress_diagonal_artifacts(segs, page_wh=(img_bgr.shape[1], img_bgr.shape[0]))
     segs = bridge_collinear_headers(segs)
 
     if diagonal:

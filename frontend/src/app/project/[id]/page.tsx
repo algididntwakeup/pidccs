@@ -137,7 +137,8 @@ export default function ProjectWorkspace() {
         viewerRef.current.destroy();
       }
 
-      const initialUrl = showOverlay && result
+      const isDetected = activeSheet?.status === 'detected' || Boolean(result);
+      const initialUrl = showOverlay && isDetected
         ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
         : getRawImageUrl(projectId, activeSheet.id);
 
@@ -174,13 +175,13 @@ export default function ProjectWorkspace() {
   }, [projectId, activeSheet]);
 
   // Dynamically swap between Raw P&ID and Marked Overlay while preserving viewport
-  const hasResult = Boolean(result);
+  const isDetected = activeSheet?.status === 'detected' || Boolean(result);
   useEffect(() => {
     if (!viewerRef.current || !activeSheet || !projectId) return;
     const viewer = viewerRef.current;
     if (!viewer.viewport) return;
 
-    const targetUrl = showOverlay && hasResult
+    const targetUrl = showOverlay && isDetected
       ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
       : getRawImageUrl(projectId, activeSheet.id);
 
@@ -196,7 +197,7 @@ export default function ProjectWorkspace() {
       viewer.removeHandler('open', onOpen);
     };
     viewer.addHandler('open', onOpen);
-  }, [showOverlay, mode, hasResult, projectId, activeSheet]);
+  }, [showOverlay, mode, isDetected, projectId, activeSheet]);
 
   // Trigger Detection Pipeline
   const handleRunDetection = async () => {
@@ -460,8 +461,24 @@ export default function ProjectWorkspace() {
             </button>
           )}
 
+          {/* Circuit Overlay Toggle Button in Header Bar */}
+          {(result || activeSheet?.status === 'detected') && (
+            <button
+              onClick={() => setShowOverlay(!showOverlay)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition ${
+                showOverlay
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow'
+                  : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+              }`}
+              title="Toggle Color-Coded Circuit Marking on Canvas"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>{showOverlay ? 'Circuit Overlay: ON' : 'Circuit Overlay: OFF'}</span>
+            </button>
+          )}
+
           {/* Export Dropdown Menu */}
-          {result && (
+          {(result || activeSheet?.status === 'detected') && (
             <div className="relative group">
               <button className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition">
                 <Download className="w-3.5 h-3.5" />
@@ -529,7 +546,7 @@ export default function ProjectWorkspace() {
           <div ref={canvasRef} className="w-full h-full" />
 
           {/* Floating Canvas Controls */}
-          <div className="absolute bottom-6 left-6 flex bg-white/90 backdrop-blur border border-slate-300 rounded-xl shadow-lg p-1 space-x-1 z-10">
+          <div className="absolute bottom-6 left-6 flex bg-white/95 backdrop-blur border border-slate-300 rounded-xl shadow-lg p-1 space-x-1 z-40">
             <button
               onClick={() => handleZoom(1)}
               className="p-2 hover:bg-slate-100 rounded-lg text-slate-700 transition"
@@ -551,7 +568,7 @@ export default function ProjectWorkspace() {
             >
               <Maximize2 className="w-4 h-4" />
             </button>
-            {result && (
+            {(result || activeSheet?.status === 'detected') && (
               <>
                 <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-1" />
                 <button
@@ -564,7 +581,7 @@ export default function ProjectWorkspace() {
                   title="Toggle Color-Coded Circuit Marking on Canvas"
                 >
                   <Layers className="w-3.5 h-3.5" />
-                  <span>{showOverlay ? 'Overlay: ON' : 'Overlay: OFF'}</span>
+                  <span>{showOverlay ? 'Circuit Overlay: ON' : 'Circuit Overlay: OFF'}</span>
                 </button>
               </>
             )}

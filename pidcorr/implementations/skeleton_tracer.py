@@ -14,6 +14,7 @@ from ..lines import (
     detect_boxes,
     suppress_drawing_margins,
     suppress_revision_clouds,
+    suppress_diagonal_artifacts,
     bridge_collinear_headers,
 )
 
@@ -306,6 +307,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
     # Diagonal PCA staircase fallback for isolated diagonal strokes
     component_count, component_labels, component_stats, _ = cv2.connectedComponentsWithStats(ink, 8)
     components_with_edges = set(component_labels[edge_labels > 0])
+    H, W = ink.shape[:2]
 
     for component_id in range(1, component_count):
         if component_id in components_with_edges:
@@ -313,17 +315,28 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
         if component_stats[component_id, cv2.CC_STAT_AREA] < min_length:
             continue
         bx, by, bw, bh, _ = component_stats[component_id]
+        # An isolated straight diagonal stroke in P&ID never spans large areas
+        if bw > 250 or bh > 250 or (min(W, H) >= 800 and (bw > 0.08 * W or bh > 0.08 * H)):
+            continue
+
         sub_ys, sub_xs = np.where(component_labels[by:by + bh, bx:bx + bw] == component_id)
         xs = sub_xs + bx
         ys = sub_ys + by
         points = np.column_stack((xs.astype(float), ys.astype(float)))
         centered = points - points.mean(axis=0)
-        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        _, s, vh = np.linalg.svd(centered, full_matrices=False)
+        # Check linearity: true straight stroke must have low perpendicular variance
+        if s[0] <= 0 or (s[1] / s[0]) > 0.12:
+            continue
+
         direction = vh[0]
         projection = centered @ direction
         p0 = points[projection.argmin()]
         p1 = points[projection.argmax()]
         dx, dy = abs(p1[0] - p0[0]), abs(p1[1] - p0[1])
+        if math.hypot(dx, dy) > 250:
+            continue
+
         axis = "h" if dx >= 3 * dy else ("v" if dy >= 3 * dx else "d")
         runs.append(PipeRun(
             points=[[int(round(p0[0])), int(round(p0[1]))], [int(round(p1[0])), int(round(p1[1]))]],
@@ -387,6 +400,7 @@ class SkeletonLineTracer(BaseLineTracer):
         # Drafting suppressions & header continuity
         filtered = suppress_drawing_margins(filtered, page_wh=(W, H))
         filtered = suppress_revision_clouds(filtered)
+        filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
         filtered = bridge_collinear_headers(filtered)
 
         return filtered
