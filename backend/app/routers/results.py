@@ -369,6 +369,64 @@ async def batch_delete_runs(
     }
 
 
+class UpdateRunPointsRequest(BaseModel):
+    points: List[List[float]] = Field(..., description="List of [x, y] coordinates for polyline vertices")
+
+
+@router.patch("/runs/{run_idx}/points")
+async def update_run_points(
+    project_id: str,
+    sheet_id: str,
+    run_idx: int,
+    payload: UpdateRunPointsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update koordinat titik-titik vertex untuk satu segmen polyline pipa (misal setelah drag control point)."""
+    sheet = await ProjectService.get_sheet(db, sheet_id)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+
+    if not sheet.result_json or "runs" not in sheet.result_json:
+        raise HTTPException(status_code=400, detail="Sheet result has no traced runs")
+
+    res = dict(sheet.result_json)
+    runs = res.get("runs", [])
+    if run_idx < 0 or run_idx >= len(runs):
+        raise HTTPException(status_code=400, detail=f"Run index {run_idx} out of range")
+
+    pts = payload.points
+    if not pts or len(pts) < 2:
+        raise HTTPException(status_code=400, detail="Run must have at least 2 points")
+
+    runs[run_idx]["points"] = pts
+    runs[run_idx]["x1"] = min(p[0] for p in pts)
+    runs[run_idx]["y1"] = min(p[1] for p in pts)
+    runs[run_idx]["x2"] = max(p[0] for p in pts)
+    runs[run_idx]["y2"] = max(p[1] for p in pts)
+    runs[run_idx]["manual"] = True
+
+    # Recalculate axis orientation
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    if max(ys) - min(ys) <= 4:
+        runs[run_idx]["axis"] = "h"
+    elif max(xs) - min(xs) <= 4:
+        runs[run_idx]["axis"] = "v"
+    else:
+        runs[run_idx]["axis"] = "poly"
+
+    res["runs"] = runs
+    sheet.result_json = res
+    await db.commit()
+
+    return {
+        "status": "success",
+        "run_idx": run_idx,
+        "points": pts,
+        "result": sheet.result_json,
+    }
+
+
 @router.patch("/runs/{run_idx}/label")
 async def update_run_label(
     project_id: str,

@@ -906,8 +906,53 @@ Sebagai acuan prioritas untuk sesi berikutnya:
    - *Issue*: Meneliti potensi edge case di mana SVG overlay tersembunyi atau tidak sinkron saat terjadi resizing window browser secara ekstrem atau saat berpindah antar tab browser pada level zoom maksimal.
    - *Target*: Memastikan listener viewport OpenSeadragon (`resize`, `animation-finish`, `update-viewport`) selalu men-trigger sinkronisasi koordinat matriks SVG secara deterministik.
 3. **Tool Re-scan ROI (Region of Interest)**:
-   - *Kebutuhan*: Engineer sering kali ingin memindai ulang hanya area kecil (misal skid manifold rumit atau nozzle header tertentu) dengan parameter relaksasi khusus tanpa harus menjalankan ulang deteksi full-page 350 DPI yang memakan waktu.
-   - *Target*: Menambahkan mode seleksi kotak (*rubber-band rectangle ROI*) di kanvas yang mengirim koordinat bounding box ke backend untuk re-tracing lokal instan.
+   - *Status*: **100% Selesai di Pivot Sprint B.6** (Box Trace rubber-band drag, dialog Option C Replace vs Append, dan Shift-drag instant replace).
 4. **Manual Pen / Polyline Draw Tool**:
-   - *Kebutuhan*: Segmen pipa beresolusi rendah atau garis putus-putus (*dashed instrumentation / heat tracing*) yang terlewat oleh algoritma otomatis perlu dapat digambar manual oleh engineer.
-   - *Target*: Menambahkan drawing tool di kanvas (click-to-point polyline) dengan snap otomatis ke endpoint terdekat, menghasilkan objek `PipeRun` baru dengan `manual: true`, dan langsung tersimpan ke database.
+   - *Status*: **100% Selesai di Pivot Sprint B.6** (click-to-point polyline, magnet snap endpoint 18px, Shift H/V constraint, Enter/Dbl-click finish).
+
+---
+
+## Pivot Sprint B.6: Canvas Interactivity Fix, Draggable Vertices & Tool Activation
+
+### 1. Status Terakhir Komponen yang Dikerjakan
+- **Perbaikan Seleksi Garis di Kanvas (100% Selesai)**:
+  - Eliminasi bug `pointerEvents: 'none'` pada root SVG overlay dan container HTML OpenSeadragon.
+  - Menghapus `e.preventDefault()` pada `onMouseDown` hit-target yang mematikan event `click` di browser Chromium.
+  - Implementasi deteksi klik berbasis threshold jarak pergerakan pointer (< 6px) pada `onPointerDown` + `onPointerUp` dan fallback `onClick`.
+  - Integrasi listener native OpenSeadragon `canvas-click` untuk deselect otomatis saat klik di area kanvas kosong.
+- **Draggable Vertex Control Points & Snap Alignment (100% Selesai)**:
+  - Seluruh titik vertex polyline (ujung start/end maupun intermediate vertices) dirender sebagai circle interaktif dengan `pointerEvents: 'all'` dan cursor `grab`/`grabbing`.
+  - Sistem drag real-time yang mematikan sementara navigasi OpenSeadragon (`viewer.setMouseNavEnabled(false)`).
+  - Snap-to-axis assist: vertex otomatis mengunci (*magnet snap*) sejajar horizontal/vertikal ($\le 8$px) dengan titik sebelumnya atau sesudahnya, dilengkapi garis bantu panduan hijau (*snap guide*).
+  - Endpoint backend baru `PATCH /projects/{project_id}/sheets/{sheet_id}/result/runs/{run_idx}/points` untuk persistensi koordinat vertex yang disesuaikan.
+- **Aktivasi Box Trace & Option (C) Modal (100% Selesai)**:
+  - Drag kotak seleksi (*rubber-band rectangle*) di kanvas pada mode `rescan`.
+  - Modal interaktif Option (C) setelah kotak ditarik: konfirmasi apakah ingin *Replace* (mengganti garis pipa lama di area) atau *Append* (menambahkan garis pipa baru saja).
+  - Power-user shortcut: Menahan tombol `Shift` saat melepaskan drag kotak langsung mengeksekusi *auto-replace* instan tanpa menampilkan modal.
+  - Dukungan parameter `replace_existing` pada endpoint backend `/trace-region`.
+- **Aktivasi Manual Pen Tool (100% Selesai)**:
+  - Click-to-place titik polyline baru secara interaktif pada mode `pen`.
+  - Magnet snap otomatis ke endpoint pipa existing terdekat dalam radius 18px (indikator dot hijau).
+  - Kunci arah gerak ortogonal (H/V constraint) dengan menahan tombol `Shift`.
+  - Konfirmasi garis baru via tombol Enter, klik tombol "Selesai", atau Double-Click; pembatalan via tombol Esc.
+- **Sistem Kursor Dinamis (100% Selesai)**:
+  - Kursor otomatis sinkron dengan mode tool aktif: `grab`/`pointer` pada Pan & Select, `crosshair` pada Box Trace dan Manual Pen, serta `crosshair` pada Split Mode.
+  - Dock pill toolbar bawah dilengkapi highlight aktif, ikon representatif, dan teks bantuan shortcut.
+- **Tuning Kualitas Line Tracing CV (100% Selesai)**:
+  - `min_length_px`: diturunkan dari 18px ke 12px untuk menangkap cabang pendek (sampling/vent/drain).
+  - `approxPolyDP epsilon`: dioptimasi ke 1.5 (dari 2.0) untuk detail lekukan elbow yang lebih akurat.
+  - `adaptiveThreshold`: disetel ke `blockSize=21, C=6` agar garis CAD tipis/pudar tertangkap jelas.
+  - Dilasi teks OCR: diubah menjadi penskalaan dinamis berbasis DPI (`max(3, int(5 * dpi/350))`) untuk mencegah pemutusan pipa yang melintas dekat label teks.
+  - Gap bridging: `bridge_collinear_headers` ditingkatkan ke 55px dan `bridge_inline_valve_gaps` ke 90px.
+
+### 2. Daftar File yang Dimodifikasi & Fungsi Utamanya
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py) | Core CV | Tuning parameter tracer: min_length_px=12, approxPolyDP epsilon=1.5, adaptiveThreshold 21/6, DPI-scaled text dilation, gap bridging 55px/90px. |
+| [`backend/app/routers/results.py`](file:///c:/Werk/pidccs/backend/app/routers/results.py) | Backend REST API | Endpoint baru `PATCH /runs/{run_idx}/points` (`UpdateRunPointsRequest`) untuk update koordinat vertex run dan rekalkulasi otomatis bounding box & axis. |
+| [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py) | Backend REST API | Penambahan field `replace_existing` pada `TraceRegionRequest`, filtering runs lama dalam bounding box ROI, dan endpoint parity `update_sheet_run_points`. |
+| [`backend/tests/test_split_and_color.py`](file:///c:/Werk/pidccs/backend/tests/test_split_and_color.py) | Tests | Unit test verifikasi untuk endpoint `update_run_points` dan integritas geometri polyline setelah manipulasi vertex. |
+| [`frontend/src/lib/api.ts`](file:///c:/Werk/pidccs/frontend/src/lib/api.ts) | Frontend Client | Method API client: `updateRunPoints(projectId, sheetId, runIdx, points)` dan `traceRegion(projectId, sheetId, bounds, replaceExisting)`. |
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend Canvas Overlay | Refactor event handling, draggable vertex handles dengan snap assist H/V, rubber-band Box Trace dengan Option (C) modal, Manual Pen dengan magnet snap, dynamic cursor styling, dan OpenSeadragon mouse navigation synchronization. |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Handler `handleUpdateRunPoints` dengan integrasi 20-step undo/redo stack, perbaruan `handleRescan` dengan opsi replace vs append, dan binding props ke `InteractivePipeCanvas`. |

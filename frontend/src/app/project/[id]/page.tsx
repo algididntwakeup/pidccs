@@ -73,6 +73,8 @@ import {
   deleteRun,
   batchDeleteRuns,
   updateRunLabel,
+  updateRunPoints,
+  traceRegion,
 } from '@/lib/api';
 
 type ViewMode = 'digitize' | 'system' | 'circuit' | 'report' | 'topology';
@@ -346,20 +348,61 @@ export default function ProjectWorkspace() {
     setTraceTool('pan');
   }, [result, projectId, activeSheet, pushHistory]);
 
-  const handleRescan = useCallback(async (bounds: { x1: number; y1: number; x2: number; y2: number }) => {
-    if (!projectId || !activeSheet || !result) return;
-    const updated = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/projects/${projectId}/trace-region`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...bounds, sheet_id: activeSheet.id }),
-    });
-    if (!updated.ok) throw new Error('Gagal melakukan re-scan area');
-    const data = await updated.json();
-    const nextRuns = [...result.runs, ...(data.new_runs || [])];
-    pushHistory('Re-scan area pipa', result.runs, nextRuns, result.piping_ids, result.piping_ids);
-    setResult({ ...result, runs: nextRuns });
-    setTraceTool('pan');
-  }, [projectId, activeSheet, result, pushHistory]);
+  // Update vertex points of a pipe run (after draggable control points adjusted)
+  const handleUpdateRunPoints = useCallback(
+    async (runIdx: number, points: [number, number][]) => {
+      if (!result || !projectId || !activeSheet || points.length < 2) return;
+      try {
+        const prevRuns = [...result.runs];
+        const prevPids = [...result.piping_ids];
+        const res = await updateRunPoints(projectId, activeSheet.id, runIdx, points);
+        const nextRuns = res.result.runs;
+        pushHistory(
+          `Luruskan / Edit titik pipa #${runIdx}`,
+          prevRuns,
+          nextRuns,
+          prevPids,
+          res.result.piping_ids || prevPids
+        );
+        setResult(res.result);
+        setHasUnsavedChanges(true);
+        setStatusToast(`Titik koordinat pipa #${runIdx} berhasil disesuaikan!`);
+        setTimeout(() => setStatusToast(null), 2500);
+      } catch (err: any) {
+        alert('Gagal mengupdate titik pipa: ' + (err.message || 'Server error'));
+      }
+    },
+    [result, projectId, activeSheet, pushHistory]
+  );
+
+  const handleRescan = useCallback(
+    async (bounds: { x1: number; y1: number; x2: number; y2: number }, replaceExisting: boolean = false) => {
+      if (!projectId || !activeSheet || !result) return;
+      try {
+        const data = await traceRegion(projectId, activeSheet.id, bounds, replaceExisting);
+        const nextRuns = data.result?.runs || [...result.runs, ...(data.new_runs || [])];
+        pushHistory(
+          replaceExisting ? 'Re-scan area pipa (ganti)' : 'Re-scan area pipa (tambah)',
+          result.runs,
+          nextRuns,
+          result.piping_ids,
+          data.result?.piping_ids || result.piping_ids
+        );
+        setResult(data.result || { ...result, runs: nextRuns });
+        setHasUnsavedChanges(true);
+        setStatusToast(
+          replaceExisting
+            ? `Re-scan selesai! Pipa di area telah diganti (${data.new_runs?.length || 0} pipa baru)`
+            : `Re-scan selesai! Menambahkan ${data.new_runs?.length || 0} pipa baru`
+        );
+        setTimeout(() => setStatusToast(null), 3000);
+        setTraceTool('pan');
+      } catch (err: any) {
+        alert('Gagal melakukan re-scan area: ' + (err.message || 'Server error'));
+      }
+    },
+    [projectId, activeSheet, result, pushHistory]
+  );
 
   // Keyboard shortcuts listener: Ctrl+Z (Undo), Ctrl+Y (Redo), Ctrl+S (Save), Esc (Cancel)
   useEffect(() => {
@@ -1135,6 +1178,7 @@ export default function ProjectWorkspace() {
               onSplitRun={handleSplitRun}
               onDeleteRuns={handleDeleteRuns}
               onUpdateRunLabel={handleUpdateRunLabel}
+              onUpdateRunPoints={handleUpdateRunPoints}
               splitMode={splitMode}
               onSetSplitMode={setSplitMode}
               canUndo={historyIndex >= 0}

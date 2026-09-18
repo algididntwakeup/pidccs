@@ -331,10 +331,67 @@ Sebagai acuan untuk sesi berikutnya, berikut adalah backlog prioritas yang belum
    - *Issue*: Potensi edge case di mana SVG overlay tersembunyi saat resizing window browser ekstrem atau saat berpindah tab browser pada level zoom maksimal.
    - *Rencana*: Memastikan listener viewport OpenSeadragon (`resize`, `animation-finish`, `update-viewport`) selalu memicu sinkronisasi matriks transformasi SVG secara deterministik.
 3. **Tool Re-scan ROI (Region of Interest)**:
-   - *Kebutuhan*: Engineer membutuhkan fitur pemindaian ulang hanya pada area tertentu (misal skid manifold rumit atau nozzle header tertentu) tanpa memproses ulang seluruh sheet 350 DPI yang memakan waktu.
-   - *Rencana*: Menambahkan tool seleksi kotak (*rubber-band rectangle ROI*) di kanvas yang mengirimkan koordinat bounding box ke backend untuk re-tracing lokal berkecepatan tinggi.
+   - *Status*: **100% Selesai di Pivot Sprint B.6**.
 4. **Manual Pen / Polyline Draw Tool**:
-   - *Kebutuhan*: Segmen pipa beresolusi rendah atau garis putus-putus (*dashed heat tracing/instrumentation*) yang terlewat oleh tracer otomatis harus dapat digambar manual oleh engineer.
-   - *Rencana*: Menambahkan mode gambar garis bebas/ortogonal (click-to-point polyline) dengan snap otomatis ke endpoint terdekat, menghasilkan objek `PipeRun` baru dengan flag `manual: true`, dan langsung tersimpan ke database.
+   - *Status*: **100% Selesai di Pivot Sprint B.6**.
+
+---
+
+## 8. Pivot Sprint B.6 Completion: Canvas Interactivity Fix, Draggable Vertices & Tool Activation
+
+### 8.1 Status Terakhir Komponen yang Dikerjakan
+
+1. **Perbaikan Seleksi Garis di Kanvas**:
+   - **Status**: 100% Selesai & Terverifikasi.
+   - **Implementasi**:
+     - Mengubah strategi pointer events pada container SVG overlay.
+     - Menghapus pemanggilan `e.preventDefault()` pada handler `onMouseDown` garis hit-target yang membatalkan event klik pada browser Chromium.
+     - Menggunakan deteksi jarak pergerakan pointer (< 6px) pada `onPointerDown` + `onPointerUp` untuk deteksi klik yang 100% deterministik.
+     - Menambahkan listener `canvas-click` native OpenSeadragon untuk melakukan deselect otomatis saat pengguna mengklik area kosong kanvas.
+2. **Draggable Vertex Control Points & Snap Alignment**:
+   - **Status**: 100% Selesai & Terverifikasi.
+   - **Implementasi**:
+     - Semua titik vertex polyline (baik titik ujung maupun titik belokan intermediate) kini dirender sebagai kontrol lingkaran interaktif (`fill="#F59E0B"` untuk endpoint, `fill="#3B82F6"` untuk intermediate).
+     - Mengaktifkan `pointerEvents: 'all'` dan cursor `grab`/`grabbing`.
+     - Saat drag dimulai, navigasi OpenSeadragon dimatikan sementara (`viewer.setMouseNavEnabled(false)`).
+     - **Snap-to-axis assist**: Menyelaraskan koordinat vertex secara otomatis ke sumbu horizontal atau vertikal terhadap titik adjacent ($\le 8$px) dengan visual guide line berwarna hijau.
+     - Endpoint backend baru `PATCH /api/v1/projects/{id}/sheets/{id}/result/runs/{idx}/points` menyimpan posisi titik baru secara persisten.
+3. **Aktivasi Box Trace (ROI Re-scan) & Dialog Option (C)**:
+   - **Status**: 100% Selesai & Terverifikasi.
+   - **Implementasi**:
+     - Pengguna dapat menarik kotak seleksi (*rubber-band rectangle*) di kanvas dengan outline putus-putus biru.
+     - Selesai menarik kotak, muncul modal konfirmasi Option (C):
+       - **Replace**: Menghapus pipa-pipa lama di dalam ROI dan menggantinya dengan hasil re-scan.
+       - **Append**: Menambahkan pipa baru hasil re-scan tanpa menghapus pipa yang sudah ada.
+       - **Batal**: Membatalkan seleksi.
+     - Power-user shortcut: Menahan tombol `Shift` saat melepaskan drag langsung memicu mode auto-replace instan tanpa modal.
+4. **Aktivasi Manual Pen Tool**:
+   - **Status**: 100% Selesai & Terverifikasi.
+   - **Implementasi**:
+     - Mengklik di kanvas meletakkan titik demi titik polyline dengan preview garis langsung.
+     - **Magnet snap**: Mendeteksi ujung pipa terdekat dalam radius 18px dan menempelkan titik secara presisi (indikator dot hijau).
+     - Menahan tombol `Shift` mengunci gerakan ke garis ortogonal (horizontal/vertikal).
+     - Tombol Enter, klik tombol "Selesai", atau Double-Click menyelesaikan penggambaran garis baru (`manual: true`, warna netral `#2563EB`).
+5. **Sistem Kursor Dinamis**:
+   - **Status**: 100% Selesai & Terverifikasi.
+   - **Implementasi**:
+     - Kursor berubah secara responsif sesuai tool: `default`/`pointer`/`grab` pada Pan & Select, `crosshair` pada Box Trace dan Manual Pen, serta `crosshair` pada mode Split Line.
+6. **Tuning Parameter Skeleton Line Tracer**:
+   - **Status**: 100% Selesai & Terverifikasi.
+   - **Implementasi**:
+     - `min_length_px`: diturunkan ke 12px untuk menangkap cabang pendek.
+     - `approxPolyDP epsilon`: 1.5 untuk kurva elbow yang lebih akurat.
+     - `adaptiveThreshold`: `blockSize=21, C=6` untuk mendeteksi garis CAD tipis dan pudar.
+     - Dilasi teks OCR: diskalakan dinamis dengan DPI (`max(3, int(5 * dpi/350))`) agar pipa dekat label teks tidak terpotong lubang.
+     - Gap bridging: `bridge_collinear_headers` ditingkatkan ke 55px dan `bridge_inline_valve_gaps` ke 90px.
+
+---
+
+### 8.2 Automated Test Suite Verification
+
+- `pytest tests/test_split_and_color.py tests/test_snap_equipment.py tests/test_masking_and_runs.py -v`:
+  - **13 passed, 1 skipped, 100% PASSED**.
+  - Termasuk verifikasi unit test baru untuk endpoint `update_run_points`.
+- Frontend compile: `npx tsc --noEmit` $\rightarrow$ **0 errors (100% Clean TypeScript build)**.
 
 

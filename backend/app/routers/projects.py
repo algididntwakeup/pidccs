@@ -17,6 +17,7 @@ class TraceRegionRequest(BaseModel):
     x2: float = Field(..., ge=0)
     y2: float = Field(..., ge=0)
     sheet_id: Optional[str] = None
+    replace_existing: bool = False
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -144,10 +145,33 @@ async def trace_region(
         })
 
     result = dict(sheet.result_json or {})
-    result["runs"] = list(result.get("runs", [])) + new_runs
+    current_runs = list(result.get("runs", []))
+
+    if payload.replace_existing:
+        # Option C: Replace existing runs that fall predominantly within the ROI box
+        retained_runs = []
+        for r in current_runs:
+            rx1 = r.get("x1", 0)
+            ry1 = r.get("y1", 0)
+            rx2 = r.get("x2", 0)
+            ry2 = r.get("y2", 0)
+            # Check if run center falls within ROI
+            rcx = (rx1 + rx2) / 2
+            rcy = (ry1 + ry2) / 2
+            if x1 <= rcx <= x2 and y1 <= rcy <= y2:
+                continue
+            retained_runs.append(r)
+        current_runs = retained_runs
+
+    result["runs"] = current_runs + new_runs
     sheet.result_json = result
     await db.commit()
-    return {"status": "success", "new_runs": new_runs, "total_runs": len(result["runs"])}
+    return {
+        "status": "success",
+        "new_runs": new_runs,
+        "total_runs": len(result["runs"]),
+        "result": result,
+    }
 
 
 @router.get("/{project_id}/sheets/{sheet_id}", response_model=SheetResponse)
@@ -271,6 +295,59 @@ async def update_sheet_run_color(
         "status": "success",
         "run_idx": run_idx,
         "color": color,
+        "result": sheet.result_json,
+    }
+
+
+@router.patch("/{project_id}/sheets/{sheet_id}/runs/{run_idx}/points")
+async def update_sheet_run_points(
+    project_id: str,
+    sheet_id: str,
+    run_idx: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update titik koordinat vertex untuk satu segmen polyline pipa."""
+    sheet = await ProjectService.get_sheet(db, sheet_id)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+
+    if not sheet.result_json or "runs" not in sheet.result_json:
+        raise HTTPException(status_code=400, detail="Sheet result has no traced runs")
+
+    res = dict(sheet.result_json)
+    runs = res.get("runs", [])
+    if run_idx < 0 or run_idx >= len(runs):
+        raise HTTPException(status_code=400, detail=f"Run index {run_idx} out of range")
+
+    pts = payload.get("points", [])
+    if not pts or len(pts) < 2:
+        raise HTTPException(status_code=400, detail="Run must have at least 2 points")
+
+    runs[run_idx]["points"] = pts
+    runs[run_idx]["x1"] = min(p[0] for p in pts)
+    runs[run_idx]["y1"] = min(p[1] for p in pts)
+    runs[run_idx]["x2"] = max(p[0] for p in pts)
+    runs[run_idx]["y2"] = max(p[1] for p in pts)
+    runs[run_idx]["manual"] = True
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    if max(ys) - min(ys) <= 4:
+        runs[run_idx]["axis"] = "h"
+    elif max(xs) - min(xs) <= 4:
+        runs[run_idx]["axis"] = "v"
+    else:
+        runs[run_idx]["axis"] = "poly"
+
+    res["runs"] = runs
+    sheet.result_json = res
+    await db.commit()
+
+    return {
+        "status": "success",
+        "run_idx": run_idx,
+        "points": pts,
         "result": sheet.result_json,
     }
 

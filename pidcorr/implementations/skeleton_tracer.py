@@ -210,7 +210,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 
         # Simplify collinear points along edge
         pts_arr = np.array(ordered_points, dtype=np.int32).reshape((-1, 1, 2))
-        approx = cv2.approxPolyDP(pts_arr, epsilon=2.0, closed=False)
+        approx = cv2.approxPolyDP(pts_arr, epsilon=1.5, closed=False)
         clean_pts = [(int(pt[0][0]), int(pt[0][1])) for pt in approx]
         if len(clean_pts) < 2:
             clean_pts = [p0, p1]
@@ -352,7 +352,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
-    def __init__(self, min_length_px: int = 18):
+    def __init__(self, min_length_px: int = 12):
         self.min_length_px = min_length_px
 
     def trace(
@@ -372,9 +372,9 @@ class SkeletonLineTracer(BaseLineTracer):
         H, W = img_bgr.shape[:2]
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
 
-        # Adaptive thresholding to capture clean pipe strokes
+        # Adaptive thresholding to capture clean pipe strokes (tuned to blockSize=21, C=6 for faint CAD lines)
         binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 8
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
         )
 
         # Remove very small noise dots
@@ -382,8 +382,9 @@ class SkeletonLineTracer(BaseLineTracer):
             binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         )
 
-        # 1. Dilated Text Masking: Dilate all OCR text bounding boxes by 8px in all directions
-        # and blackout on clean_binary so notes (e.g. "BY INSTR."), underlines, and slashes ("3/4") are eliminated
+        # 1. Dilated Text Masking: Scaled with DPI (5px at 350 DPI)
+        # to blackout notes/underlines while avoiding false gap creation in dense areas
+        dil_r = max(3, int(5 * (dpi / 350.0)))
         text_tokens = tokens or kwargs.get("pids") or []
         for t in text_tokens:
             if isinstance(t, dict):
@@ -397,10 +398,10 @@ class SkeletonLineTracer(BaseLineTracer):
                 tx2 = int(getattr(t, "x2", 0))
                 ty2 = int(getattr(t, "y2", 0))
             if tx2 > tx1 and ty2 > ty1:
-                dil_x1 = max(0, tx1 - 8)
-                dil_y1 = max(0, ty1 - 8)
-                dil_x2 = min(W, tx2 + 8)
-                dil_y2 = min(H, ty2 + 8)
+                dil_x1 = max(0, tx1 - dil_r)
+                dil_y1 = max(0, ty1 - dil_r)
+                dil_x2 = min(W, tx2 + dil_r)
+                dil_y2 = min(H, ty2 + dil_r)
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
         # 2. Equipment Interior Masking: Blackout total interior of equipment boxes (vessels, tanks, etc.)
@@ -448,9 +449,9 @@ class SkeletonLineTracer(BaseLineTracer):
         filtered = suppress_drawing_margins(filtered, page_wh=(W, H))
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
-        filtered = bridge_collinear_headers(filtered)
+        filtered = bridge_collinear_headers(filtered, max_gap_px=55)
 
         # 7. Bridge pipe runs cut by inline valves
-        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=75)
+        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=90)
 
         return filtered

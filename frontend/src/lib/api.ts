@@ -184,6 +184,37 @@ export async function updateRunLabel(projectId: string, sheetId: string, runIdx:
   return res.json();
 }
 
+export async function updateRunPoints(projectId: string, sheetId: string, runIdx: number, points: [number, number][]) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/points`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ points }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update run points' }));
+    throw new Error(err.detail || 'Failed to update run points');
+  }
+  return res.json();
+}
+
+export async function traceRegion(
+  projectId: string,
+  sheetId: string,
+  bounds: { x1: number; y1: number; x2: number; y2: number },
+  replaceExisting: boolean = false
+) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/trace-region`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...bounds, sheet_id: sheetId, replace_existing: replaceExisting }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to trace region' }));
+    throw new Error(err.detail || 'Failed to trace region');
+  }
+  return res.json();
+}
+
 export function getDziUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/dzi`;
 }

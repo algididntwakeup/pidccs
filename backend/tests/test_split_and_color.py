@@ -100,16 +100,16 @@ async def test_api_split_and_color_endpoints():
         from app.models.project import Project
         from app.models.sheet import Sheet
         from app.routers.results import (
-            split_run, update_run_color, batch_update_run_colors,
-            SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest
+            split_run, update_run_color, batch_update_run_colors, update_run_points,
+            SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest, UpdateRunPointsRequest
         )
     except ImportError:
         from backend.app.db.base import Base
         from backend.app.models.project import Project
         from backend.app.models.sheet import Sheet
         from backend.app.routers.results import (
-            split_run, update_run_color, batch_update_run_colors,
-            SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest
+            split_run, update_run_color, batch_update_run_colors, update_run_points,
+            SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest, UpdateRunPointsRequest
         )
     import uuid
 
@@ -184,6 +184,19 @@ async def test_api_split_and_color_endpoints():
         assert batch_res["result"]["runs"][0]["color"] == "#16A34A"
         assert batch_res["result"]["runs"][1]["color"] == "#16A34A"
         assert batch_res["result"]["runs"][2]["color"] == "#16A34A"
+
+        # 4. Test Update Run Points Endpoint (Drag vertex to straighten)
+        pts_res = await update_run_points(
+            project_id=proj_id,
+            sheet_id=sheet_id,
+            run_idx=0,
+            payload=UpdateRunPointsRequest(points=[[10.0, 10.0], [200.0, 10.0]]),
+            db=db,
+        )
+        assert pts_res["status"] == "success"
+        assert pts_res["points"] == [[10.0, 10.0], [200.0, 10.0]]
+        assert pts_res["result"]["runs"][0]["points"] == [[10.0, 10.0], [200.0, 10.0]]
+        assert pts_res["result"]["runs"][0]["axis"] == "h"
 
     # Cleanup sqlite test db
     await test_engine.dispose()
