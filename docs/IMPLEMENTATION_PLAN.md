@@ -836,3 +836,67 @@ gantt
 7. **PDF Export Fidelity**: **Wajib mempertahankan editable vector annotation (PyMuPDF)** agar tiap polyline pipa dan box anotasi dapat diedit/dipindahkan oleh engineer di Adobe Acrobat.
 8. **Line List Source**: **Dynamic Column Mapping** dengan template CSV/Excel default yang disarankan + fitur Column Mapper fleksibel di UI agar pengguna dapat memetakan format kolom kontraktor EPC mana pun.
 
+---
+
+## Pivot Sprint (Phase B.5): Tracing Quality, Dilated Masking & Pipe Inspector
+
+### 1. Status Terakhir Komponen yang Dikerjakan
+- **Eliminasi Double Lines (100% Selesai)**:
+  - Base image OpenSeadragon di-lock murni ke `getRawImageUrl` dalam mode digitasi.
+  - Server-side burned-in circuit colors dan kotak legenda `"CORROSION SYSTEM"` dinonaktifkan dari pipeline.
+  - Semua polyline pipa dirender seragam dengan warna netral default `#2563EB` pada layer vektor SVG interaktif tunggal.
+- **Perbaikan Masking Tracing & Gap Bridging (100% Selesai)**:
+  - Dilated OCR text masking 8px blackout menghilangkan teks anotasi (misal `"BY INSTR."`), underline catatan, dan slash ukuran (`"3/4"`).
+  - Inset interior masking 4px pada equipment (vessel, tank) menghapus sekat internal tanpa merusak tepi snap nozzle perimeter.
+  - Furniture & instrument CAD masking membersihkan garis non-pipa.
+  - Algoritma `bridge_inline_valve_gaps` menyambungkan gap pipa di celah valve.
+  - Relaksasi `min_length_px = 18` menjaga cabang pendek tetap tertangkap.
+  - Optimasi $O(N \log N)$ 1D bucket interval merge memangkas runtime collinear bridging dari 3 menit menjadi < 0.02 detik.
+- **Perbaikan Toggle Visibilitas Canvas (100% Selesai)**:
+  - Menghapus pemanggilan `viewer.open()` pada event toggle "Pipa: ON/OFF".
+  - Visibilitas diatur mulus via CSS `display: showOverlay ? 'block' : 'none'`, menjaga referensi DOM SVG overlay tetap utuh dan reaktif.
+- **Pipe Inspector Sidebar & Two-Way Sync (100% Selesai)**:
+  - Sub-tab baru "Pipa (Inspector)" di sidebar kanan.
+  - Two-way sync: Klik baris di sidebar memicu zoom/pan OpenSeadragon ke pipa target; klik pipa di kanvas memicu auto-scroll ke baris tabel terkait.
+  - Single-run editor: rename tag label, 5 quick colors + hex picker, tombol hapus segmen.
+  - Batch editing: checkbox pilihan per baris, tombol pilih semua, batch recolor, dan batch delete.
+  - Undo/Redo 20 langkah (Ctrl+Z / Ctrl+Y) dan manual save ke PostgreSQL database (Ctrl+S).
+
+### 2. Daftar File yang Dimodifikasi & Fungsi Utamanya
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py) | Core CV | Menambahkan atribut `id`, `label`, `manual` pada `PipeRun`; algoritma `bridge_inline_valve_gaps`; optimasi $O(N \log N)$ `bridge_collinear_headers`; algoritma snapping titik ujung ke batas equipment perimeter. |
+| [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py) | Core CV | Dilasi 8px blackout teks OCR; inset 4px blackout interior vessel/tank; suppression furniture/instrument; integrasi valve gap bridging; batas relaksasi `min_length_px = 18`. |
+| [`pidcorr/orchestrator.py`](file:///c:/Werk/pidccs/pidcorr/orchestrator.py) | Pipeline | Pengecekan signature adapter tracer (`inspect.signature`) dan serialisasi bersih `PipeRun` ke JSON dictionary. |
+| [`backend/worker/tasks.py`](file:///c:/Werk/pidccs/backend/worker/tasks.py) | Celery Worker | Menonaktifkan sementara propagasi multi-warna sirkuit API RP 970; mengosongkan `systems = []` untuk single-layer neutral blue tracing. |
+| [`backend/app/schemas/run.py`](file:///c:/Werk/pidccs/backend/app/schemas/run.py) | Backend Schema | Penambahan field `id`, `label`, `manual` pada Pydantic model `PipeRun`. |
+| [`backend/app/routers/results.py`](file:///c:/Werk/pidccs/backend/app/routers/results.py) | REST API | Endpoint manipulasi per-run: `DELETE /runs/{idx}`, `POST /runs/batch-delete`, `PATCH /runs/{idx}/label`, `POST /runs/{idx}/split`, `PATCH /runs/{idx}/color`. |
+| [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py) | REST API | Registrasi rute manipulasi run pipa di bawah resource sheet project. |
+| [`backend/tests/test_masking_and_runs.py`](file:///c:/Werk/pidccs/backend/tests/test_masking_and_runs.py) | Tests | Unit test suite baru untuk dilated text masking, equipment interior masking, valve gap bridging, dan skema run. |
+| [`backend/tests/test_snap_equipment.py`](file:///c:/Werk/pidccs/backend/tests/test_snap_equipment.py) | Tests | Penyesuaian threshold `min_length_px <= 25` dan graceful fallback import `app` / `backend.app`. |
+| [`backend/tests/test_split_and_color.py`](file:///c:/Werk/pidccs/backend/tests/test_split_and_color.py) | Tests | Fallback import modul `app` vs `backend.app` untuk eksekusi container maupun host. |
+| [`frontend/src/types/schema.ts`](file:///c:/Werk/pidccs/frontend/src/types/schema.ts) | Frontend Types | Interface TypeScript `PipeRun` dengan field `id`, `label`, `manual`, `pid`, `fluid`. |
+| [`frontend/src/lib/api.ts`](file:///c:/Werk/pidccs/frontend/src/lib/api.ts) | Frontend Client | Method API client: `deleteRun`, `batchDeleteRuns`, `updateRunLabel`, `splitRun`, `updateRunColor`, `batchUpdateRunColors`. |
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend UI | Komponen SVG overlay interaktif: hit-target 22px, hover/selection halo amber, floating action popover, CSS display toggle, dan orthogonal projection live crosshair. |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Lock raw CAD base image, perbaikan toggle visibilitas tanpa viewer reset, sub-tab Pipe Inspector sidebar, two-way pan/zoom sync, batch toolbar, dan 20-step undo/redo stack. |
+
+---
+
+### 3. Handover Roadmap: Task Berikutnya yang Belum Sempat Dieksekusi
+Sebagai acuan prioritas untuk sesi berikutnya:
+
+1. **Perbaikan Tab Duplikat di Sidebar**:
+   - *Issue*: Saat ini di sidebar kanan terdapat tab `Lines` (daftar teks piping ID bawaan OCR/Line List) dan sub-tab baru `Pipa (Inspector)` (daftar segmen fisik run hasil tracer).
+   - *Target*: Merapikan dan mengonsolidasikan navigasi sidebar agar tidak membingungkan engineer. Gabungkan atau tautkan entitas piping ID dengan segmen polyline pipa di bawah satu tampilan hierarkis yang intuitif (Piping Tag $\rightarrow$ Child Runs).
+2. **Investigasi Overlay Lenyap pada Skenario Khusus**:
+   - *Issue*: Meneliti potensi edge case di mana SVG overlay tersembunyi atau tidak sinkron saat terjadi resizing window browser secara ekstrem atau saat berpindah antar tab browser pada level zoom maksimal.
+   - *Target*: Memastikan listener viewport OpenSeadragon (`resize`, `animation-finish`, `update-viewport`) selalu men-trigger sinkronisasi koordinat matriks SVG secara deterministik.
+3. **Tool Re-scan ROI (Region of Interest)**:
+   - *Kebutuhan*: Engineer sering kali ingin memindai ulang hanya area kecil (misal skid manifold rumit atau nozzle header tertentu) dengan parameter relaksasi khusus tanpa harus menjalankan ulang deteksi full-page 350 DPI yang memakan waktu.
+   - *Target*: Menambahkan mode seleksi kotak (*rubber-band rectangle ROI*) di kanvas yang mengirim koordinat bounding box ke backend untuk re-tracing lokal instan.
+4. **Manual Pen / Polyline Draw Tool**:
+   - *Kebutuhan*: Segmen pipa beresolusi rendah atau garis putus-putus (*dashed instrumentation / heat tracing*) yang terlewat oleh algoritma otomatis perlu dapat digambar manual oleh engineer.
+   - *Target*: Menambahkan drawing tool di kanvas (click-to-point polyline) dengan snap otomatis ke endpoint terdekat, menghasilkan objek `PipeRun` baru dengan `manual: true`, dan langsung tersimpan ke database.
+
+
