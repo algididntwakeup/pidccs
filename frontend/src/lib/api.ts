@@ -147,6 +147,43 @@ export async function batchUpdateRunColors(projectId: string, sheetId: string, r
   return res.json();
 }
 
+export async function deleteRun(projectId: string, sheetId: string, runIdx: number) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to delete run' }));
+    throw new Error(err.detail || 'Failed to delete run');
+  }
+  return res.json();
+}
+
+export async function batchDeleteRuns(projectId: string, sheetId: string, runIdxs: number[]) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/batch-delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_idxs: runIdxs }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to batch delete runs' }));
+    throw new Error(err.detail || 'Failed to batch delete runs');
+  }
+  return res.json();
+}
+
+export async function updateRunLabel(projectId: string, sheetId: string, runIdx: number, label: string) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/label`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update run label' }));
+    throw new Error(err.detail || 'Failed to update run label');
+  }
+  return res.json();
+}
+
 export function getDziUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/dzi`;
 }

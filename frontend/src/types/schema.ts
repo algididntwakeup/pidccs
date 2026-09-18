@@ -43,6 +43,7 @@ export interface PipingID {
 }
 
 export interface PipeRun {
+  id?: string;
   points: [number, number][];
   axis: 'h' | 'v' | 'd' | 'poly';
   x1: number;
@@ -51,6 +52,10 @@ export interface PipeRun {
   y2: number;
   underline?: boolean;
   color?: string;
+  label?: string;
+  pid?: string;
+  fluid?: string;
+  manual?: boolean;
   length?: number;
 }
 

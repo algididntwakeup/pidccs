@@ -8,7 +8,10 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from pidcorr.lines import PipeRun, split_poly_run
-from backend.app.services.export_service import ExportService
+try:
+    from app.services.export_service import ExportService
+except ImportError:
+    from backend.app.services.export_service import ExportService
 
 
 def test_split_poly_run_geometry():
@@ -92,13 +95,22 @@ def test_split_poly_run_reindex_piping_ids():
 async def test_api_split_and_color_endpoints():
     """Test full API router flow for split line and recoloring."""
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-    from backend.app.db.base import Base
-    from backend.app.models.project import Project
-    from backend.app.models.sheet import Sheet
-    from backend.app.routers.results import (
-        split_run, update_run_color, batch_update_run_colors,
-        SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest
-    )
+    try:
+        from app.db.base import Base
+        from app.models.project import Project
+        from app.models.sheet import Sheet
+        from app.routers.results import (
+            split_run, update_run_color, batch_update_run_colors,
+            SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest
+        )
+    except ImportError:
+        from backend.app.db.base import Base
+        from backend.app.models.project import Project
+        from backend.app.models.sheet import Sheet
+        from backend.app.routers.results import (
+            split_run, update_run_color, batch_update_run_colors,
+            SplitRunRequest, UpdateRunColorRequest, BatchUpdateRunColorsRequest
+        )
     import uuid
 
     test_engine = create_async_engine("sqlite+aiosqlite:///./test_split.db", connect_args={"check_same_thread": False})

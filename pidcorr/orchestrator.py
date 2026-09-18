@@ -98,13 +98,18 @@ class PipelineOrchestrator:
         # Stage 4: Pipe Line Tracing
         if progress:
             progress("Tracing jalur pipa...")
-        runs = self.tracer.trace(
-            img_bgr=img_bgr,
-            dpi=dpi,
-            detections=syms,
-            furniture=furniture,
-            progress=progress,
-        )
+        trace_kwargs = {
+            "img_bgr": img_bgr,
+            "dpi": dpi,
+            "detections": syms,
+            "furniture": furniture,
+            "progress": progress,
+        }
+        import inspect
+        sig = inspect.signature(self.tracer.trace)
+        if "tokens" in sig.parameters:
+            trace_kwargs["tokens"] = tokens
+        runs = self.tracer.trace(**trace_kwargs)
 
         # Association: link piping IDs to pipe runs
         if progress:
@@ -113,11 +118,15 @@ class PipelineOrchestrator:
         run_index = {id(r): i for i, r in enumerate(runs)}
 
         pid_recs = []
+        run_label_map = {}
         for a in assoc:
             p = pids[a["pid_idx"]]
             ri = run_index.get(id(a["run"]), -1) if a["run"] is not None else -1
+            pid_str = getattr(p, "pid", None) if not isinstance(p, dict) else p.get("pid", "")
+            if ri >= 0 and pid_str:
+                run_label_map[ri] = pid_str
             rec = {
-                "pid": getattr(p, "pid", None) if not isinstance(p, dict) else p.get("pid", ""),
+                "pid": pid_str,
                 "x1": float(getattr(p, "x1", 0) if not isinstance(p, dict) else p.get("x1", 0)),
                 "y1": float(getattr(p, "y1", 0) if not isinstance(p, dict) else p.get("y1", 0)),
                 "x2": float(getattr(p, "x2", 0) if not isinstance(p, dict) else p.get("x2", 0)),
@@ -138,30 +147,35 @@ class PipelineOrchestrator:
         pid_recs = _dedup_pid_recs(pid_recs)
 
         run_recs = []
-        for r in runs:
+        for i, r in enumerate(runs):
+            run_id = f"run-{i}"
+            assigned_label = run_label_map.get(i, getattr(r, "label", getattr(r, "pid", "")))
             if hasattr(r, "points"):
-                run_recs.append({
-                    "points": [[int(x), int(y)] for x, y in r.points],
-                    "axis": getattr(r, "axis", "poly"),
-                    "x1": int(r.x1),
-                    "y1": int(r.y1),
-                    "x2": int(r.x2),
-                    "y2": int(r.y2),
-                    "underline": bool(getattr(r, "underline", False)),
-                    "color": getattr(r, "color", "#2563EB"),
-                })
+                pts = [[int(x), int(y)] for x, y in r.points]
+                axis = getattr(r, "axis", "poly")
+                underline = bool(getattr(r, "underline", False))
+                color = getattr(r, "color", "#2563EB")
+                manual = bool(getattr(r, "manual", False))
             else:
                 pts = r.get("points", [])
-                run_recs.append({
-                    "points": pts,
-                    "axis": r.get("axis", "poly"),
-                    "x1": int(r.get("x1", pts[0][0] if pts else 0)),
-                    "y1": int(r.get("y1", pts[0][1] if pts else 0)),
-                    "x2": int(r.get("x2", pts[-1][0] if pts else 0)),
-                    "y2": int(r.get("y2", pts[-1][1] if pts else 0)),
-                    "underline": bool(r.get("underline", False)),
-                    "color": r.get("color", "#2563EB"),
-                })
+                axis = r.get("axis", "poly")
+                underline = bool(r.get("underline", False))
+                color = r.get("color", "#2563EB")
+                manual = bool(r.get("manual", False))
+
+            run_recs.append({
+                "id": run_id,
+                "points": pts,
+                "axis": axis,
+                "x1": min(p[0] for p in pts) if pts else 0,
+                "y1": min(p[1] for p in pts) if pts else 0,
+                "x2": max(p[0] for p in pts) if pts else 0,
+                "y2": max(p[1] for p in pts) if pts else 0,
+                "underline": underline,
+                "color": color,
+                "label": assigned_label or "",
+                "manual": manual,
+            })
 
         # Stage 5: Connection Points (Spec breaks) detection
         if progress:
@@ -194,6 +208,17 @@ class PipelineOrchestrator:
                 split_at_connection_points(result, dpi=dpi)
             except Exception:
                 pass
+
+        # Re-ensure every run has id, label, manual, color after any spec break split
+        for idx, run_item in enumerate(result.get("runs", [])):
+            if not run_item.get("id"):
+                run_item["id"] = f"run-{idx}"
+            if "color" not in run_item or not run_item["color"]:
+                run_item["color"] = "#2563EB"
+            if "label" not in run_item:
+                run_item["label"] = ""
+            if "manual" not in run_item:
+                run_item["manual"] = False
 
         # Detect Off-Page Connectors (OPC)
         opcs = []

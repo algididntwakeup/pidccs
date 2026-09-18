@@ -31,6 +31,9 @@ class PipeRun:
     fluid: str = ""
     underline: bool = False                   # True = garis-penunjuk ber-label (BUKAN pipa)
     color: str = "#2563EB"                    # Default neutral blue (Phase B.5)
+    id: str = ""                              # Unique run identifier (e.g. run-0)
+    label: str = ""                           # Custom tag or line label
+    manual: bool = False                      # True if manually created/edited by engineer
 
     # kompat lama: x1,y1,x2,y2 = ujung-ujung polyline
     @property
@@ -57,6 +60,9 @@ class PipeRun:
         if key == "fluid": return self.fluid
         if key == "underline": return self.underline
         if key == "color": return getattr(self, "color", "#2563EB")
+        if key == "id": return getattr(self, "id", "")
+        if key == "label": return getattr(self, "label", getattr(self, "pid", ""))
+        if key == "manual": return getattr(self, "manual", False)
         if key == "x1": return min(p[0] for p in self.points)
         if key == "y1": return min(p[1] for p in self.points)
         if key == "x2": return max(p[0] for p in self.points)
@@ -298,7 +304,7 @@ def _subtract_intervals(lo, hi, ins, min_keep):
 # menghapus pipa asli di dalamnya — pada 013-01 satu kotak 16,2% halaman menelan 32% dari
 # seluruh pipa bertanda engineer. Sebaran 123 kotak equipment di dataset: median 1,1%,
 # persentil-95 6,1%, persentil-99 8,9%, dan hanya kotak itu yang melampaui ambang ini.
-MAX_EQUIP_AREA_FRAC = 0.10
+MAX_EQUIP_AREA_FRAC = 0.95
 
 
 def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=None):
@@ -309,14 +315,6 @@ def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=
     Efek: pipa berhenti di tepi equipment. Bila sebuah piping ID kehilangan pipanya karena
     ini -> otomatis jadi 'pid_none' di panel Review (user yang memutuskan)."""
     eqs = [d for d in (detections or []) if d.get("coarse") == "equipment"]
-    if page_wh:
-        page = float(page_wh[0]) * float(page_wh[1])
-        big = [d for d in eqs
-               if (d["x2"] - d["x1"]) * (d["y2"] - d["y1"]) > MAX_EQUIP_AREA_FRAC * page]
-        if big:
-            # kotaknya TETAP dilaporkan sebagai deteksi (engineer bisa mengoreksinya di GUI);
-            # yang dilewati hanya penekanan interiornya
-            eqs = [d for d in eqs if d not in big]
     if not eqs:
         return segs
     m = margin_pt * dpi / 72.0
@@ -424,11 +422,17 @@ def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
                                 min_d = d
                                 best_snap = (min(bx2, max(bx1, px)), by2)
 
-                    # 2. Geometric fallback snap to nearest point on perimeter
+                    # 2. Geometric fallback snap to nearest point on perimeter (only if does not severely warp orientation)
                     d_geom = math.hypot(px - cx, py - cy)
                     if d_geom < min_d:
-                        min_d = d_geom
-                        best_snap = (cx, cy)
+                        warp_ok = True
+                        if abs(vx) >= 1.2 * abs(vy) and abs(py - cy) > 8:
+                            warp_ok = False
+                        elif abs(vy) >= 1.2 * abs(vx) and abs(px - cx) > 8:
+                            warp_ok = False
+                        if warp_ok:
+                            min_d = d_geom
+                            best_snap = (cx, cy)
 
             if best_snap is not None and min_d <= snap_radius_px:
                 pts[end_idx] = [int(round(best_snap[0])), int(round(best_snap[1]))]
@@ -785,7 +789,90 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
     if not segs or len(segs) < 2:
         return segs
 
-    out = list(segs)
+    horiz_groups = defaultdict(list)
+    vert_groups = defaultdict(list)
+    others = []
+
+    for s in segs:
+        pts = s.points if hasattr(s, "points") else s.get("points", [])
+        if len(pts) != 2:
+            others.append(s)
+            continue
+        (x1, y1), (x2, y2) = pts[0], pts[-1]
+        is_h = abs(y1 - y2) <= tol_px
+        is_v = abs(x1 - x2) <= tol_px
+        if is_h and not is_v:
+            y_mid = int(round((y1 + y2) / 2.0))
+            key = y_mid // (tol_px + 1)
+            horiz_groups[key].append((min(x1, x2), max(x1, x2), y_mid, s))
+        elif is_v and not is_h:
+            x_mid = int(round((x1 + x2) / 2.0))
+            key = x_mid // (tol_px + 1)
+            vert_groups[key].append((min(y1, y2), max(y1, y2), x_mid, s))
+        else:
+            others.append(s)
+
+    out = list(others)
+
+    # Process horizontal groups
+    for key, items in horiz_groups.items():
+        items.sort(key=lambda it: it[0])
+        curr_min, curr_max, curr_y, base_s = items[0]
+        color = getattr(base_s, "color", "#2563EB")
+        label = getattr(base_s, "label", "")
+
+        for next_min, next_max, next_y, s in items[1:]:
+            if next_min - curr_max <= max_gap_px:
+                curr_max = max(curr_max, next_max)
+                curr_y = int(round((curr_y + next_y) / 2.0))
+            else:
+                out.append(PipeRun([(curr_min, curr_y), (curr_max, curr_y)], axis="h", color=color, label=label))
+                curr_min, curr_max, curr_y, base_s = next_min, next_max, next_y, s
+                color = getattr(base_s, "color", "#2563EB")
+                label = getattr(base_s, "label", "")
+        out.append(PipeRun([(curr_min, curr_y), (curr_max, curr_y)], axis="h", color=color, label=label))
+
+    # Process vertical groups
+    for key, items in vert_groups.items():
+        items.sort(key=lambda it: it[0])
+        curr_min, curr_max, curr_x, base_s = items[0]
+        color = getattr(base_s, "color", "#2563EB")
+        label = getattr(base_s, "label", "")
+
+        for next_min, next_max, next_x, s in items[1:]:
+            if next_min - curr_max <= max_gap_px:
+                curr_max = max(curr_max, next_max)
+                curr_x = int(round((curr_x + next_x) / 2.0))
+            else:
+                out.append(PipeRun([(curr_x, curr_min), (curr_x, curr_max)], axis="v", color=color, label=label))
+                curr_min, curr_max, curr_x, base_s = next_min, next_max, next_x, s
+                color = getattr(base_s, "color", "#2563EB")
+                label = getattr(base_s, "label", "")
+        out.append(PipeRun([(curr_x, curr_min), (curr_x, curr_max)], axis="v", color=color, label=label))
+
+    return out
+
+
+def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
+    """Sambungkan pipa lurus yang terpotong oleh katup inline (valve) atau celah kecil.
+    Menghubungkan dua PipeRun terpisah melewati gap katup menjadi satu polyline bersambung."""
+    if not runs or len(runs) < 2:
+        return runs
+
+    valves = [d for d in (detections or []) if d.get("coarse") == "valve"]
+    if not valves:
+        return runs
+
+    valve_boxes = [(float(v["x1"]), float(v["y1"]), float(v["x2"]), float(v["y2"])) for v in valves]
+
+    def near_any_valve(pt):
+        px, py = pt
+        return any(
+            (vx1 - max_gap_px <= px <= vx2 + max_gap_px) and (vy1 - max_gap_px <= py <= vy2 + max_gap_px)
+            for vx1, vy1, vx2, vy2 in valve_boxes
+        )
+
+    out = list(runs)
     merged = True
     while merged:
         merged = False
@@ -793,49 +880,74 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
         for i in range(n):
             if merged:
                 break
-            s1 = out[i]
-            if len(s1.points) != 2:
+            r1 = out[i]
+            pts1 = r1.points if hasattr(r1, "points") else r1.get("points", [])
+            if len(pts1) < 2 or not (near_any_valve(pts1[0]) or near_any_valve(pts1[-1])):
                 continue
-            (x1a, y1a), (x1b, y1b) = s1.points[0], s1.points[-1]
-            s1_vert = abs(x1a - x1b) <= tol_px
-            s1_horiz = abs(y1a - y1b) <= tol_px
 
             for j in range(i + 1, n):
-                s2 = out[j]
-                if len(s2.points) != 2:
+                if merged:
+                    break
+                r2 = out[j]
+                pts2 = r2.points if hasattr(r2, "points") else r2.get("points", [])
+                if len(pts2) < 2:
                     continue
-                (x2a, y2a), (x2b, y2b) = s2.points[0], s2.points[-1]
-                s2_vert = abs(x2a - x2b) <= tol_px
-                s2_horiz = abs(y2a - y2b) <= tol_px
 
-                # Kolinear vertikal
-                if s1_vert and s2_vert and abs((x1a + x1b) / 2 - (x2a + x2b) / 2) <= tol_px:
-                    y1_min, y1_max = min(y1a, y1b), max(y1a, y1b)
-                    y2_min, y2_max = min(y2a, y2b), max(y2a, y2b)
-                    gap1 = y2_min - y1_max
-                    gap2 = y1_min - y2_max
-                    if (0 <= gap1 <= max_gap_px) or (0 <= gap2 <= max_gap_px):
-                        xm = int(round((x1a + x1b + x2a + x2b) / 4.0))
-                        new_y_min = min(y1_min, y2_min)
-                        new_y_max = max(y1_max, y2_max)
-                        merged_run = PipeRun([(xm, new_y_min), (xm, new_y_max)], axis="v")
-                        out.pop(j)
-                        out.pop(i)
-                        out.append(merged_run)
-                        merged = True
-                        break
+                pairs = [
+                    (pts1[-1], pts2[0], False, False, pts1[-2], pts2[1]),   # r1 -> r2
+                    (pts2[-1], pts1[0], True, False, pts2[-2], pts1[1]),    # r2 -> r1
+                    (pts1[0], pts2[0], False, True, pts1[1], pts2[1]),      # rev(r1) -> r2
+                    (pts1[-1], pts2[-1], False, True, pts1[-2], pts2[-2]),  # r1 -> rev(r2)
+                ]
 
-                # Kolinear horizontal
-                elif s1_horiz and s2_horiz and abs((y1a + y1b) / 2 - (y2a + y2b) / 2) <= tol_px:
-                    x1_min, x1_max = min(x1a, x1b), max(x1a, x1b)
-                    x2_min, x2_max = min(x2a, x2b), max(x2a, x2b)
-                    gap1 = x2_min - x1_max
-                    gap2 = x1_min - x2_max
-                    if (0 <= gap1 <= max_gap_px) or (0 <= gap2 <= max_gap_px):
-                        ym = int(round((y1a + y1b + y2a + y2b) / 4.0))
-                        new_x_min = min(x1_min, x2_min)
-                        new_x_max = max(x1_max, x2_max)
-                        merged_run = PipeRun([(new_x_min, ym), (new_x_max, ym)], axis="h")
+                for pA, pB, swap, rev2, prevA, nextB in pairs:
+                    dx = abs(pA[0] - pB[0])
+                    dy = abs(pA[1] - pB[1])
+                    dist = math.hypot(dx, dy)
+
+                    if not (0 < dist <= max_gap_px):
+                        continue
+
+                    # Tangent check: both incoming segment (prevA -> pA) and outgoing (pB -> nextB) must be collinear
+                    vA = (pA[0] - prevA[0], pA[1] - prevA[1])
+                    vB = (nextB[0] - pB[0], nextB[1] - pB[1])
+
+                    is_hA = abs(vA[0]) >= 1.5 * abs(vA[1])
+                    is_hB = abs(vB[0]) >= 1.5 * abs(vB[1])
+                    is_vA = abs(vA[1]) >= 1.5 * abs(vA[0])
+                    is_vB = abs(vB[1]) >= 1.5 * abs(vB[0])
+
+                    is_h = is_hA and is_hB and dy <= tol_px and dx > 0
+                    is_v = is_vA and is_vB and dx <= tol_px and dy > 0
+
+                    has_valve_between = False
+                    if valve_boxes and (is_hA == is_hB and is_vA == is_vB):
+                        mid_x = (pA[0] + pB[0]) / 2.0
+                        mid_y = (pA[1] + pB[1]) / 2.0
+                        for vx1, vy1, vx2, vy2 in valve_boxes:
+                            if (vx1 - 15 <= mid_x <= vx2 + 15) and (vy1 - 15 <= mid_y <= vy2 + 15):
+                                has_valve_between = True
+                                break
+
+                    if is_h or is_v or has_valve_between:
+                        first_pts = list(pts2 if swap else pts1)
+                        second_pts = list(pts1 if swap else pts2)
+
+                        if pA == (pts1[0] if not swap else pts2[0]):
+                            first_pts = first_pts[::-1]
+                        if rev2:
+                            second_pts = second_pts[::-1]
+
+                        combined_pts = first_pts + second_pts
+                        clean_pts = [(int(p[0]), int(p[1])) for p in combined_pts]
+
+                        base_r = r1 if not swap else r2
+                        axis = getattr(base_r, "axis", "poly") if hasattr(base_r, "axis") else base_r.get("axis", "poly")
+                        color = getattr(base_r, "color", "#2563EB") if hasattr(base_r, "color") else base_r.get("color", "#2563EB")
+                        label = getattr(base_r, "label", "") if hasattr(base_r, "label") else base_r.get("label", "")
+
+                        merged_run = PipeRun(points=clean_pts, axis=axis, color=color, label=label)
+
                         out.pop(j)
                         out.pop(i)
                         out.append(merged_run)

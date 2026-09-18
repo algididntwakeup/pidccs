@@ -248,3 +248,172 @@ async def batch_update_sheet_run_colors(
         "result": sheet.result_json,
     }
 
+
+@router.delete("/{project_id}/sheets/{sheet_id}/runs/{run_idx}")
+async def delete_sheet_run(
+    project_id: str,
+    sheet_id: str,
+    run_idx: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Hapus satu segmen polyline pipa dari runs dan re-index piping_ids."""
+    sheet = await ProjectService.get_sheet(db, sheet_id)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+
+    if not sheet.result_json or "runs" not in sheet.result_json:
+        raise HTTPException(status_code=400, detail="Sheet result has no traced runs")
+
+    res = dict(sheet.result_json)
+    runs = list(res.get("runs", []))
+    pids = list(res.get("piping_ids", []))
+
+    if run_idx < 0 or run_idx >= len(runs):
+        raise HTTPException(status_code=400, detail=f"Run index {run_idx} out of range")
+
+    deleted_run = runs.pop(run_idx)
+
+    new_pids = []
+    for p in pids:
+        p_rec = dict(p)
+        r_idx = p_rec.get("run_idx", -1)
+        if r_idx == run_idx:
+            p_rec["run_idx"] = -1
+            p_rec["state"] = "none"
+        elif r_idx > run_idx:
+            p_rec["run_idx"] = r_idx - 1
+
+        extra = p_rec.get("extra_runs", [])
+        if extra:
+            new_extra = []
+            for er in extra:
+                if er == run_idx:
+                    continue
+                new_extra.append(er - 1 if er > run_idx else er)
+            p_rec["extra_runs"] = new_extra
+
+        new_pids.append(p_rec)
+
+    for idx, r in enumerate(runs):
+        r["id"] = f"run-{idx}"
+
+    res["runs"] = runs
+    res["piping_ids"] = new_pids
+    sheet.result_json = res
+    await db.commit()
+
+    return {
+        "status": "success",
+        "deleted_run_idx": run_idx,
+        "deleted_run": deleted_run,
+        "total_runs": len(runs),
+        "result": sheet.result_json,
+    }
+
+
+@router.post("/{project_id}/sheets/{sheet_id}/runs/batch-delete")
+async def batch_delete_sheet_runs(
+    project_id: str,
+    sheet_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Hapus beberapa segmen polyline pipa sekaligus secara massal."""
+    sheet = await ProjectService.get_sheet(db, sheet_id)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+
+    if not sheet.result_json or "runs" not in sheet.result_json:
+        raise HTTPException(status_code=400, detail="Sheet result has no traced runs")
+
+    res = dict(sheet.result_json)
+    runs = list(res.get("runs", []))
+    pids = list(res.get("piping_ids", []))
+    n_runs = len(runs)
+
+    indices_to_delete = sorted(set(ri for ri in payload.get("run_idxs", []) if 0 <= ri < n_runs), reverse=True)
+    if not indices_to_delete:
+        return {"status": "success", "deleted_count": 0, "result": sheet.result_json}
+
+    deleted_set = set(indices_to_delete)
+
+    for ri in indices_to_delete:
+        runs.pop(ri)
+
+    old_to_new = {}
+    new_counter = 0
+    for old_i in range(n_runs):
+        if old_i in deleted_set:
+            old_to_new[old_i] = -1
+        else:
+            old_to_new[old_i] = new_counter
+            new_counter += 1
+
+    new_pids = []
+    for p in pids:
+        p_rec = dict(p)
+        r_idx = p_rec.get("run_idx", -1)
+        if r_idx in old_to_new:
+            new_idx = old_to_new[r_idx]
+            p_rec["run_idx"] = new_idx
+            if new_idx == -1:
+                p_rec["state"] = "none"
+
+        extra = p_rec.get("extra_runs", [])
+        if extra:
+            new_extra = [old_to_new[er] for er in extra if er in old_to_new and old_to_new[er] != -1]
+            p_rec["extra_runs"] = new_extra
+
+        new_pids.append(p_rec)
+
+    for idx, r in enumerate(runs):
+        r["id"] = f"run-{idx}"
+
+    res["runs"] = runs
+    res["piping_ids"] = new_pids
+    sheet.result_json = res
+    await db.commit()
+
+    return {
+        "status": "success",
+        "deleted_count": len(indices_to_delete),
+        "total_runs": len(runs),
+        "result": sheet.result_json,
+    }
+
+
+@router.patch("/{project_id}/sheets/{sheet_id}/runs/{run_idx}/label")
+async def update_sheet_run_label(
+    project_id: str,
+    sheet_id: str,
+    run_idx: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update label / tag untuk satu segmen polyline pipa."""
+    sheet = await ProjectService.get_sheet(db, sheet_id)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+
+    if not sheet.result_json or "runs" not in sheet.result_json:
+        raise HTTPException(status_code=400, detail="Sheet result has no traced runs")
+
+    res = dict(sheet.result_json)
+    runs = res.get("runs", [])
+    if run_idx < 0 or run_idx >= len(runs):
+        raise HTTPException(status_code=400, detail=f"Run index {run_idx} out of range")
+
+    new_label = payload.get("label", "")
+    runs[run_idx]["label"] = new_label
+    runs[run_idx]["manual"] = True
+    res["runs"] = runs
+    sheet.result_json = res
+    await db.commit()
+
+    return {
+        "status": "success",
+        "run_idx": run_idx,
+        "label": new_label,
+        "result": sheet.result_json,
+    }
+

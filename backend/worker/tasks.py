@@ -107,9 +107,10 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
             progress_callback=_progress_cb,
         )
 
-        # 2. Compute API RP 970 Systems & Circuits
-        publish_progress(r_client, job_id, "grouping", 92, 100, "Pengelompokan Corrosion System & Circuit...")
-        systems = GroupingService.compute_circuits(result)
+        # 2. API RP 970 Systems & Circuits (Temporarily disabled in Phase B.5 pivot)
+        # publish_progress(r_client, job_id, "grouping", 92, 100, "Pengelompokan Corrosion System & Circuit...")
+        # systems = GroupingService.compute_circuits(result)
+        systems = []
 
         # 3. Generate DZI pyramid tiles in background
         publish_progress(r_client, job_id, "tiling", 96, 100, "Membuat DeepZoom image pyramid...")

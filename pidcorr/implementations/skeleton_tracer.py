@@ -17,6 +17,7 @@ from ..lines import (
     suppress_revision_clouds,
     suppress_diagonal_artifacts,
     bridge_collinear_headers,
+    bridge_inline_valve_gaps,
 )
 
 
@@ -351,7 +352,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
-    def __init__(self, min_length_px: int = 25):
+    def __init__(self, min_length_px: int = 18):
         self.min_length_px = min_length_px
 
     def trace(
@@ -360,7 +361,9 @@ class SkeletonLineTracer(BaseLineTracer):
         dpi: int = 350,
         detections: Optional[List[Dict[str, Any]]] = None,
         furniture: Optional[List[List[int]]] = None,
+        tokens: Optional[List[Dict[str, Any]]] = None,
         progress: Optional[Callable[[str], None]] = None,
+        **kwargs,
     ) -> List[PipeRun]:
         """Extract pipe runs via skeletonization, junction analysis, and suppression."""
         if progress:
@@ -379,14 +382,53 @@ class SkeletonLineTracer(BaseLineTracer):
             binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         )
 
-        # 1. Skeletonize
+        # 1. Dilated Text Masking: Dilate all OCR text bounding boxes by 8px in all directions
+        # and blackout on clean_binary so notes (e.g. "BY INSTR."), underlines, and slashes ("3/4") are eliminated
+        text_tokens = tokens or kwargs.get("pids") or []
+        for t in text_tokens:
+            if isinstance(t, dict):
+                tx1 = int(t.get("x1", 0))
+                ty1 = int(t.get("y1", 0))
+                tx2 = int(t.get("x2", 0))
+                ty2 = int(t.get("y2", 0))
+            else:
+                tx1 = int(getattr(t, "x1", 0))
+                ty1 = int(getattr(t, "y1", 0))
+                tx2 = int(getattr(t, "x2", 0))
+                ty2 = int(getattr(t, "y2", 0))
+            if tx2 > tx1 and ty2 > ty1:
+                dil_x1 = max(0, tx1 - 8)
+                dil_y1 = max(0, ty1 - 8)
+                dil_x2 = min(W, tx2 + 8)
+                dil_y2 = min(H, ty2 + 8)
+                clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
+
+        # 2. Equipment Interior Masking: Blackout total interior of equipment boxes (vessels, tanks, etc.)
+        # Keep an inset of 4px so the outer physical perimeter remains for snapping (snap-to-edge)
+        eq_margin = max(3, int(4 * (dpi / 350.0)))
+        for d in (detections or []):
+            if d.get("coarse") == "equipment":
+                ex1 = int(d.get("x1", 0)) + eq_margin
+                ey1 = int(d.get("y1", 0)) + eq_margin
+                ex2 = int(d.get("x2", 0)) - eq_margin
+                ey2 = int(d.get("y2", 0)) - eq_margin
+                if ex2 > ex1 and ey2 > ey1:
+                    clean_binary[ey1:ey2, ex1:ex2] = 0
+
+        # 3. Furniture Masking (title block, drawing border, notes tables)
+        if furniture:
+            for f in furniture:
+                fx1, fy1, fx2, fy2 = f
+                clean_binary[max(0, int(fy1)):min(H, int(fy2)), max(0, int(fx1)):min(W, int(fx2))] = 0
+
+        # 4. Skeletonize
         skel = _morphological_skeleton(clean_binary)
 
-        # 2. Extract graph segments and resolve junctions (crossovers vs T-junctions)
+        # 5. Extract graph segments and resolve junctions (crossovers vs T-junctions)
         min_len = int(self.min_length_px * (dpi / 350.0))
         raw_runs = _graph_segments(skel, min_len)
 
-        # 3. Apply standard suppressions (symbol edges, equipment interiors, furniture)
+        # 6. Apply standard suppressions (symbol edges, equipment interiors, furniture)
         filtered = suppress_box_edges(raw_runs, detections or [])
         filtered = suppress_equipment_interior(
             filtered, detections or [], margin_pt=3, page_wh=(W, H)
@@ -407,5 +449,8 @@ class SkeletonLineTracer(BaseLineTracer):
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
         filtered = bridge_collinear_headers(filtered)
+
+        # 7. Bridge pipe runs cut by inline valves
+        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=75)
 
         return filtered

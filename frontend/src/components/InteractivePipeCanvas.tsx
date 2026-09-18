@@ -7,28 +7,19 @@ import {
   Check,
   X,
   Palette,
-  Eye,
-  EyeOff,
-  Undo2,
-  Redo2,
-  Sliders,
+  Trash2,
+  Tag,
   Sparkles,
-  Info,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
 
-// Preset colors recommended for engineering P&ID marking
-export const COLOR_PALETTE = [
-  { name: 'Neutral Blue (Default)', hex: '#2563EB' },
-  { name: 'Corrosion Red', hex: '#DC2626' },
-  { name: 'Process Green', hex: '#16A34A' },
-  { name: 'Hazard Amber', hex: '#CA8A04' },
-  { name: 'Spec Break Purple', hex: '#9333EA' },
-  { name: 'High Temp Orange', hex: '#EA580C' },
-  { name: 'Utility Teal', hex: '#0D9488' },
-  { name: 'Low Temp Cyan', hex: '#0284C7' },
-  { name: 'Special Alloy Rose', hex: '#E11D48' },
-  { name: 'Neutral Slate', hex: '#475569' },
+// 5 Quick Colors requested: Biru #2563EB, Hijau #10B981, Merah #EF4444, Kuning #F59E0B, Ungu #8B5CF6
+export const QUICK_COLORS = [
+  { name: 'Biru Netral (Default)', hex: '#2563EB' },
+  { name: 'Hijau (Process)', hex: '#10B981' },
+  { name: 'Merah (Corrosion)', hex: '#EF4444' },
+  { name: 'Kuning (Hazard)', hex: '#F59E0B' },
+  { name: 'Ungu (Spec Break)', hex: '#8B5CF6' },
 ];
 
 interface InteractivePipeCanvasProps {
@@ -44,6 +35,8 @@ interface InteractivePipeCanvasProps {
   onSelectRunIndices: (indices: Set<number>) => void;
   onRecolorRuns: (runIdxs: number[], newColor: string) => void;
   onSplitRun: (runIdx: number, x: number, y: number) => Promise<void>;
+  onDeleteRuns?: (runIdxs: number[]) => Promise<void>;
+  onUpdateRunLabel?: (runIdx: number, label: string) => Promise<void>;
   splitMode: boolean;
   onSetSplitMode: (active: boolean) => void;
   canUndo: boolean;
@@ -65,6 +58,8 @@ export default function InteractivePipeCanvas({
   onSelectRunIndices,
   onRecolorRuns,
   onSplitRun,
+  onDeleteRuns,
+  onUpdateRunLabel,
   splitMode,
   onSetSplitMode,
   canUndo,
@@ -77,10 +72,14 @@ export default function InteractivePipeCanvas({
   const [splitPreview, setSplitPreview] = useState<{ x: number; y: number } | null>(null);
   const [customColor, setCustomColor] = useState('#2563EB');
   const [splitting, setSplitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [savingTag, setSavingTag] = useState(false);
+  const [popoverPos, setPopoverPos] = useState<{ x: number; y: number; imgX: number; imgY: number } | null>(null);
+  const [tagInput, setTagInput] = useState<string>('');
 
   const svgRef = useRef<SVGSVGElement | null>(null);
 
-  // Mount an OpenSeadragon overlay container that syncs with pan & zoom
+  // Mount OpenSeadragon overlay container that syncs with pan & zoom
   useEffect(() => {
     if (!viewer || !osdModule || !width || !height) return;
 
@@ -166,7 +165,7 @@ export default function InteractivePipeCanvas({
     return { ...bestProj, dist: minD };
   };
 
-  // Line click handler with Shift+Click multi-select support
+  // Line click handler with Shift+Click multi-select and dynamic popover placement
   const handleLineClick = (idx: number, e: React.MouseEvent) => {
     e.stopPropagation();
 
@@ -176,8 +175,17 @@ export default function InteractivePipeCanvas({
       return;
     }
 
+    const rect = viewer?.element?.getBoundingClientRect();
+    const imgCoords = getImageCoordinates(e);
+    if (rect) {
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      const clampedX = Math.max(16, Math.min(rect.width - 340, px - 150));
+      const clampedY = Math.max(16, Math.min(rect.height - 240, py - 130));
+      setPopoverPos({ x: clampedX, y: clampedY, imgX: imgCoords?.x ?? 0, imgY: imgCoords?.y ?? 0 });
+    }
+
     if (e.shiftKey) {
-      // Multi-select toggle
       const next = new Set(selectedRunIndices);
       if (next.has(idx)) {
         next.delete(idx);
@@ -186,7 +194,6 @@ export default function InteractivePipeCanvas({
       }
       onSelectRunIndices(next);
     } else {
-      // Single select
       onSelectRunIndices(new Set([idx]));
     }
   };
@@ -206,7 +213,6 @@ export default function InteractivePipeCanvas({
     if (!coords) return;
 
     const proj = findClosestPointOnRun(selectedRun, coords.x, coords.y);
-    // If within reasonable proximity of the pipe line (~120px)
     if (proj.dist <= 120) {
       setSplitPreview({ x: Math.round(proj.x), y: Math.round(proj.y) });
     } else {
@@ -222,6 +228,7 @@ export default function InteractivePipeCanvas({
       await onSplitRun(runIdx, x, y);
       setSplitPreview(null);
       onSetSplitMode(false);
+      setPopoverPos(null);
     } finally {
       setSplitting(false);
     }
@@ -233,6 +240,31 @@ export default function InteractivePipeCanvas({
     onRecolorRuns(Array.from(selectedRunIndices), colorHex);
   };
 
+  // Delete selected runs
+  const handleDeleteSelected = async () => {
+    if (!onDeleteRuns || selectedRunIndices.size === 0 || deleting) return;
+    setDeleting(true);
+    try {
+      await onDeleteRuns(Array.from(selectedRunIndices));
+      onSelectRunIndices(new Set());
+      setPopoverPos(null);
+      onSetSplitMode(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // Save tag label
+  const handleSaveTag = async () => {
+    if (singleSelectedIdx === null || !onUpdateRunLabel || savingTag) return;
+    setSavingTag(true);
+    try {
+      await onUpdateRunLabel(singleSelectedIdx, tagInput.trim());
+    } finally {
+      setSavingTag(false);
+    }
+  };
+
   const computeRunLength = (run: PipeRun | null | undefined) => {
     if (!run || !run.points || run.points.length < 2) return 0;
     let len = 0;
@@ -242,12 +274,20 @@ export default function InteractivePipeCanvas({
     return len;
   };
 
-  // Get metadata for single selected run
   const singleSelectedIdx = selectedRunIndices.size === 1 ? Array.from(selectedRunIndices)[0] : null;
   const singleSelectedRun = singleSelectedIdx !== null ? runs[singleSelectedIdx] : null;
   const associatedPid = singleSelectedIdx !== null
     ? pipingIds.find((p) => p.run_idx === singleSelectedIdx)?.pid
     : null;
+
+  // Sync tag input with selected run
+  useEffect(() => {
+    if (singleSelectedRun) {
+      setTagInput(singleSelectedRun.label || associatedPid || '');
+    } else {
+      setTagInput('');
+    }
+  }, [singleSelectedRun, associatedPid]);
 
   return (
     <>
@@ -266,23 +306,22 @@ export default function InteractivePipeCanvas({
               left: 0,
               pointerEvents: 'none',
               overflow: 'visible',
-              opacity: showOverlay ? opacity : 0,
+              display: showOverlay ? 'block' : 'none',
+              opacity: opacity,
               transition: 'opacity 0.2s ease',
             }}
             onMouseMove={handleSvgMouseMove}
             onClick={() => {
-              // Click outside any line deselects
               if (selectedRunIndices.size > 0 && !splitMode) {
                 onSelectRunIndices(new Set());
+                setPopoverPos(null);
               }
             }}
           >
             <defs>
-              {/* Hover Glow */}
               <filter id="hover-glow" x="-30%" y="-30%" width="160%" height="160%">
                 <feDropShadow dx="0" dy="0" stdDeviation="4" floodColor="#38BDF8" floodOpacity="0.9" />
               </filter>
-              {/* Selection Halo */}
               <filter id="select-halo" x="-40%" y="-40%" width="180%" height="180%">
                 <feDropShadow dx="0" dy="0" stdDeviation="6" floodColor="#F59E0B" floodOpacity="0.95" />
               </filter>
@@ -375,7 +414,6 @@ export default function InteractivePipeCanvas({
             {/* Split Mode Interactive Cut Point Marker */}
             {splitMode && splitPreview && (
               <g pointerEvents="none">
-                {/* Crosshair indicator */}
                 <circle
                   cx={splitPreview.x}
                   cy={splitPreview.y}
@@ -401,7 +439,6 @@ export default function InteractivePipeCanvas({
                   stroke="#FFFFFF"
                   strokeWidth={2}
                 />
-                {/* Coordinates Label */}
                 <text
                   x={splitPreview.x + 16}
                   y={splitPreview.y - 14}
@@ -420,99 +457,162 @@ export default function InteractivePipeCanvas({
           container
         )}
 
-      {/* 2. Floating Toolbar for Line Recoloring & Splitting */}
-      {selectedRunIndices.size > 0 && (
-        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-white/95 backdrop-blur border border-slate-200 rounded-2xl shadow-2xl p-2 px-4 flex items-center space-x-3 text-xs animate-in fade-in slide-in-from-top-3 duration-200">
-          {/* Selection Info Pill */}
-          <div className="flex items-center space-x-2 shrink-0">
-            {singleSelectedIdx !== null ? (
-              <div className="flex items-center space-x-1.5 px-2.5 py-1 bg-indigo-50 border border-indigo-200 rounded-lg font-semibold text-indigo-900">
-                <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Pipa #{singleSelectedIdx}</span>
-                {associatedPid && (
-                  <span className="text-indigo-600 font-mono text-[11px] font-bold">
-                    [{associatedPid}]
+      {/* 2. Floating Action Popover positioned dynamically near the clicked line */}
+      {selectedRunIndices.size > 0 && showOverlay && (
+        <div
+          className="absolute z-40 bg-white/95 backdrop-blur border border-slate-200 rounded-2xl shadow-2xl p-3 flex flex-col space-y-2.5 text-xs animate-in fade-in zoom-in-95 duration-150"
+          style={{
+            left: popoverPos?.x ?? 24,
+            top: popoverPos?.y ?? 24,
+            minWidth: 280,
+            maxWidth: 340,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Popover Header: Info + Close */}
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+            <div className="flex items-center space-x-2">
+              {singleSelectedIdx !== null ? (
+                <div className="flex items-center space-x-1.5 font-semibold text-slate-800">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Pipa #{singleSelectedIdx}</span>
+                  <span className="text-[10px] text-slate-400 font-normal">
+                    ({Math.round(computeRunLength(singleSelectedRun))} px)
                   </span>
-                )}
-                <span className="text-[10px] text-slate-500">
-                  ({Math.round(computeRunLength(singleSelectedRun))} px)
-                </span>
-              </div>
-            ) : (
-              <div className="flex items-center space-x-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-lg font-semibold text-amber-900">
-                <span>{selectedRunIndices.size} Pipa Terpilih</span>
-                <span className="text-[10px] text-amber-700">(Shift+Click)</span>
-              </div>
-            )}
-          </div>
-
-          <div className="w-[1px] h-6 bg-slate-200 shrink-0" />
-
-          {/* Quick Color Palette Swatches */}
-          <div className="flex items-center space-x-1.5 shrink-0">
-            {COLOR_PALETTE.map((c) => (
-              <button
-                key={c.hex}
-                onClick={() => handleApplyColor(c.hex)}
-                className="w-5 h-5 rounded-full border border-black/10 hover:scale-125 transition-transform shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500"
-                style={{ backgroundColor: c.hex }}
-                title={`Ubah ke ${c.name} (${c.hex})`}
-              />
-            ))}
-
-            {/* Custom Hex Color Picker */}
-            <label
-              className="w-5 h-5 rounded-full border border-slate-300 flex items-center justify-center cursor-pointer hover:scale-110 transition-transform overflow-hidden relative"
-              title="Pilih warna bebas (Hex)"
-            >
-              <Palette className="w-3 h-3 text-slate-600" />
-              <input
-                type="color"
-                value={customColor}
-                onChange={(e) => {
-                  setCustomColor(e.target.value);
-                  handleApplyColor(e.target.value);
-                }}
-                className="opacity-0 absolute inset-0 cursor-pointer"
-              />
-            </label>
-          </div>
-
-          <div className="w-[1px] h-6 bg-slate-200 shrink-0" />
-
-          {/* Split Line Button (Active only when 1 line selected) */}
-          {singleSelectedIdx !== null && (
+                </div>
+              ) : (
+                <div className="font-semibold text-amber-900 flex items-center space-x-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                  <span>{selectedRunIndices.size} Pipa Terpilih</span>
+                </div>
+              )}
+            </div>
             <button
-              onClick={() => onSetSplitMode(!splitMode)}
-              className={`px-3 py-1.5 rounded-lg font-semibold flex items-center space-x-1.5 transition ${
-                splitMode
-                  ? 'bg-red-600 text-white shadow-md animate-pulse'
-                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
-              }`}
-              title="Potong garis ini menjadi 2 pipa terpisah"
+              onClick={() => {
+                onSelectRunIndices(new Set());
+                setPopoverPos(null);
+                onSetSplitMode(false);
+              }}
+              className="p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition"
+              title="Tutup (Esc)"
             >
-              <Scissors className="w-3.5 h-3.5" />
-              <span>{splitMode ? 'Batal Split' : 'Split Line'}</span>
+              <X className="w-3.5 h-3.5" />
             </button>
+          </div>
+
+          {/* Quick Color Palette: 5 Quick Colors + Hex Picker */}
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+              Warna Garis
+            </span>
+            <div className="flex items-center space-x-2">
+              {QUICK_COLORS.map((c) => (
+                <button
+                  key={c.hex}
+                  onClick={() => handleApplyColor(c.hex)}
+                  className="w-5 h-5 rounded-full border border-black/15 hover:scale-125 transition-transform shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500"
+                  style={{ backgroundColor: c.hex }}
+                  title={`${c.name} (${c.hex})`}
+                />
+              ))}
+              <label
+                className="w-5 h-5 rounded-full border border-slate-300 flex items-center justify-center cursor-pointer hover:scale-110 transition-transform overflow-hidden relative"
+                title="Pilih warna bebas (Hex)"
+              >
+                <Palette className="w-3 h-3 text-slate-600" />
+                <input
+                  type="color"
+                  value={customColor}
+                  onChange={(e) => {
+                    setCustomColor(e.target.value);
+                    handleApplyColor(e.target.value);
+                  }}
+                  className="opacity-0 absolute inset-0 cursor-pointer"
+                />
+              </label>
+            </div>
+          </div>
+
+          {/* Single Selection Details & Actions */}
+          {singleSelectedIdx !== null && (
+            <>
+              {/* Rename / Tag Input */}
+              <div className="space-y-1">
+                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                  Tag / Label Line
+                </span>
+                <div className="flex items-center space-x-1.5">
+                  <div className="relative flex-1">
+                    <Tag className="w-3 h-3 text-slate-400 absolute left-2 top-2.5" />
+                    <input
+                      type="text"
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTag()}
+                      placeholder="e.g. 605-6-GR-029"
+                      className="w-full pl-6 pr-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <button
+                    onClick={handleSaveTag}
+                    disabled={savingTag}
+                    className="p-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg transition"
+                    title="Simpan Tag Pipa"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Buttons: Split Line + Delete Line */}
+              <div className="pt-1 flex items-center space-x-2">
+                <button
+                  onClick={() => onSetSplitMode(!splitMode)}
+                  className={`flex-1 py-1.5 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition ${
+                    splitMode
+                      ? 'bg-red-600 text-white shadow-md animate-pulse'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                  }`}
+                  title="Potong polyline menjadi 2 bagian"
+                >
+                  <Scissors className="w-3.5 h-3.5" />
+                  <span>{splitMode ? 'Batal Potong' : 'Split Line'}</span>
+                </button>
+
+                {onDeleteRuns && (
+                  <button
+                    onClick={handleDeleteSelected}
+                    disabled={deleting}
+                    className="py-1.5 px-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold flex items-center space-x-1 transition"
+                    title="Hapus garis pipa ini"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus</span>
+                  </button>
+                )}
+              </div>
+            </>
           )}
 
-          {/* Close / Deselect Button */}
-          <button
-            onClick={() => {
-              onSelectRunIndices(new Set());
-              onSetSplitMode(false);
-            }}
-            className="p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition"
-            title="Tutup seleksi (Esc)"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          {/* Multi-Selection Batch Actions */}
+          {selectedRunIndices.size > 1 && onDeleteRuns && (
+            <div className="pt-1 flex items-center space-x-2">
+              <button
+                onClick={handleDeleteSelected}
+                disabled={deleting}
+                className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 shadow transition"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Hapus {selectedRunIndices.size} Pipa Terpilih</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {/* 3. Split Mode Guide Banner (when user is in cut mode) */}
       {splitMode && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 bg-red-600/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 animate-bounce">
+        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-red-600/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 animate-bounce">
           <Scissors className="w-3.5 h-3.5" />
           <span>Arahkan kursor ke garis pipa lalu klik untuk memotong (split)</span>
           <button

@@ -35,6 +35,10 @@ import {
   Sliders,
   Scissors,
   EyeOff,
+  Tag,
+  Palette,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import InteractivePipeCanvas from '@/components/InteractivePipeCanvas';
 import {
@@ -66,6 +70,9 @@ import {
   splitRun,
   updateRunColor,
   batchUpdateRunColors,
+  deleteRun,
+  batchDeleteRuns,
+  updateRunLabel,
 } from '@/lib/api';
 
 type ViewMode = 'digitize' | 'system' | 'circuit' | 'report' | 'topology';
@@ -95,8 +102,10 @@ export default function ProjectWorkspace() {
   const [selectedPidIdx, setSelectedPidIdx] = useState<number | null>(null);
   const [selectedSystemIdx, setSelectedSystemIdx] = useState<number | null>(null);
   const [selectedCircuitCode, setSelectedCircuitCode] = useState<string | null>(null);
-  const [digitizeSubTab, setDigitizeSubTab] = useState<'lines' | 'symbols' | 'opcs'>('lines');
+  const [digitizeSubTab, setDigitizeSubTab] = useState<'lines' | 'pipes' | 'symbols' | 'opcs'>('lines');
   const [searchQuery, setSearchQuery] = useState('');
+  const [editingRunLabel, setEditingRunLabel] = useState<string>('');
+  const runRowRefs = useRef<{ [key: number]: HTMLDivElement | null }>({});
   const [filterFluid, setFilterFluid] = useState<string>('all');
 
   // Line list modal state
@@ -212,6 +221,91 @@ export default function ProjectWorkspace() {
     }
   };
 
+  // Delete runs (single or batch) via backend API
+  const handleDeleteRuns = async (runIdxs: number[]) => {
+    if (!result || !projectId || !activeSheet || runIdxs.length === 0) return;
+    try {
+      const prevRuns = [...result.runs];
+      const prevPids = [...result.piping_ids];
+      let updatedResult: DigitizationResult;
+      if (runIdxs.length === 1) {
+        const res = await deleteRun(projectId, activeSheet.id, runIdxs[0]);
+        updatedResult = res.result;
+      } else {
+        const res = await batchDeleteRuns(projectId, activeSheet.id, runIdxs);
+        updatedResult = res.result;
+      }
+      pushHistory(
+        `Hapus ${runIdxs.length} pipa`,
+        prevRuns,
+        updatedResult.runs,
+        prevPids,
+        updatedResult.piping_ids || prevPids
+      );
+      setResult(updatedResult);
+      setSelectedRunIndices(new Set());
+      setStatusToast(`${runIdxs.length} pipa berhasil dihapus!`);
+      setTimeout(() => setStatusToast(null), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Gagal menghapus pipa');
+    }
+  };
+
+  // Update label / tag of a run via backend API
+  const handleUpdateRunLabel = async (runIdx: number, label: string) => {
+    if (!result || !projectId || !activeSheet) return;
+    try {
+      const prevRuns = [...result.runs];
+      const prevPids = [...result.piping_ids];
+      const res = await updateRunLabel(projectId, activeSheet.id, runIdx, label);
+      const nextRuns = res.result.runs;
+      pushHistory(
+        `Ubah tag pipa #${runIdx}`,
+        prevRuns,
+        nextRuns,
+        prevPids,
+        res.result.piping_ids || prevPids
+      );
+      setResult(res.result);
+      setStatusToast(`Tag pipa diperbarui: ${label || '(dikosongkan)'}`);
+      setTimeout(() => setStatusToast(null), 2500);
+    } catch (err: any) {
+      alert(err.message || 'Gagal memperbarui tag pipa');
+    }
+  };
+
+  // Select a run from the inspector, set active state, and pan/zoom canvas to its bounding box
+  const handleSelectRun = (run: PipeRun, idx: number) => {
+    setSelectedRunIndices(new Set([idx]));
+    setEditingRunLabel(run.label || run.pid || '');
+    if (run.points && run.points.length > 0) {
+      const xs = run.points.map((p) => p[0]);
+      const ys = run.points.map((p) => p[1]);
+      zoomToBbox(
+        Math.min(...xs) - 60,
+        Math.min(...ys) - 60,
+        Math.max(...xs) + 60,
+        Math.max(...ys) + 60
+      );
+    } else if (run.x1 != null && run.y1 != null) {
+      zoomToBbox(run.x1 - 60, run.y1 - 60, run.x2 + 60, run.y2 + 60);
+    }
+  };
+
+  // Synchronize canvas selection to sidebar scrolling
+  useEffect(() => {
+    if (selectedRunIndices.size === 1) {
+      const idx = Array.from(selectedRunIndices)[0];
+      const run = result?.runs?.[idx];
+      if (run) {
+        setEditingRunLabel(run.label || run.pid || '');
+      }
+      if (digitizeSubTab === 'pipes' && runRowRefs.current[idx]) {
+        runRowRefs.current[idx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
+  }, [selectedRunIndices, result?.runs, digitizeSubTab]);
+
   // Persist all manual changes to database
   const handleSaveAllChanges = useCallback(async () => {
     if (!result || !projectId || !activeSheet || savingChanges) return;
@@ -304,7 +398,7 @@ export default function ProjectWorkspace() {
       }
 
       const isDetected = activeSheet?.status === 'detected' || Boolean(result);
-      const initialUrl = showOverlay && isDetected
+      const initialUrl = (mode === 'circuit' || mode === 'system') && showOverlay && isDetected
         ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
         : getRawImageUrl(projectId, activeSheet.id);
 
@@ -347,9 +441,15 @@ export default function ProjectWorkspace() {
     const viewer = viewerRef.current;
     if (!viewer.viewport) return;
 
-    const targetUrl = showOverlay && isDetected && (mode === 'circuit' || mode === 'system')
+    // In digitize mode, the base image is strictly the raw CAD drawing.
+    // showOverlay is handled purely in CSS by InteractivePipeCanvas.
+    const targetUrl = (mode === 'circuit' || mode === 'system') && showOverlay && isDetected
       ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
       : getRawImageUrl(projectId, activeSheet.id);
+
+    const currentItem = viewer.world?.getItemAt(0);
+    const currentSource = currentItem?.source?.url || currentItem?._url;
+    if (currentSource === targetUrl) return;
 
     const bounds = viewer.viewport.getBounds();
     viewer.open({
@@ -363,7 +463,7 @@ export default function ProjectWorkspace() {
       viewer.removeHandler('open', onOpen);
     };
     viewer.addHandler('open', onOpen);
-  }, [showOverlay, mode, isDetected, projectId, activeSheet]);
+  }, [mode, showOverlay, isDetected, projectId, activeSheet]);
 
   // Zoom & Pan to Bounding Box on OpenSeadragon Canvas with High-Visibility Overlay
   const zoomToBbox = (minX: number, minY: number, maxX: number, maxY: number) => {
@@ -984,6 +1084,8 @@ export default function ProjectWorkspace() {
               onSelectRunIndices={setSelectedRunIndices}
               onRecolorRuns={handleRecolorRuns}
               onSplitRun={handleSplitRun}
+              onDeleteRuns={handleDeleteRuns}
+              onUpdateRunLabel={handleUpdateRunLabel}
               splitMode={splitMode}
               onSetSplitMode={setSplitMode}
               canUndo={historyIndex >= 0}
@@ -1222,6 +1324,16 @@ export default function ProjectWorkspace() {
                     Lines ({result.piping_ids.length})
                   </button>
                   <button
+                    onClick={() => setDigitizeSubTab('pipes')}
+                    className={`flex-1 py-1 px-2 rounded-md transition text-center ${
+                      digitizeSubTab === 'pipes'
+                        ? 'bg-white text-indigo-700 shadow-sm font-bold'
+                        : 'hover:text-slate-900'
+                    }`}
+                  >
+                    Pipa ({result.runs?.length || 0})
+                  </button>
+                  <button
                     onClick={() => setDigitizeSubTab('symbols')}
                     className={`flex-1 py-1 px-2 rounded-md transition text-center ${
                       digitizeSubTab === 'symbols'
@@ -1364,6 +1476,19 @@ export default function ProjectWorkspace() {
                     </span>
                   </button>
                   <button
+                    onClick={() => setDigitizeSubTab('pipes')}
+                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
+                      digitizeSubTab === 'pipes'
+                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
+                        : 'border-transparent text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    <span>Pipa (Inspector)</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-700 font-semibold">
+                      {result.runs?.length || 0}
+                    </span>
+                  </button>
+                  <button
                     onClick={() => setDigitizeSubTab('symbols')}
                     className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
                       digitizeSubTab === 'symbols'
@@ -1467,7 +1592,272 @@ export default function ProjectWorkspace() {
                   </div>
                 )}
 
-                {/* Sub-tab 2: Symbols / Valves / Equipment */}
+                {/* Sub-tab 2: Pipe Inspector (Runs) */}
+                {digitizeSubTab === 'pipes' && (
+                  <div className="flex flex-col h-full overflow-hidden">
+                    {/* Batch Actions & Selection Bar */}
+                    <div className="p-3 bg-slate-50 border-b border-slate-200 shrink-0 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <button
+                          onClick={() => {
+                            if (selectedRunIndices.size === (result.runs?.length || 0)) {
+                              setSelectedRunIndices(new Set());
+                            } else {
+                              setSelectedRunIndices(new Set(result.runs.map((_, i) => i)));
+                            }
+                          }}
+                          className="flex items-center space-x-1.5 text-xs font-semibold text-slate-700 hover:text-indigo-600 transition"
+                        >
+                          {selectedRunIndices.size === (result.runs?.length || 0) && (result.runs?.length || 0) > 0 ? (
+                            <CheckSquare className="w-4 h-4 text-indigo-600" />
+                          ) : (
+                            <Square className="w-4 h-4 text-slate-400" />
+                          )}
+                          <span>
+                            {selectedRunIndices.size > 0
+                              ? `${selectedRunIndices.size} pipa terpilih`
+                              : 'Pilih Semua'}
+                          </span>
+                        </button>
+
+                        {selectedRunIndices.size > 0 && (
+                          <div className="flex items-center space-x-1">
+                            <button
+                              onClick={() => {
+                                if (confirm(`Hapus ${selectedRunIndices.size} pipa terpilih?`)) {
+                                  handleDeleteRuns(Array.from(selectedRunIndices));
+                                }
+                              }}
+                              className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-md text-[11px] font-bold flex items-center space-x-1 transition border border-rose-200"
+                              title="Hapus semua pipa terpilih"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                              <span>Hapus ({selectedRunIndices.size})</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Batch Color Swatches (Quick Recolor) */}
+                      {selectedRunIndices.size > 1 && (
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 text-xs">
+                          <span className="text-[11px] font-medium text-slate-500">Warna Batch:</span>
+                          <div className="flex items-center space-x-1">
+                            {['#2563EB', '#10B981', '#EF4444', '#F59E0B', '#8B5CF6'].map((c) => (
+                              <button
+                                key={c}
+                                onClick={() => handleRecolorRuns(Array.from(selectedRunIndices), c)}
+                                className="w-4 h-4 rounded-full border border-white shadow-sm hover:scale-125 transition"
+                                style={{ backgroundColor: c }}
+                                title={`Ubah warna batch ke ${c}`}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Single Pipe Inspector Property Form (when exactly 1 run selected) */}
+                    {selectedRunIndices.size === 1 && (() => {
+                      const activeIdx = Array.from(selectedRunIndices)[0];
+                      const activeRun = result.runs[activeIdx];
+                      if (!activeRun) return null;
+                      return (
+                        <div className="p-3 bg-indigo-50/50 border-b border-indigo-100 shrink-0 space-y-2 text-xs">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-1.5">
+                              <span
+                                className="w-3.5 h-3.5 rounded-full shadow-sm shrink-0 border border-white"
+                                style={{ backgroundColor: activeRun.color || '#2563EB' }}
+                              />
+                              <span className="font-black text-slate-900 font-mono">
+                                {activeRun.id || `run-${activeIdx}`}
+                              </span>
+                              <span className="text-[10px] uppercase font-bold px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-700">
+                                {activeRun.axis || 'poly'}
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => {
+                                if (confirm(`Hapus pipa ${activeRun.id || `run-${activeIdx}`}?`)) {
+                                  handleDeleteRuns([activeIdx]);
+                                }
+                              }}
+                              className="text-slate-400 hover:text-rose-600 transition p-1 rounded hover:bg-rose-50"
+                              title="Hapus pipa ini"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {/* Rename Tag Input */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                              <Tag className="w-3 h-3 text-slate-400" />
+                              <span>Label / Tag Pipa</span>
+                            </label>
+                            <div className="flex items-center space-x-1.5">
+                              <input
+                                type="text"
+                                value={editingRunLabel}
+                                onChange={(e) => setEditingRunLabel(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    handleUpdateRunLabel(activeIdx, editingRunLabel);
+                                  }
+                                }}
+                                placeholder="Contoh: 605-4-GF-CCB-101"
+                                className="flex-1 px-2.5 py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                              />
+                              <button
+                                onClick={() => handleUpdateRunLabel(activeIdx, editingRunLabel)}
+                                className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg text-xs transition"
+                              >
+                                Simpan
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Quick Color Palette */}
+                          <div className="space-y-1 pt-1">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                              <Palette className="w-3 h-3 text-slate-400" />
+                              <span>Warna Pipa</span>
+                            </label>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-1.5">
+                                {['#2563EB', '#10B981', '#EF4444', '#F59E0B', '#8B5CF6'].map((c) => (
+                                  <button
+                                    key={c}
+                                    onClick={() => handleRecolorRuns([activeIdx], c)}
+                                    className={`w-5 h-5 rounded-full border-2 transition ${
+                                      activeRun.color === c ? 'border-indigo-600 scale-110 shadow-md' : 'border-white hover:scale-110'
+                                    }`}
+                                    style={{ backgroundColor: c }}
+                                    title={`Ubah warna ke ${c}`}
+                                  />
+                                ))}
+                              </div>
+                              <input
+                                type="color"
+                                value={activeRun.color || '#2563EB'}
+                                onChange={(e) => handleRecolorRuns([activeIdx], e.target.value)}
+                                className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent"
+                                title="Pilih custom hex warna"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Scrollable Runs List */}
+                    <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">
+                      {result.runs && result.runs.length > 0 ? (
+                        result.runs
+                          .map((r, idx) => ({ r, idx }))
+                          .filter(({ r, idx }) => {
+                            if (!searchQuery) return true;
+                            const q = searchQuery.toLowerCase();
+                            const idStr = (r.id || `run-${idx}`).toLowerCase();
+                            const labelStr = (r.label || r.pid || '').toLowerCase();
+                            return idStr.includes(q) || labelStr.includes(q) || (r.color || '').toLowerCase().includes(q);
+                          })
+                          .map(({ r, idx }) => {
+                            const isSelected = selectedRunIndices.has(idx);
+                            const lengthPx = r.points && r.points.length > 1
+                              ? Math.round(
+                                  r.points.reduce((acc, p, i, arr) => {
+                                    if (i === 0) return 0;
+                                    return acc + Math.hypot(p[0] - arr[i - 1][0], p[1] - arr[i - 1][1]);
+                                  }, 0)
+                                )
+                              : 0;
+
+                            return (
+                              <div
+                                key={r.id || `run-${idx}`}
+                                ref={(el) => { runRowRefs.current[idx] = el; }}
+                                onClick={() => handleSelectRun(r, idx)}
+                                className={`p-3 cursor-pointer transition text-xs group ${
+                                  isSelected
+                                    ? 'bg-indigo-50 border-l-4 border-indigo-600'
+                                    : 'hover:bg-slate-50'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center space-x-2 min-w-0">
+                                    <input
+                                      type="checkbox"
+                                      checked={isSelected}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        const next = new Set(selectedRunIndices);
+                                        if (e.target.checked) {
+                                          next.add(idx);
+                                        } else {
+                                          next.delete(idx);
+                                        }
+                                        setSelectedRunIndices(next);
+                                      }}
+                                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                    />
+                                    <span
+                                      className="w-3 h-3 rounded-full shrink-0 shadow-sm border border-white"
+                                      style={{ backgroundColor: r.color || '#2563EB' }}
+                                    />
+                                    <div className="min-w-0">
+                                      <div className="flex items-center space-x-1.5">
+                                        <span className="font-bold text-slate-900 font-mono truncate">
+                                          {r.id || `run-${idx}`}
+                                        </span>
+                                        {r.manual && (
+                                          <span className="text-[9px] bg-amber-100 text-amber-700 font-bold px-1 rounded">
+                                            manual
+                                          </span>
+                                        )}
+                                      </div>
+                                      <p className="text-[11px] text-slate-500 truncate">
+                                        {r.label || r.pid ? (
+                                          <span className="text-slate-700 font-semibold">{r.label || r.pid}</span>
+                                        ) : (
+                                          <span className="text-slate-400 italic">tanpa label</span>
+                                        )}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center space-x-2 shrink-0">
+                                    <span className="text-[11px] font-mono text-slate-400">
+                                      {lengthPx > 0 ? `${lengthPx}px` : `${r.points?.length || 2} pts`}
+                                    </span>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (confirm(`Hapus pipa ${r.id || `run-${idx}`}?`)) {
+                                          handleDeleteRuns([idx]);
+                                        }
+                                      }}
+                                      className="text-slate-300 hover:text-rose-600 p-1 rounded hover:bg-rose-50 transition"
+                                      title="Hapus pipa"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
+                      ) : (
+                        <div className="p-8 text-center text-slate-400 text-xs">
+                          Belum ada data pipa yang terdeteksi.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Sub-tab 3: Symbols / Valves / Equipment */}
                 {digitizeSubTab === 'symbols' && (
                   <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">
                     {result.symbols && result.symbols.length > 0 ? (
