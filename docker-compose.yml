@@ -30,12 +30,13 @@ services:
       retries: 5
 
   api:
+    image: pidccs-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: pidstudio-api
     restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     environment:
@@ -58,6 +59,7 @@ services:
       - ./data:/app/data
       - "./Contoh P&ID:/app/Contoh P&ID"
       - ./.pidcache:/app/.pidcache
+      - pip_cache:/root/.cache/pip
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,9 +73,7 @@ services:
       start_period: 10s
 
   worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: pidccs-backend:latest
     container_name: pidstudio-worker
     restart: unless-stopped
     command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
@@ -97,6 +97,7 @@ services:
       - ./data:/app/data
       - "./Contoh P&ID:/app/Contoh P&ID"
       - ./.pidcache:/app/.pidcache
+      - pip_cache:/root/.cache/pip
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,3 +121,4 @@ services:
 
 volumes:
   postgres_data:
+  pip_cache:

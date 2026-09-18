@@ -1,4 +1,5 @@
 import os
+import asyncio
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -35,7 +36,10 @@ async def export_deliverable(
         raise HTTPException(status_code=400, detail="Sheet has no processed result to export")
 
     try:
-        exported_path = ExportService.export(
+        # Rendering PDF/image exports is CPU-bound and must not block FastAPI's
+        # event loop while PyMuPDF/OpenCV process a full-resolution sheet.
+        exported_path = await asyncio.to_thread(
+            ExportService.export,
             result=sheet.result_json,
             drawing_name=sheet.filename,
             export_format=format,

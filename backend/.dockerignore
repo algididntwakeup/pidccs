@@ -11,3 +11,11 @@ htmlcov
 data
 runs
 Contoh P&ID
+tests
+test_*.db
+*.db
+*.sqlite
+*.sqlite3
+*.log
+docs
+*.md

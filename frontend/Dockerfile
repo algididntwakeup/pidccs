@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM node:20-alpine AS base
 
 # Install dependencies only when needed
@@ -6,7 +7,8 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --prefer-offline --no-audit --no-fund
 
 # Rebuild the source code only when needed
 FROM base AS builder

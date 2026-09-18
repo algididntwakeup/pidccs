@@ -1,6 +1,6 @@
 import os
 import sys
-import uuid
+import hashlib
 import cv2
 from typing import Dict, Any, Literal
 
@@ -19,6 +19,36 @@ storage = LocalStorageAdapter(settings.STORAGE_DIR)
 
 class ExportService:
     @staticmethod
+    def _output_path(clean_name: str, export_format: str, mode: str) -> str:
+        suffix = f"_marked_{mode}" if export_format in {"pdf", "png"} else "_line_register" if export_format == "xlsx" else "_asset_register"
+        extension = export_format
+        return storage.get_file_path(os.path.join("exports", clean_name, f"{clean_name}{suffix}.{extension}"))
+
+    @staticmethod
+    def _cached_base_image(result: Dict[str, Any]):
+        """Render a source drawing once per file/dpi/rotation and reuse it for PNG exports."""
+        raw_path = result.get("image_path")
+        if not raw_path or not os.path.exists(raw_path):
+            raise FileNotFoundError("Base image file not found for raster render")
+        stat = os.stat(raw_path)
+        cache_key = hashlib.sha256(
+            f"{raw_path}|{stat.st_mtime_ns}|{stat.st_size}|{result.get('dpi', 350)}|{result.get('rot', 0)}".encode()
+        ).hexdigest()[:24]
+        cache_path = storage.get_file_path(os.path.join("cache", f"base-{cache_key}.png"))
+        if os.path.exists(cache_path):
+            cached = cv2.imread(cache_path, cv2.IMREAD_COLOR)
+            if cached is not None:
+                return cached
+
+        img_bgr = load_drawing_image(raw_path, dpi=result.get("dpi", 350))
+        if result.get("rot"):
+            from pidcorr.pipeline import rotate_bgr
+            img_bgr = rotate_bgr(img_bgr, result["rot"])
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        cv2.imwrite(cache_path, img_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        return img_bgr
+
+    @staticmethod
     def export(
         result: Dict[str, Any],
         drawing_name: str,
@@ -26,20 +56,17 @@ class ExportService:
         mode: Literal["system", "circuit", "engineer"] = "engineer",
     ) -> str:
         """Export digitization deliverables. Returns the generated file path."""
-        export_id = str(uuid.uuid4())[:8]
         clean_name = os.path.splitext(os.path.basename(drawing_name))[0]
         rel_dir = os.path.join("exports", clean_name)
 
         if export_format == "xlsx":
-            rel_file = os.path.join(rel_dir, f"{clean_name}_line_register_{export_id}.xlsx")
-            abs_file = storage.get_file_path(rel_file)
+            abs_file = ExportService._output_path(clean_name, export_format, mode)
             os.makedirs(os.path.dirname(abs_file), exist_ok=True)
             export_register_xlsx(result, abs_file, drawing_name=clean_name)
             return abs_file
 
         elif export_format == "docx":
-            rel_file = os.path.join(rel_dir, f"{clean_name}_asset_register_{export_id}.docx")
-            abs_file = storage.get_file_path(rel_file)
+            abs_file = ExportService._output_path(clean_name, export_format, mode)
             os.makedirs(os.path.dirname(abs_file), exist_ok=True)
 
             img_bgr = None
@@ -60,26 +87,16 @@ class ExportService:
             return abs_file
 
         elif export_format == "pdf":
-            rel_file = os.path.join(rel_dir, f"{clean_name}_marked_{mode}_{export_id}.pdf")
-            abs_file = storage.get_file_path(rel_file)
+            abs_file = ExportService._output_path(clean_name, export_format, mode)
             os.makedirs(os.path.dirname(abs_file), exist_ok=True)
             export_marked_pdf(result, abs_file, mode=mode)
             return abs_file
 
         elif export_format == "png":
-            rel_file = os.path.join(rel_dir, f"{clean_name}_marked_{mode}_{export_id}.png")
-            abs_file = storage.get_file_path(rel_file)
+            abs_file = ExportService._output_path(clean_name, export_format, mode)
             os.makedirs(os.path.dirname(abs_file), exist_ok=True)
 
-            raw_path = result.get("image_path")
-            if not raw_path or not os.path.exists(raw_path):
-                raise FileNotFoundError("Base image file not found for raster render")
-
-            img_bgr = load_drawing_image(raw_path, dpi=result.get("dpi", 350))
-            if result.get("rot"):
-                from pidcorr.pipeline import rotate_bgr
-                img_bgr = rotate_bgr(img_bgr, result["rot"])
-
+            img_bgr = ExportService._cached_base_image(result)
             vis = render_marked_png(img_bgr, result, mode=mode)
             # Use safe write
             is_success, buffer = cv2.imencode(".png", vis)

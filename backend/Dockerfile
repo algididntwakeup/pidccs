@@ -1,9 +1,11 @@
+# syntax=docker/dockerfile:1.7
 # Multi-stage Dockerfile for P&ID Studio Backend & Worker
-FROM python:3.13-slim AS base
+FROM python:3.13-slim AS runtime
 
-# System dependencies for OpenCV, PyMuPDF, and PyTorch
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+# Runtime dependencies for OpenCV, PyMuPDF, and PyTorch
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
@@ -12,9 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python requirements
+FROM runtime AS builder
+
+# Build wheels in a disposable stage. Build tools and pip caches never enter
+# the final API/worker image.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+RUN python -m venv /opt/venv
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    /opt/venv/bin/pip install --upgrade pip && \
+    /opt/venv/bin/pip install --prefer-binary -r requirements.txt
+
+FROM runtime AS base
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
 
 # Copy source code and models
 COPY . /app/
