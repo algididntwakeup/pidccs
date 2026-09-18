@@ -9,6 +9,7 @@ from ..lines import (
     PipeRun,
     suppress_box_edges,
     suppress_equipment_interior,
+    snap_endpoints_to_equipment,
     suppress_furniture,
     suppress_box_outlines,
     detect_boxes,
@@ -350,7 +351,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
-    def __init__(self, min_length_px: int = 40):
+    def __init__(self, min_length_px: int = 25):
         self.min_length_px = min_length_px
 
     def trace(
@@ -388,7 +389,11 @@ class SkeletonLineTracer(BaseLineTracer):
         # 3. Apply standard suppressions (symbol edges, equipment interiors, furniture)
         filtered = suppress_box_edges(raw_runs, detections or [])
         filtered = suppress_equipment_interior(
-            filtered, detections or [], margin_pt=10, page_wh=(W, H)
+            filtered, detections or [], margin_pt=3, page_wh=(W, H)
+        )
+        # Snap endpoints to equipment perimeter (Phase B.5)
+        filtered = snap_endpoints_to_equipment(
+            filtered, detections or [], snap_radius_pt=14, dpi=dpi
         )
         if furniture:
             filtered = suppress_furniture(filtered, furniture)

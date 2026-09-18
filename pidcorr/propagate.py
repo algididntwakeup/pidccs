@@ -32,10 +32,11 @@ from __future__ import annotations
 import heapq
 from collections import defaultdict
 
-TOL_PT = 6.0          # toleransi "ujung ketemu ujung" / simpul T
+TOL_PT = 8.0          # toleransi "ujung ketemu ujung" / simpul T (was 6.0)
 MIN_PART_PT = 8.0     # potongan lebih pendek dari ini tidak diciptakan
-BRIDGE_PT = 46.0      # celah maks yang boleh dijembatani lewat komponen in-line
-NOISE_GAP_PT = 9.0    # celah sekecil ini = artefak tracing, boleh disambung langsung
+BRIDGE_PT = 55.0      # celah maks yang boleh dijembatani lewat komponen in-line (was 46.0)
+NOISE_GAP_PT = 24.0   # celah sisa tracing/inline fitting/valve, boleh disambung langsung (was 9.0)
+CORNER_GAP_PT = 10.0  # toleransi celah belokan elbow H-V
 
 
 def _pts(r):
@@ -177,24 +178,25 @@ def _seg_dist(px, py, a, b):
 
 
 def build_adjacency(runs, dpi=350, tol_pt=TOL_PT, blocked=(), symbols=None,
-                    bridge_pt=BRIDGE_PT, noise_pt=NOISE_GAP_PT):
+                    bridge_pt=BRIDGE_PT, noise_pt=NOISE_GAP_PT, corner_pt=CORNER_GAP_PT):
     """run_idx -> set(run_idx). Dua run bersebelahan bila:
 
       (a) SENTUH — salah satu UJUNG run menempel pada run lain (ujung-ke-ujung atau
           ujung-ke-badan = simpul T); atau
       (b) TERJEMBATANI — kedua ujung kolinear dan celah di antaranya ditempati komponen
-          IN-LINE (valve/instrument) atau hanya celah kecil sisa tracing.
+          IN-LINE (valve/instrument) atau hanya celah kecil/sedang sisa tracing/fitting; atau
+      (c) CORNER / ELBOW — ujung pipa horizontal & vertikal bertemu pada belokan siku.
 
-    (b) penting karena line tracing memotong pipa di setiap simbol, sehingga satu jalur
-    pipa pecah jadi banyak run yang saling terpisah. Engineer membaca pipa MENERUS
-    melewati valve — jembatan ini meniru pembacaan itu.
+    (b) & (c) penting karena line tracing memotong pipa di setiap simbol dan belokan,
+    sehingga satu jalur pipa pecah jadi banyak run yang saling terpisah. Engineer membaca
+    pipa MENERUS melewati valve dan belokan — jembatan ini meniru pembacaan itu.
 
     Yang TIDAK dijembatani: celah yang jatuh di dalam EQUIPMENT (fluida bisa berubah di
-    dalam equipment, mis. setelah exchanger — CLAUDE.md §4.4) dan run 'underline' (garis
-    penunjuk label, bukan pipa)."""
+    dalam equipment, mis. setelah exchanger) dan run 'underline'."""
     tol = tol_pt * dpi / 72.0
     bridge = bridge_pt * dpi / 72.0
     noise = noise_pt * dpi / 72.0
+    corner_gap = corner_pt * dpi / 72.0
     blocked = {tuple(sorted(b)) for b in blocked}
     ok = [i for i, r in enumerate(runs) if not r.get("underline")]
     boxes = {i: _bbox(runs[i]) for i in ok}
@@ -206,21 +208,37 @@ def build_adjacency(runs, dpi=350, tol_pt=TOL_PT, blocked=(), symbols=None,
         (equip if s.get("coarse") == "equipment" else inline).append(
             (s["x1"], s["y1"], s["x2"], s["y2"]))
 
-    def _in(bxs, x, y):
-        return any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in bxs)
+    def _in_equip_interior(bxs, x, y, inset_pt=4.0):
+        # Hanya true bila benar-benar berada di interior equipment (bukan di perimeter/nozzle)
+        inset = inset_pt * dpi / 72.0
+        return any(x0 + inset <= x <= x1 - inset and y0 + inset <= y <= y1 - inset for x0, y0, x1, y1 in bxs)
 
-    def _bridgeable(pa, pb):
+    def _in_inline(bxs, x, y, pad_pt=4.0):
+        pad = pad_pt * dpi / 72.0
+        return any(x0 - pad <= x <= x1 + pad and y0 - pad <= y <= y1 + pad for x0, y0, x1, y1 in bxs)
+
+    def _bridgeable(pa, pb, axis_a="poly", axis_b="poly"):
         """Celah pa..pb boleh dianggap satu jalur pipa?"""
         dx, dy = abs(pa[0] - pb[0]), abs(pa[1] - pb[1])
+        euclid_d = (dx * dx + dy * dy) ** 0.5
+        mx, my = (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2
+
+        # Cek apakah celah menembus masuk ke dalam badan equipment
+        if _in_equip_interior(equip, mx, my):
+            return False
+
+        # 1. Elbow / Corner proximity (perpendicular runs or polylines meeting at a bend)
+        is_perpendicular = (axis_a == "h" and axis_b == "v") or (axis_a == "v" and axis_b == "h") or axis_a == "poly" or axis_b == "poly"
+        if is_perpendicular and euclid_d <= corner_gap:
+            return True
+
+        # 2. Collinear Straight Pipe
         if min(dx, dy) > tol:                       # tidak kolinear H/V
             return False
         gap = max(dx, dy)
         if gap > bridge:
             return False
-        mx, my = (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2
-        if _in(equip, mx, my):
-            return False                            # jangan menyeberangi equipment
-        return gap <= noise or _in(inline, mx, my)   # celah kecil, atau ada valve/instrument
+        return gap <= noise or _in_inline(inline, mx, my)
 
     adj = defaultdict(set)
     for ii, i in enumerate(ok):
@@ -237,7 +255,9 @@ def build_adjacency(runs, dpi=350, tol_pt=TOL_PT, blocked=(), symbols=None,
                     any(_seg_dist(ex, ey, a, b) <= tol
                         for ex, ey in ends[j] for a, b in segs[i])
             if not touch:
-                touch = any(_bridgeable(pa, pb) for pa in ends[i] for pb in ends[j])
+                axis_i = runs[i].get("axis", "poly")
+                axis_j = runs[j].get("axis", "poly")
+                touch = any(_bridgeable(pa, pb, axis_i, axis_j) for pa in ends[i] for pb in ends[j])
             if touch:
                 adj[i].add(j); adj[j].add(i)
     return adj

@@ -24,6 +24,20 @@ export async function fetchProject(projectId: string): Promise<ProjectResponse> 
   return res.json();
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete project');
+}
+
+export async function deleteSheet(projectId: string, sheetId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete sheet');
+}
+
 export async function uploadSheet(projectId: string, file: File, dpi: number = 350): Promise<SheetResponse> {
   const formData = new FormData();
   formData.append('file', file);

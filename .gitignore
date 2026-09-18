@@ -38,6 +38,7 @@ ENV/
 htmlcov/
 nosetests.xml
 coverage.xml
+backend/tests/fixtures/
 
 # ==========================================
 # Node.js / Next.js Frontend

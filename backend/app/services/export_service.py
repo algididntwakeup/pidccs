@@ -23,7 +23,7 @@ class ExportService:
         result: Dict[str, Any],
         drawing_name: str,
         export_format: Literal["xlsx", "docx", "pdf", "png"],
-        mode: Literal["system", "circuit"] = "system",
+        mode: Literal["system", "circuit", "engineer"] = "engineer",
     ) -> str:
         """Export digitization deliverables. Returns the generated file path."""
         export_id = str(uuid.uuid4())[:8]

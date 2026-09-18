@@ -58,6 +58,23 @@ class ProjectService:
         # Remove project files from storage
         storage.delete(os.path.join("projects", project_id))
         await db.delete(project)
+        await db.commit()
+        return True
+
+    @staticmethod
+    async def delete_sheet(db: AsyncSession, project_id: str, sheet_id: str) -> bool:
+        query = select(Sheet).where(Sheet.id == sheet_id, Sheet.project_id == project_id)
+        result = await db.execute(query)
+        sheet = result.scalar_one_or_none()
+        if not sheet:
+            return False
+        if sheet.file_path:
+            storage.delete(sheet.file_path)
+            base_no_ext = os.path.splitext(sheet.file_path)[0]
+            storage.delete(f"{base_no_ext}_files")
+            storage.delete(f"{base_no_ext}.dzi")
+        await db.delete(sheet)
+        await db.commit()
         return True
 
     @staticmethod

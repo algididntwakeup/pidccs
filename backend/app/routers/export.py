@@ -23,7 +23,7 @@ async def export_deliverable(
     project_id: str,
     sheet_id: str,
     format: Literal["xlsx", "docx", "pdf", "png"] = Query("xlsx"),
-    mode: Literal["system", "circuit"] = Query("system"),
+    mode: Literal["system", "circuit", "engineer"] = Query("engineer"),
     db: AsyncSession = Depends(get_db),
 ):
     """Generate and download P&ID digitization deliverables."""

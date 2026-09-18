@@ -16,6 +16,7 @@ Model run = POLYLINE: `points=[(x,y),...]` (>=2 vertex). Segmen lurus = 2 titik.
 `axis` in {h, v, d, poly}. GUI merender polyline + dot bisa digeser tiap vertex.
 """
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field
 from collections import defaultdict
 import numpy as np
@@ -29,6 +30,7 @@ class PipeRun:
     pid: str = ""
     fluid: str = ""
     underline: bool = False                   # True = garis-penunjuk ber-label (BUKAN pipa)
+    color: str = "#2563EB"                    # Default neutral blue (Phase B.5)
 
     # kompat lama: x1,y1,x2,y2 = ujung-ujung polyline
     @property
@@ -54,6 +56,7 @@ class PipeRun:
         if key == "pid": return self.pid
         if key == "fluid": return self.fluid
         if key == "underline": return self.underline
+        if key == "color": return getattr(self, "color", "#2563EB")
         if key == "x1": return min(p[0] for p in self.points)
         if key == "y1": return min(p[1] for p in self.points)
         if key == "x2": return max(p[0] for p in self.points)
@@ -340,6 +343,261 @@ def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=
             for a, b in _subtract_intervals(lo, hi, ins, keep):
                 out.append(PipeRun([(x, a), (x, b)], s.axis))
     return out
+
+
+def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
+    """Proyeksikan ujung garis pipa (endpoints) yang berakhir dekat perimeter
+    bounding box equipment agar menempel persis ke dinding alat (nozzle connection),
+    bukan mengambang di luar kotak. (Phase B.5)"""
+    if not runs or not detections:
+        return runs
+    eqs = [d for d in detections if d.get("coarse") == "equipment"]
+    if not eqs:
+        return runs
+
+    snap_radius_px = snap_radius_pt * dpi / 72.0
+    boxes = [(float(d["x1"]), float(d["y1"]), float(d["x2"]), float(d["y2"])) for d in eqs]
+
+    out = []
+    for r in runs:
+        if hasattr(r, "points"):
+            pts = [[float(p[0]), float(p[1])] for p in r.points]
+        else:
+            pts = [[float(p[0]), float(p[1])] for p in r.get("points", [])]
+
+        if len(pts) < 2:
+            out.append(r)
+            continue
+
+        modified = False
+        # Check both ends: pts[0] and pts[-1]
+        for end_idx in (0, -1):
+            px, py = pts[end_idx][0], pts[end_idx][1]
+            prev_idx = 1 if end_idx == 0 else -2
+            vx = px - pts[prev_idx][0]
+            vy = py - pts[prev_idx][1]
+
+            best_snap = None
+            min_d = float("inf")
+
+            for bx1, by1, bx2, by2 in boxes:
+                cx = max(bx1, min(px, bx2))
+                cy = max(by1, min(py, by2))
+
+                # If endpoint is slightly inside the box
+                if bx1 <= px <= bx2 and by1 <= py <= by2:
+                    dl, dr = px - bx1, bx2 - px
+                    dt, db = py - by1, by2 - py
+                    m = min(dl, dr, dt, db)
+                    if m < min_d:
+                        min_d = m
+                        if m == dl: best_snap = (bx1, py)
+                        elif m == dr: best_snap = (bx2, py)
+                        elif m == dt: best_snap = (px, by1)
+                        else: best_snap = (px, by2)
+                else:
+                    # Point is outside box.
+                    # 1. Directional snap:
+                    # If pipe run is heading horizontally towards vertical edge
+                    if abs(vx) >= 1.2 * abs(vy) and by1 - snap_radius_px * 0.5 <= py <= by2 + snap_radius_px * 0.5:
+                        if vx > 0 and 0 <= bx1 - px <= snap_radius_px:
+                            d = bx1 - px
+                            if d < min_d:
+                                min_d = d
+                                best_snap = (bx1, min(by2, max(by1, py)))
+                        elif vx < 0 and 0 <= px - bx2 <= snap_radius_px:
+                            d = px - bx2
+                            if d < min_d:
+                                min_d = d
+                                best_snap = (bx2, min(by2, max(by1, py)))
+
+                    # If pipe run is heading vertically towards horizontal edge
+                    elif abs(vy) >= 1.2 * abs(vx) and bx1 - snap_radius_px * 0.5 <= px <= bx2 + snap_radius_px * 0.5:
+                        if vy > 0 and 0 <= by1 - py <= snap_radius_px:
+                            d = by1 - py
+                            if d < min_d:
+                                min_d = d
+                                best_snap = (min(bx2, max(bx1, px)), by1)
+                        elif vy < 0 and 0 <= py - by2 <= snap_radius_px:
+                            d = py - by2
+                            if d < min_d:
+                                min_d = d
+                                best_snap = (min(bx2, max(bx1, px)), by2)
+
+                    # 2. Geometric fallback snap to nearest point on perimeter
+                    d_geom = math.hypot(px - cx, py - cy)
+                    if d_geom < min_d:
+                        min_d = d_geom
+                        best_snap = (cx, cy)
+
+            if best_snap is not None and min_d <= snap_radius_px:
+                pts[end_idx] = [int(round(best_snap[0])), int(round(best_snap[1]))]
+                modified = True
+
+        if modified:
+            clean_pts = [(int(p[0]), int(p[1])) for p in pts]
+            if hasattr(r, "points"):
+                out.append(PipeRun(
+                    points=clean_pts,
+                    axis=getattr(r, "axis", "poly"),
+                    pid=getattr(r, "pid", ""),
+                    fluid=getattr(r, "fluid", ""),
+                    underline=getattr(r, "underline", False),
+                    color=getattr(r, "color", "#2563EB"),
+                ))
+            else:
+                new_r = dict(r)
+                new_r["points"] = clean_pts
+                new_r["x1"] = min(p[0] for p in clean_pts)
+                new_r["y1"] = min(p[1] for p in clean_pts)
+                new_r["x2"] = max(p[0] for p in clean_pts)
+                new_r["y2"] = max(p[1] for p in clean_pts)
+                new_r["color"] = r.get("color", "#2563EB")
+                out.append(new_r)
+        else:
+            out.append(r)
+
+    return out
+
+
+def split_poly_run(
+    runs: list,
+    run_idx: int,
+    split_x: float,
+    split_y: float,
+    piping_ids: list = None,
+):
+    """
+    Pecah runs[run_idx] pada koordinat (split_x, split_y) menjadi dua PipeRun terpisah (run_a dan run_b).
+    Mempertahankan kesinambungan koordinat, atribut warna, dan me-reindex piping_ids yang terdampak. (Phase B.5)
+    """
+    if run_idx < 0 or run_idx >= len(runs):
+        raise IndexError(f"Run index {run_idx} out of range (0 to {len(runs)-1})")
+
+    target = runs[run_idx]
+    if hasattr(target, "points"):
+        pts = [list(p) for p in target.points]
+    else:
+        pts = [list(p) for p in target.get("points", [])]
+
+    if len(pts) < 2:
+        raise ValueError("Cannot split run with fewer than 2 points")
+
+    # Temukan segmen terdekat ke (split_x, split_y)
+    best_seg_idx = 0
+    best_proj = (float(pts[0][0]), float(pts[0][1]))
+    min_dist = float("inf")
+    px, py = float(split_x), float(split_y)
+
+    for i in range(len(pts) - 1):
+        x0, y0 = float(pts[i][0]), float(pts[i][1])
+        x1, y1 = float(pts[i + 1][0]), float(pts[i + 1][1])
+        dx, dy = x1 - x0, y1 - y0
+        seg_len_sq = dx * dx + dy * dy
+
+        if seg_len_sq <= 1e-6:
+            t = 0.0
+            proj_x, proj_y = x0, y0
+        else:
+            t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / seg_len_sq))
+            proj_x = x0 + t * dx
+            proj_y = y0 + t * dy
+
+        d = math.hypot(px - proj_x, py - proj_y)
+        if d < min_dist:
+            min_dist = d
+            best_seg_idx = i
+            best_proj = (proj_x, proj_y)
+
+    split_pt = [int(round(best_proj[0])), int(round(best_proj[1]))]
+
+    # Bentuk points untuk run_a (start -> split_pt)
+    pts_a = [list(p) for p in pts[:best_seg_idx + 1]]
+    if math.hypot(pts_a[-1][0] - split_pt[0], pts_a[-1][1] - split_pt[1]) > 1.5:
+        pts_a.append(split_pt)
+
+    # Bentuk points untuk run_b (split_pt -> end)
+    pts_b = [list(p) for p in pts[best_seg_idx + 1:]]
+    if not pts_b or math.hypot(pts_b[0][0] - split_pt[0], pts_b[0][1] - split_pt[1]) > 1.5:
+        pts_b = [split_pt] + pts_b
+
+    # Pastikan kedua segmen memiliki minimal 2 titik
+    if len(pts_a) < 2:
+        if len(pts_b) > 2:
+            pts_a.append(pts_b[1])
+        else:
+            # Garis sangat pendek, bagi titik tengah
+            mid_x = int(round((pts[0][0] + pts[-1][0]) / 2.0))
+            mid_y = int(round((pts[0][1] + pts[-1][1]) / 2.0))
+            pts_a = [pts[0], [mid_x, mid_y]]
+            pts_b = [[mid_x, mid_y], pts[-1]]
+
+    if len(pts_b) < 2:
+        if len(pts_a) > 2:
+            pts_b = [pts_a[-2]] + pts_b
+        else:
+            mid_x = int(round((pts[0][0] + pts[-1][0]) / 2.0))
+            mid_y = int(round((pts[0][1] + pts[-1][1]) / 2.0))
+            pts_a = [pts[0], [mid_x, mid_y]]
+            pts_b = [[mid_x, mid_y], pts[-1]]
+
+    def _make_run(base_run, new_pts):
+        clean_pts = [(int(p[0]), int(p[1])) for p in new_pts]
+        if hasattr(base_run, "points"):
+            return PipeRun(
+                points=clean_pts,
+                axis=getattr(base_run, "axis", "poly"),
+                pid=getattr(base_run, "pid", ""),
+                fluid=getattr(base_run, "fluid", ""),
+                underline=getattr(base_run, "underline", False),
+                color=getattr(base_run, "color", "#2563EB"),
+            )
+        else:
+            r = dict(base_run)
+            r["points"] = [[int(p[0]), int(p[1])] for p in clean_pts]
+            r["x1"] = min(p[0] for p in clean_pts)
+            r["y1"] = min(p[1] for p in clean_pts)
+            r["x2"] = max(p[0] for p in clean_pts)
+            r["y2"] = max(p[1] for p in clean_pts)
+            r["color"] = base_run.get("color", "#2563EB")
+            return r
+
+    run_a = _make_run(target, pts_a)
+    run_b = _make_run(target, pts_b)
+
+    new_runs = list(runs)
+    new_runs[run_idx] = run_a
+    new_run_idx = run_idx + 1
+    new_runs.insert(new_run_idx, run_b)
+
+    # Re-index piping_ids
+    new_pids = None
+    if piping_ids is not None:
+        new_pids = []
+        a_cx = sum(p[0] for p in pts_a) / len(pts_a)
+        a_cy = sum(p[1] for p in pts_a) / len(pts_a)
+        b_cx = sum(p[0] for p in pts_b) / len(pts_b)
+        b_cy = sum(p[1] for p in pts_b) / len(pts_b)
+
+        for p in piping_ids:
+            p_rec = dict(p)
+            r_idx = p_rec.get("run_idx", -1)
+            if r_idx == run_idx:
+                lx = (p_rec.get("x1", 0) + p_rec.get("x2", 0)) / 2.0
+                ly = (p_rec.get("y1", 0) + p_rec.get("y2", 0)) / 2.0
+                da = math.hypot(lx - a_cx, ly - a_cy)
+                db = math.hypot(lx - b_cx, ly - b_cy)
+                p_rec["run_idx"] = run_idx if da <= db else new_run_idx
+            elif r_idx > run_idx:
+                p_rec["run_idx"] = r_idx + 1
+
+            extra = p_rec.get("extra_runs", [])
+            if extra:
+                p_rec["extra_runs"] = [er + 1 if er > run_idx else er for er in extra]
+
+            new_pids.append(p_rec)
+
+    return new_runs, new_pids, run_a, run_b, new_run_idx
 
 
 def suppress_furniture(segs, furniture, dpi=350, margin_pt=6):

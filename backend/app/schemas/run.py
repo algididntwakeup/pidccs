@@ -10,3 +10,4 @@ class PipeRun(BaseModel):
     x2: int = Field(..., description="End point x")
     y2: int = Field(..., description="End point y")
     underline: bool = Field(default=False, description="True if detected as title/tag text underline rather than process pipe")
+    color: str = Field(default="#2563EB", description="Display and export stroke color hex")

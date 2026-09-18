@@ -148,6 +148,7 @@ class PipelineOrchestrator:
                     "x2": int(r.x2),
                     "y2": int(r.y2),
                     "underline": bool(getattr(r, "underline", False)),
+                    "color": getattr(r, "color", "#2563EB"),
                 })
             else:
                 pts = r.get("points", [])
@@ -159,6 +160,7 @@ class PipelineOrchestrator:
                     "x2": int(r.get("x2", pts[-1][0] if pts else 0)),
                     "y2": int(r.get("y2", pts[-1][1] if pts else 0)),
                     "underline": bool(r.get("underline", False)),
+                    "color": r.get("color", "#2563EB"),
                 })
 
         # Stage 5: Connection Points (Spec breaks) detection

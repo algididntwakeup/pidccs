@@ -8,6 +8,7 @@ import {
   Play,
   Download,
   CheckCircle2,
+  Trash2,
   AlertTriangle,
   Layers,
   ZoomIn,
@@ -48,6 +49,7 @@ import {
   fetchValidation,
   triggerDetection,
   getRawImageUrl,
+  deleteSheet,
   getMarkedImageUrl,
   getExportUrl,
   uploadLineList,
@@ -93,6 +95,8 @@ export default function ProjectWorkspace() {
   // Engineer Edit modal state
   const [editingPid, setEditingPid] = useState<PipingID | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [showDeleteSheetModal, setShowDeleteSheetModal] = useState(false);
+  const [deletingSheet, setDeletingSheet] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
@@ -575,6 +579,27 @@ export default function ProjectWorkspace() {
     viewerRef.current.viewport.goHome();
   };
 
+  const handleDeleteActiveSheet = async () => {
+    if (!projectId || !activeSheet) return;
+    try {
+      setDeletingSheet(true);
+      await deleteSheet(projectId, activeSheet.id);
+      setShowDeleteSheetModal(false);
+      const updated = await fetchProject(projectId);
+      setProject(updated);
+      if (updated.sheets && updated.sheets.length > 0) {
+        setActiveSheet(updated.sheets[0]);
+        router.push(`/project/${projectId}?sheetId=${updated.sheets[0].id}`);
+      } else {
+        router.push('/');
+      }
+    } catch (err: any) {
+      alert('Failed to delete sheet: ' + err.message);
+    } finally {
+      setDeletingSheet(false);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col bg-slate-100 text-slate-900 overflow-hidden select-none">
       {/* Top Navigation Bar */}
@@ -592,10 +617,33 @@ export default function ProjectWorkspace() {
               <h1 className="font-bold text-base text-slate-900 leading-tight">
                 {project?.name || 'Loading...'}
               </h1>
-              {activeSheet && (
-                <span className="text-xs bg-indigo-50 text-indigo-700 font-semibold px-2 py-0.5 rounded">
-                  {activeSheet.filename}
-                </span>
+              {project?.sheets && project.sheets.length > 0 && activeSheet && (
+                <div className="flex items-center space-x-1.5">
+                  <select
+                    value={activeSheet.id}
+                    onChange={(e) => {
+                      const sel = project.sheets?.find((s) => s.id === e.target.value);
+                      if (sel) {
+                        setActiveSheet(sel);
+                        router.push(`/project/${projectId}?sheetId=${sel.id}`);
+                      }
+                    }}
+                    className="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold px-2.5 py-1 rounded-lg border border-indigo-200 outline-none cursor-pointer max-w-[240px] truncate transition"
+                  >
+                    {project.sheets.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.filename} ({s.status})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => setShowDeleteSheetModal(true)}
+                    className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                    title="Delete current P&ID Sheet"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               )}
             </div>
             <p className="text-[11px] text-slate-500 font-medium">
@@ -1674,6 +1722,48 @@ export default function ProjectWorkspace() {
                   <Check className="w-3.5 h-3.5" />
                 )}
                 <span>Save Overrides</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Delete Sheet Confirmation Modal */}
+      {showDeleteSheetModal && activeSheet && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-rose-100">
+            <div className="flex items-center space-x-3 text-rose-600">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Delete P&ID Drawing Sheet?</h3>
+                <p className="text-xs text-slate-500">This action cannot be undone.</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Are you sure you want to delete drawing sheet{' '}
+              <strong className="text-slate-900 font-semibold">{activeSheet.filename}</strong>?
+              Raw diagram tiles and all associated corrosion line circuit data for this sheet will be permanently deleted.
+            </p>
+
+            <div className="flex justify-end space-x-2 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={deletingSheet}
+                onClick={() => setShowDeleteSheetModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingSheet}
+                onClick={handleDeleteActiveSheet}
+                className="px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition shadow flex items-center space-x-1.5"
+              >
+                {deletingSheet && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{deletingSheet ? 'Deleting...' : 'Delete Sheet'}</span>
               </button>
             </div>
           </div>

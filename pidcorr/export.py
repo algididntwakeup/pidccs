@@ -91,17 +91,41 @@ def export_register_xlsx(result, path, drawing_name=""):
     return n
 
 
-def render_marked_png(img_bgr, result, mode="system"):
-    """Render P&ID ter-marking + legend (mode 'system' = warna per fluid;
-    'circuit' = warna per circuit/material). Return citra BGR siap disimpan."""
+def _hex_to_rgb(hex_str):
+    if not hex_str:
+        return (37, 99, 235)  # #2563EB default
+    s = str(hex_str).lstrip("#")
+    if len(s) == 6:
+        try:
+            return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+        except ValueError:
+            pass
+    return (37, 99, 235)
+
+
+def render_marked_png(img_bgr, result, mode="engineer"):
+    """Render P&ID ter-marking + legend (mode 'engineer' = warna per run pipa;
+    'system' = warna per fluid; 'circuit' = warna per circuit/material). Return citra BGR siap disimpan."""
     runs = result.get("runs", [])
     vis = img_bgr.copy()
     entries = []                                  # (warna_rgb, teks)
-    if mode == "system":
+    if mode == "engineer":
+        from collections import defaultdict
+        color_groups = defaultdict(list)
+        for ri, r in enumerate(runs):
+            rgb = _hex_to_rgb(r.get("color", "#2563EB"))
+            _poly(vis, r, rgb)
+            color_groups[rgb].append(ri)
+        for rgb, r_idxs in color_groups.items():
+            hex_label = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+            entries.append((rgb, f"Piping Run {hex_label} ({len(r_idxs)} segmen)"))
+        _legend(vis, entries, "PIPING RUN TRACE (Engineer Polyline Mode)")
+    elif mode == "system":
         for s in systemize(result):
             for ri in s["run_idxs"]:
                 _poly(vis, runs[ri], s["color"])
             entries.append((s["color"], f"{s['fluid']}  ({s['n_pipes']} pipa)"))
+        _legend(vis, entries, "CORROSION SYSTEM (per process fluid)")
     else:
         for s in circuitize(result):
             for c in s["circuits"]:
@@ -109,9 +133,7 @@ def render_marked_png(img_bgr, result, mode="system"):
                     _poly(vis, runs[ri], c["color"])
                 entries.append((c["color"],
                                 f"{c['code']}  {s['fluid']}-{c['material'] or '-'}  ({len(c['pid_idxs'])} line)"))
-    _legend(vis, entries,
-            "CORROSION SYSTEM (per process fluid)" if mode == "system"
-            else "CORROSION CIRCUIT (per fluid + material)")
+        _legend(vis, entries, "CORROSION CIRCUIT (per fluid + material)")
     return vis
 
 
@@ -122,7 +144,7 @@ def _poly(vis, run, rgb):
 
 
 # ------------------------------------------------------------ PDF (Acrobat-editable) --
-def export_marked_pdf(result, out_path, mode="system"):
+def export_marked_pdf(result, out_path, mode="engineer"):
     """Tulis PDF ter-marking. Marking = PolyLine annotation per run pipa (bukan pixel),
     legend = Square+FreeText annotation -> semuanya editable/movable/deletable di Acrobat.
     Subject annotation diisi nama system/circuit supaya panel Comments Acrobat bisa
@@ -143,7 +165,18 @@ def export_marked_pdf(result, out_path, mode="system"):
 
     # (warna_rgb, subject, [run_idx], teks_legend)
     groups, title = [], ""
-    if mode == "system":
+    if mode == "engineer":
+        title = "PIPING RUN TRACE (Engineer Polyline Mode)"
+        from collections import defaultdict
+        color_groups = defaultdict(list)
+        for ri, r in enumerate(runs):
+            rgb = _hex_to_rgb(r.get("color", "#2563EB"))
+            color_groups[rgb].append(ri)
+        for rgb, r_idxs in color_groups.items():
+            hex_label = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+            subj = f"Piping Run {hex_label}"
+            groups.append((rgb, subj, r_idxs, f"Piping Run {hex_label} ({len(r_idxs)} segmen)"))
+    elif mode == "system":
         title = "CORROSION SYSTEM (per process fluid)"
         for si, s in enumerate(systemize(result), 1):
             subj = f"Corrosion System #{si:02d} - {s['fluid']}"

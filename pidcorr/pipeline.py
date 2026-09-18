@@ -356,7 +356,8 @@ def run_pipeline(img_bgr, image_path="", dpi=350, rot=0, weights=FINETUNE_WEIGHT
 
     run_recs = [{"points": [[int(x), int(y)] for x, y in r.points], "axis": r.axis,
                  "x1": int(r.x1), "y1": int(r.y1), "x2": int(r.x2), "y2": int(r.y2),
-                 "underline": bool(r.underline)}
+                 "underline": bool(r.underline),
+                 "color": getattr(r, "color", "#2563EB")}
                 for r in runs]
 
     # garis bawah teks (judul/tag equipment/catatan) yang lolos tracing -> tandai bukan pipa
