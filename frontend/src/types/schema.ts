@@ -50,6 +50,8 @@ export interface PipeRun {
   x2: number;
   y2: number;
   underline?: boolean;
+  color?: string;
+  length?: number;
 }
 
 export interface ConnectionPoint {

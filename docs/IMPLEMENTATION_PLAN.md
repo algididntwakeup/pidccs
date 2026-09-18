@@ -536,6 +536,37 @@ class SkeletonLineTracer(BaseLineTracer):
 | **Piping ID Parser** | `BasePipingIDParser` | `RegexParser` (multi-schema) → `LLMParser` (few-shot) → company-specific plugin |
 | **Subtype Classifier** | `Protocol: SubtypeClassifier.classify(img, symbols)` | Current YOLO classifier → Vision-Language Model → lookup table |
 
+
+---
+
+## Phase B.5 — Pivot Sprint: Snap-to-Equipment, Line Splitting & Interactive Web Canvas Tooling
+
+### Executive Context & Strategic Directive
+Berdasarkan arahan prioritas CTO (Pivot Sprint Phase B.5):
+1. **HOLD / TUNDA SEMENTARA**: Logika pewarnaan otomatis multi-warna API RP 970 (systemize & circuitize).
+2. **TARGET UTAMA**:
+   - Pipeline tracing mengekstrak seluruh jalur piping secara utuh sampai menempel persis ke perimeter equipment.
+   - Semua garis hasil tracing dirender dengan SATU warna default netral (`#2563EB`) pada tampilan awal.
+   - Membangun Interactive Web Canvas Tooling agar corrosion engineer dapat:
+     - Memilih dan meng-highlight segmen polyline pipa di kanvas OpenSeadragon (click & Shift+Click multi-select).
+     - Mengubah warna segmen pipa terpilih melalui floating color palette (8 preset warna + custom hex input).
+     - Melakukan 'Split Line' pada koordinat tertentu (misal di dekat valve/spec break) menjadi dua PipeRun terpisah.
+     - Undo/Redo (15–20 riwayat aksi di frontend via `Ctrl+Z` / `Ctrl+Y`).
+     - Mengatur opacity layer pipa (0.1–1.0) dan toggle visibilitas Show/Hide.
+     - Menyimpan perubahan secara persisten ke database (`Sheet.result_json`) dan mengekspor ke format Vector PDF / PNG beranotasi (`engineer` mode).
+
+### Phase B.5 Work Breakdown & Status
+
+| Task ID | Task Description | Priority | Status | Implemented Files |
+|---|---|---|---|---|
+| B.5.01 | **Tracer snap-to-equipment**: Extrapolasi endpoint polyline ke perimeter bounding box equipment terdekat & relaksasi min-length (25px) | P0 | **Completed** | `pidcorr/lines.py`, `pidcorr/implementations/skeleton_tracer.py` |
+| B.5.02 | **PipeRun color schema & serialization**: Default netral `#2563EB` di domain model & Pydantic schemas | P0 | **Completed** | `pidcorr/lines.py`, `backend/app/schemas/run.py` |
+| B.5.03 | **Line splitting logic & REST endpoints**: Algoritma proyeksi orthogonal titik potong & endpoints `POST .../runs/{idx}/split`, `PATCH .../runs/batch-color` | P0 | **Completed** | `pidcorr/lines.py`, `backend/app/routers/results.py`, `backend/app/routers/projects.py` |
+| B.5.04 | **PyMuPDF vector PDF/PNG export**: Mode `engineer` mengekspor PDF anotasi Acrobat PolyLine menggunakan per-run manual color | P1 | **Completed** | `pidcorr/export.py`, `backend/app/services/export_service.py`, `backend/app/routers/export.py` |
+| B.5.05 | **Interactive SVG Canvas Overlay**: OpenSeadragon overlay dengan pointer events, hit-testing 22px stroke, hover glow, selection halo, dan floating toolbar | P0 | **Completed** | `frontend/src/components/InteractivePipeCanvas.tsx` |
+| B.5.06 | **Frontend Undo/Redo & Canvas Controls**: 20-step history stack (`Ctrl+Z`, `Ctrl+Y`), opacity slider (10%–100%), visibility toggle, dan dirty state sync | P0 | **Completed** | `frontend/src/app/project/[id]/page.tsx` |
+| B.5.07 | **Automated Tests**: Unit & integration tests untuk snap-to-equipment, line splitting, color persistence, dan export | P0 | **Completed** | `backend/tests/test_snap_equipment.py`, `backend/tests/test_split_and_color.py` |
+
 ---
 
 ## Phase C — API RP 970 Engineering Engine, Multi-Sheet & Human-in-the-Loop Web UI

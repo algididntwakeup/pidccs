@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -29,7 +29,14 @@ import {
   Crosshair,
   Eye,
   Component,
+  RotateCcw,
+  RotateCw,
+  Save,
+  Sliders,
+  Scissors,
+  EyeOff,
 } from 'lucide-react';
+import InteractivePipeCanvas from '@/components/InteractivePipeCanvas';
 import {
   ProjectResponse,
   SheetResponse,
@@ -41,6 +48,7 @@ import {
   OffPageConnector,
   SymbolDetection,
   ProjectTopologyResponse,
+  PipeRun,
 } from '@/types/schema';
 import {
   fetchProject,
@@ -55,6 +63,9 @@ import {
   uploadLineList,
   fetchProjectTopology,
   patchResult,
+  splitRun,
+  updateRunColor,
+  batchUpdateRunColors,
 } from '@/lib/api';
 
 type ViewMode = 'digitize' | 'system' | 'circuit' | 'report' | 'topology';
@@ -98,9 +109,150 @@ export default function ProjectWorkspace() {
   const [showDeleteSheetModal, setShowDeleteSheetModal] = useState(false);
   const [deletingSheet, setDeletingSheet] = useState(false);
 
+  // Interactive Pipe Canvas & Tooling state (Phase B.5)
+  const [selectedRunIndices, setSelectedRunIndices] = useState<Set<number>>(new Set());
+  const [splitMode, setSplitMode] = useState<boolean>(false);
+  const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
+  const [history, setHistory] = useState<
+    Array<{
+      desc: string;
+      prevRuns: PipeRun[];
+      nextRuns: PipeRun[];
+      prevPids: PipingID[];
+      nextPids: PipingID[];
+    }>
+  >([]);
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
+  const [savingChanges, setSavingChanges] = useState<boolean>(false);
+  const [statusToast, setStatusToast] = useState<string | null>(null);
+
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const osdModuleRef = useRef<any>(null);
+
+  // Push action to Undo/Redo history stack (15-20 steps)
+  const pushHistory = useCallback(
+    (desc: string, prevRuns: PipeRun[], nextRuns: PipeRun[], prevPids: PipingID[], nextPids: PipingID[]) => {
+      setHistory((prev) => {
+        const trimmed = prev.slice(0, historyIndex + 1);
+        const nextHistory = [
+          ...trimmed,
+          { desc, prevRuns, nextRuns, prevPids, nextPids },
+        ].slice(-20);
+        setHistoryIndex(nextHistory.length - 1);
+        return nextHistory;
+      });
+      setHasUnsavedChanges(true);
+    },
+    [historyIndex]
+  );
+
+  const handleUndo = useCallback(() => {
+    if (historyIndex >= 0 && history[historyIndex]) {
+      const action = history[historyIndex];
+      if (result) {
+        setResult({ ...result, runs: action.prevRuns, piping_ids: action.prevPids });
+      }
+      setHistoryIndex((idx) => idx - 1);
+      setStatusToast(`Undo: ${action.desc}`);
+      setTimeout(() => setStatusToast(null), 2000);
+    }
+  }, [historyIndex, history, result]);
+
+  const handleRedo = useCallback(() => {
+    if (historyIndex < history.length - 1 && history[historyIndex + 1]) {
+      const action = history[historyIndex + 1];
+      if (result) {
+        setResult({ ...result, runs: action.nextRuns, piping_ids: action.nextPids });
+      }
+      setHistoryIndex((idx) => idx + 1);
+      setStatusToast(`Redo: ${action.desc}`);
+      setTimeout(() => setStatusToast(null), 2000);
+    }
+  }, [historyIndex, history, result]);
+
+  // Recolor selected runs in frontend state
+  const handleRecolorRuns = (runIdxs: number[], newColor: string) => {
+    if (!result || runIdxs.length === 0) return;
+    const prevRuns = [...result.runs];
+    const nextRuns = result.runs.map((r, i) =>
+      runIdxs.includes(i) ? { ...r, color: newColor } : r
+    );
+    pushHistory(
+      `Ubah warna ${runIdxs.length} pipa`,
+      prevRuns,
+      nextRuns,
+      result.piping_ids,
+      result.piping_ids
+    );
+    setResult({ ...result, runs: nextRuns });
+    setStatusToast(`Warna diperbarui ke ${newColor}`);
+    setTimeout(() => setStatusToast(null), 2000);
+  };
+
+  // Split selected line via backend API
+  const handleSplitRun = async (runIdx: number, x: number, y: number) => {
+    if (!result || !projectId || !activeSheet) return;
+    try {
+      const res = await splitRun(projectId, activeSheet.id, runIdx, x, y);
+      if (res.result) {
+        const prevRuns = [...result.runs];
+        const prevPids = [...result.piping_ids];
+        const nextRuns = res.result.runs;
+        const nextPids = res.result.piping_ids || result.piping_ids;
+        pushHistory(`Split pipa #${runIdx}`, prevRuns, nextRuns, prevPids, nextPids);
+        setResult({ ...result, runs: nextRuns, piping_ids: nextPids });
+        setSelectedRunIndices(new Set([res.new_run_idx]));
+        setStatusToast(`Pipa #${runIdx} berhasil dipecah menjadi 2 segmen!`);
+        setTimeout(() => setStatusToast(null), 3000);
+      }
+    } catch (err: any) {
+      alert(err.message || 'Gagal memecah pipa');
+    }
+  };
+
+  // Persist all manual changes to database
+  const handleSaveAllChanges = useCallback(async () => {
+    if (!result || !projectId || !activeSheet || savingChanges) return;
+    setSavingChanges(true);
+    try {
+      await patchResult(projectId, activeSheet.id, result);
+      setHasUnsavedChanges(false);
+      setStatusToast('Semua perubahan pipa berhasil disimpan ke database!');
+      setTimeout(() => setStatusToast(null), 3000);
+    } catch (err: any) {
+      alert('Gagal menyimpan perubahan: ' + (err.message || 'Server error'));
+    } finally {
+      setSavingChanges(false);
+    }
+  }, [result, projectId, activeSheet, savingChanges]);
+
+  // Keyboard shortcuts listener: Ctrl+Z (Undo), Ctrl+Y (Redo), Ctrl+S (Save), Esc (Cancel)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          handleRedo();
+        } else {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleSaveAllChanges();
+      } else if (e.key === 'Escape') {
+        setSplitMode(false);
+        setSelectedRunIndices(new Set());
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo, handleSaveAllChanges]);
 
   // Load project & sheets
   useEffect(() => {
@@ -195,7 +347,7 @@ export default function ProjectWorkspace() {
     const viewer = viewerRef.current;
     if (!viewer.viewport) return;
 
-    const targetUrl = showOverlay && isDetected
+    const targetUrl = showOverlay && isDetected && (mode === 'circuit' || mode === 'system')
       ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
       : getRawImageUrl(projectId, activeSheet.id);
 
@@ -772,14 +924,14 @@ export default function ProjectWorkspace() {
                   Word Asset Register (.docx)
                 </a>
                 <a
-                  href={getExportUrl(projectId, activeSheet!.id, 'pdf', mode === 'circuit' ? 'circuit' : 'system')}
+                  href={getExportUrl(projectId, activeSheet!.id, 'pdf', 'engineer')}
                   download
                   className="block px-3 py-1.5 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 font-medium"
                 >
                   Acrobat Vector PDF (.pdf)
                 </a>
                 <a
-                  href={getExportUrl(projectId, activeSheet!.id, 'png', mode === 'circuit' ? 'circuit' : 'system')}
+                  href={getExportUrl(projectId, activeSheet!.id, 'png', 'engineer')}
                   download
                   className="block px-3 py-1.5 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 font-medium"
                 >
@@ -817,8 +969,33 @@ export default function ProjectWorkspace() {
           {/* Canvas Container */}
           <div ref={canvasRef} className="w-full h-full" />
 
+          {/* Interactive Pipe Canvas Tooling (Phase B.5) */}
+          {result && activeSheet && (
+            <InteractivePipeCanvas
+              viewer={viewerRef.current}
+              osdModule={osdModuleRef.current}
+              width={result.w || activeSheet.width || 3000}
+              height={result.h || activeSheet.height || 2000}
+              runs={result.runs || []}
+              pipingIds={result.piping_ids || []}
+              showOverlay={showOverlay}
+              opacity={traceOpacity}
+              selectedRunIndices={selectedRunIndices}
+              onSelectRunIndices={setSelectedRunIndices}
+              onRecolorRuns={handleRecolorRuns}
+              onSplitRun={handleSplitRun}
+              splitMode={splitMode}
+              onSetSplitMode={setSplitMode}
+              canUndo={historyIndex >= 0}
+              canRedo={historyIndex < history.length - 1}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+            />
+          )}
+
           {/* Floating Canvas Controls */}
-          <div className="absolute bottom-6 left-6 flex bg-white/95 backdrop-blur border border-slate-300 rounded-xl shadow-lg p-1 space-x-1 z-40">
+          <div className="absolute bottom-6 left-6 flex items-center bg-white/95 backdrop-blur border border-slate-300 rounded-xl shadow-lg p-1.5 space-x-1.5 z-40">
+            {/* Zoom / Viewport controls */}
             <button
               onClick={() => handleZoom(1)}
               className="p-2 hover:bg-slate-100 rounded-lg text-slate-700 transition"
@@ -840,9 +1017,12 @@ export default function ProjectWorkspace() {
             >
               <Maximize2 className="w-4 h-4" />
             </button>
+
             {(result || activeSheet?.status === 'detected') && (
               <>
-                <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-1" />
+                <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
+
+                {/* Visibility Toggle Button */}
                 <button
                   onClick={() => setShowOverlay(!showOverlay)}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
@@ -850,14 +1030,90 @@ export default function ProjectWorkspace() {
                       ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700'
                       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                   }`}
-                  title="Toggle Color-Coded Circuit Marking on Canvas"
+                  title="Tampilkan / Sembunyikan Garis Pipa (Show/Hide)"
                 >
-                  <Layers className="w-3.5 h-3.5" />
-                  <span>{showOverlay ? 'Circuit Overlay: ON' : 'Circuit Overlay: OFF'}</span>
+                  {showOverlay ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                  <span>{showOverlay ? 'Pipa: ON' : 'Pipa: OFF'}</span>
                 </button>
+
+                {/* Opacity Slider */}
+                {showOverlay && (
+                  <div className="flex items-center space-x-1 px-1.5 text-xs text-slate-600 border-l border-slate-200 pl-2">
+                    <Sliders className="w-3 h-3 text-slate-400" />
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.05"
+                      value={traceOpacity}
+                      onChange={(e) => setTraceOpacity(parseFloat(e.target.value))}
+                      className="w-16 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                      title={`Transparansi Pipa: ${Math.round(traceOpacity * 100)}%`}
+                    />
+                    <span className="text-[10px] font-mono text-slate-500 w-7">
+                      {Math.round(traceOpacity * 100)}%
+                    </span>
+                  </div>
+                )}
+
+                <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
+
+                {/* Undo & Redo buttons */}
+                <button
+                  onClick={handleUndo}
+                  disabled={historyIndex < 0}
+                  className={`p-2 rounded-lg transition ${
+                    historyIndex >= 0
+                      ? 'text-slate-700 hover:bg-slate-100'
+                      : 'text-slate-300 cursor-not-allowed'
+                  }`}
+                  title="Undo aksi terakhir (Ctrl+Z)"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleRedo}
+                  disabled={historyIndex >= history.length - 1}
+                  className={`p-2 rounded-lg transition ${
+                    historyIndex < history.length - 1
+                      ? 'text-slate-700 hover:bg-slate-100'
+                      : 'text-slate-300 cursor-not-allowed'
+                  }`}
+                  title="Redo aksi (Ctrl+Y)"
+                >
+                  <RotateCw className="w-4 h-4" />
+                </button>
+
+                {/* Save Changes Button */}
+                {hasUnsavedChanges && (
+                  <>
+                    <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
+                    <button
+                      onClick={handleSaveAllChanges}
+                      disabled={savingChanges}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition animate-pulse"
+                      title="Simpan Perubahan ke Database (Ctrl+S)"
+                    >
+                      {savingChanges ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Save className="w-3.5 h-3.5" />
+                      )}
+                      <span>Simpan Perubahan</span>
+                    </button>
+                  </>
+                )}
               </>
             )}
           </div>
+
+          {/* Temporary Status Toast */}
+          {statusToast && (
+            <div className="absolute bottom-20 left-6 z-50 bg-slate-900/90 backdrop-blur text-white text-xs font-medium px-3.5 py-2 rounded-xl shadow-xl flex items-center space-x-2 animate-in fade-in slide-in-from-bottom-2 duration-150">
+              <Check className="w-4 h-4 text-emerald-400" />
+              <span>{statusToast}</span>
+            </div>
+          )}
 
           {/* Canvas Overlay Legend */}
           {mode === 'system' && systems.length > 0 && (

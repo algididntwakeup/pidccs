@@ -91,7 +91,12 @@ export async function fetchValidation(projectId: string, sheetId: string): Promi
   return res.json();
 }
 
-export function getExportUrl(projectId: string, sheetId: string, format: 'xlsx' | 'docx' | 'pdf' | 'png', mode: 'system' | 'circuit' = 'system'): string {
+export function getExportUrl(
+  projectId: string,
+  sheetId: string,
+  format: 'xlsx' | 'docx' | 'pdf' | 'png',
+  mode: 'system' | 'circuit' | 'engineer' = 'engineer'
+): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/export?format=${format}&mode=${mode}`;
 }
 
@@ -99,8 +104,47 @@ export function getRawImageUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/raw`;
 }
 
-export function getMarkedImageUrl(projectId: string, sheetId: string, mode: 'system' | 'circuit' = 'system'): string {
+export function getMarkedImageUrl(projectId: string, sheetId: string, mode: 'system' | 'circuit' | 'engineer' = 'engineer'): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/export?format=png&mode=${mode}`;
+}
+
+export async function splitRun(projectId: string, sheetId: string, runIdx: number, x: number, y: number) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/split`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x, y }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to split pipe run' }));
+    throw new Error(err.detail || 'Failed to split pipe run');
+  }
+  return res.json();
+}
+
+export async function updateRunColor(projectId: string, sheetId: string, runIdx: number, color: string) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/color`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ color }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update run color' }));
+    throw new Error(err.detail || 'Failed to update run color');
+  }
+  return res.json();
+}
+
+export async function batchUpdateRunColors(projectId: string, sheetId: string, runIdxs: number[], color: string) {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/batch-color`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_idxs: runIdxs, color }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to batch update run colors' }));
+    throw new Error(err.detail || 'Failed to batch update run colors');
+  }
+  return res.json();
 }
 
 export function getDziUrl(projectId: string, sheetId: string): string {

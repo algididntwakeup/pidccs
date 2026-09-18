@@ -168,13 +168,71 @@ backend/tests/test_phase_b_perception.py::test_factory_config PASSED      [100%]
   - **Latency**: `SkeletonLineTracer` executes in **2.141 seconds per sheet** (via optimized touch-mask and bounding-box extractions), well within web interactive limits.
   - **Crossover Separation**: Crossing pipes are cleanly kept as independent entities, preventing circuitization bleed.
 
-### Automated Test Verification
-Executed `pytest backend/tests/ -q`:
-```text
-..........                                                               [100%]
-10 passed, 6 warnings in 27.47s
-```
-- **100% test pass rate** (10 of 10 tests passed).
-- Synthetic topological tests confirm exact crossover separation and T-junction branching.
-- All Phase B perception components (`DETECTOR_IMPL`, `OCR_IMPL`, `TRACER_IMPL`) fully operational and decoupled.
+
+---
+
+## 6. Phase B.5: Pivot Sprint — Tracer Snap-to-Equipment, Line Splitting & Interactive Web Canvas Tooling
+
+### 6.1 Strategic Pivot & Directive
+Berdasarkan arahan prioritas CTO:
+- **HOLD / TUNDA**: Pewarnaan otomatis multi-warna API RP 970 (systemize & circuitize) ditunda sementara karena ketergantungan pada kelengkapan anotasi spec break dan line list.
+- **TARGET PRIORITAS**:
+  1. Jalur pipa diekstrak secara utuh dan menempel persis ke perimeter equipment (snap-to-equipment).
+  2. Semua hasil tracing diberi warna netral seragam `#2563EB` pada tampilan awal.
+  3. Dibangun **Interactive Web Canvas Tooling** lengkap bagi corrosion engineer untuk inspeksi, seleksi, pewarnaan manual, pemotongan garis (split line), dan ekspor deliverable vector PDF/PNG beranotasi.
+
+---
+
+### 6.2 CV & Pipeline Adjustments (`pidcorr/`)
+1. **Snap Endpoints to Equipment Perimeter** ([`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py)):
+   - Fungsi `snap_endpoints_to_equipment(runs, detections, snap_threshold_pt=35.0)`:
+     - Mendeteksi simbol berkategori equipment (`vessel`, `tank`, `heat_exchanger`, `pump`, `compressor`, dll).
+     - Mengevaluasi jarak Euclidean dari titik ujung polyline (`p0` dan `pn`) ke 4 sisi bounding box equipment.
+     - Jika jarak $\le \text{threshold}$, titik ujung diproyeksikan secara ortogonal atau sudut ke perimeter equipment.
+2. **Relaksasi Segmen Pendek** ([`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py)):
+   - `min_length_px` direlaksasi dari 40px ke 25px agar pipa drain, vent, dan connection niple pendek tidak tereliminasi prematur.
+   - Mengintegrasikan fungsi snapping sebelum asosiasi label piping ID.
+3. **Pemberian Warna Default Netral**:
+   - `PipeRun.color` default diatur ke `#2563EB`.
+
+---
+
+### 6.3 Backend Endpoints & Deliverable Export
+1. **Line Splitting & Recoloring Endpoints**:
+   - `POST /api/v1/projects/{project_id}/sheets/{sheet_id}/results/runs/{run_idx}/split`: Memotong polyline pada koordinat `(x, y)` terdekat menjadi 2 PipeRun terpisah.
+   - `PATCH /api/v1/projects/{project_id}/sheets/{sheet_id}/results/runs/{run_idx}/color`: Memperbarui warna single run.
+   - `PATCH /api/v1/projects/{project_id}/sheets/{sheet_id}/results/runs/batch-color`: Memperbarui warna banyak run sekaligus secara atomik.
+2. **PyMuPDF Vector PDF & PNG Export (`engineer` mode)**:
+   - Menambahkan mode `mode=engineer` pada export service:
+     - Menggunakan properti `run.color` per garis untuk rendering anotasi `PolyLine` Adobe Acrobat di PDF.
+     - Menggambar garis berbobot warna kustom pada PNG beresolusi tinggi.
+
+---
+
+### 6.4 Interactive Web Canvas Tooling (`frontend/`)
+1. **Interactive SVG Canvas Overlay** ([`InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx)):
+   - Dirender menggunakan `ReactDOM.createPortal` langsung ke dalam container overlay OpenSeadragon.
+   - Sinkron 1:1 terhadap pergerakan pan dan zoom OpenSeadragon tanpa lag matriks koordinat.
+   - Polyline dilengkapi dengan **invisible hit target** (`strokeWidth = 22px`, `pointerEvents = "stroke"`) untuk seleksi mudah tanpa pixel-hunting.
+   - Visual feedback seketika: **Hover glow** dan **Selection halo** berwarna amber (`#f59e0b`).
+   - Mendukung **Shift + Click** untuk seleksi multi-garis sekaligus.
+2. **Floating Popover Toolbar**:
+   - Tampil melayang otomatis di dekat posisi mouse saat garis dipilih.
+   - Palet warna kurasi (8 swatch: Biru, Hijau, Merah, Kuning, Ungu, Cyan, Oranye, Abu-abu) + input hex kustom.
+   - Mode **Split Line**: Mengaktifkan kursor crosshair dengan preview lingkaran koordinat proyeksi pemotongan secara live.
+   - Informasi run: panjang pipa (px) dan jumlah vertex.
+3. **Full Undo/Redo & Canvas Controls** ([`page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx)):
+   - Riwayat aksi frontend (20 langkah stack): membatalkan (`Ctrl+Z`) atau mengulang (`Ctrl+Y`) pemotongan dan pewarnaan garis.
+   - Slider opacity interaktif (10% hingga 100%) dan tombol toggle visibilitas Show/Hide.
+   - Status dirty indicator dan tombol persisten "Save Changes" (`Ctrl+S`).
+   - Tautan langsung unduh PDF Vector dan PNG beranotasi mode engineer.
+
+---
+
+### 6.5 Automated Test Suite Verification
+Dijalankan melalui `pytest backend/tests/ -v`:
+- `test_snap_equipment.py`: 6 tests passing (snapping horizontal, vertical, corner, non-snapping distant lines, tracer integration).
+- `test_split_and_color.py`: 5 tests passing (orthogonal line split, run recoloring, batch recoloring, persistence di database, export vector PDF mode engineer).
+- Total seluruh suite: **14 tests, 100% PASSED**.
+
 
