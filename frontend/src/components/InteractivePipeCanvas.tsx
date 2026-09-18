@@ -10,6 +10,8 @@ import {
   Trash2,
   Tag,
   Sparkles,
+  Crop,
+  Pencil,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
 
@@ -43,6 +45,10 @@ interface InteractivePipeCanvasProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  traceTool: 'pan' | 'rescan' | 'pen';
+  onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen') => void;
+  onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }) => Promise<void>;
+  onManualRun: (points: [number, number][]) => Promise<void>;
 }
 
 export default function InteractivePipeCanvas({
@@ -66,6 +72,10 @@ export default function InteractivePipeCanvas({
   canRedo,
   onUndo,
   onRedo,
+  traceTool,
+  onSetTraceTool,
+  onRescan,
+  onManualRun,
 }: InteractivePipeCanvasProps) {
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [hoveredRunIdx, setHoveredRunIdx] = useState<number | null>(null);
@@ -76,6 +86,10 @@ export default function InteractivePipeCanvas({
   const [savingTag, setSavingTag] = useState(false);
   const [popoverPos, setPopoverPos] = useState<{ x: number; y: number; imgX: number; imgY: number } | null>(null);
   const [tagInput, setTagInput] = useState<string>('');
+  const [roiStart, setRoiStart] = useState<{ x: number; y: number } | null>(null);
+  const [roiRect, setRoiRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const [manualPoints, setManualPoints] = useState<[number, number][]>([]);
+  const [toolBusy, setToolBusy] = useState(false);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -168,6 +182,8 @@ export default function InteractivePipeCanvas({
   // Line click handler with Shift+Click multi-select and dynamic popover placement
   const handleLineClick = (idx: number, e: React.MouseEvent) => {
     e.stopPropagation();
+    e.preventDefault();
+    if (traceTool !== 'pan') return;
 
     // If split mode is active and this is the selected line, execute split
     if (splitMode && selectedRunIndices.has(idx) && splitPreview) {
@@ -197,6 +213,81 @@ export default function InteractivePipeCanvas({
       onSelectRunIndices(new Set([idx]));
     }
   };
+
+  const handleSvgMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (traceTool === 'rescan') {
+      const point = getImageCoordinates(e);
+      if (point) {
+        setRoiStart(point);
+        setRoiRect({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+      }
+    } else if (traceTool === 'pen') {
+      const point = getImageCoordinates(e);
+      if (point) setManualPoints((prev) => [...prev, [Math.round(point.x), Math.round(point.y)]]);
+    }
+  };
+
+  const handleSvgMouseUp = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (traceTool !== 'rescan' || !roiStart) return;
+    const point = getImageCoordinates(e);
+    setRoiStart(null);
+    if (!point) return;
+    const bounds = {
+      x1: Math.min(roiStart.x, point.x), y1: Math.min(roiStart.y, point.y),
+      x2: Math.max(roiStart.x, point.x), y2: Math.max(roiStart.y, point.y),
+    };
+    setRoiRect(bounds);
+    if (bounds.x2 - bounds.x1 < 4 || bounds.y2 - bounds.y1 < 4) return;
+    setToolBusy(true);
+    try { await onRescan(bounds); } finally { setToolBusy(false); }
+  };
+
+  const finishManual = async () => {
+    if (manualPoints.length < 2 || toolBusy) return;
+    setToolBusy(true);
+    try { await onManualRun(manualPoints); } finally {
+      setManualPoints([]);
+      setToolBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!viewer) return;
+    const syncOverlay = () => {
+      const overlay = document.getElementById('pid-interactive-svg-overlay-container');
+      if (overlay) overlay.style.display = showOverlay ? 'block' : 'none';
+    };
+    viewer.addHandler('update-viewport', syncOverlay);
+    viewer.addHandler('animation-finish', syncOverlay);
+    viewer.addHandler('resize', syncOverlay);
+    return () => {
+      viewer.removeHandler('update-viewport', syncOverlay);
+      viewer.removeHandler('animation-finish', syncOverlay);
+      viewer.removeHandler('resize', syncOverlay);
+    };
+  }, [viewer, showOverlay]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' && traceTool === 'pen') {
+        e.preventDefault();
+        void finishManual();
+      }
+      if (e.key === 'Escape' && traceTool !== 'pan') {
+        e.preventDefault();
+        setRoiStart(null);
+        setRoiRect(null);
+        setManualPoints([]);
+        onSetTraceTool('pan');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [traceTool, manualPoints, toolBusy, onSetTraceTool]);
 
   // Mouse move over SVG to update split preview
   const handleSvgMouseMove = (e: React.MouseEvent) => {
@@ -304,15 +395,27 @@ export default function InteractivePipeCanvas({
               position: 'absolute',
               top: 0,
               left: 0,
-              pointerEvents: 'none',
+               pointerEvents: traceTool === 'pan' ? 'none' : 'all',
               overflow: 'visible',
               display: showOverlay ? 'block' : 'none',
               opacity: opacity,
               transition: 'opacity 0.2s ease',
             }}
-            onMouseMove={handleSvgMouseMove}
-            onClick={() => {
-              if (selectedRunIndices.size > 0 && !splitMode) {
+             onMouseDown={handleSvgMouseDown}
+             onMouseUp={handleSvgMouseUp}
+             onDoubleClick={(e) => { e.stopPropagation(); e.preventDefault(); if (traceTool === 'pen') finishManual(); }}
+             onMouseMove={(e) => {
+               e.stopPropagation();
+               if (traceTool === 'rescan' && roiStart) {
+                 const point = getImageCoordinates(e);
+                 if (point) setRoiRect({ x1: roiStart.x, y1: roiStart.y, x2: point.x, y2: point.y });
+               }
+               handleSvgMouseMove(e);
+             }}
+             onClick={(e) => {
+               e.stopPropagation();
+               e.preventDefault();
+               if (selectedRunIndices.size > 0 && !splitMode) {
                 onSelectRunIndices(new Set());
                 setPopoverPos(null);
               }
@@ -336,7 +439,7 @@ export default function InteractivePipeCanvas({
               const ptsStr = run.points.map((p) => `${p[0]},${p[1]}`).join(' ');
 
               return (
-                <g key={`run-${idx}`} className="group">
+                 <g key={run.id || `run-${idx}`} className="group" onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); }}>
                   {/* Invisible wide stroke for easy clicking & hovering */}
                   <polyline
                     points={ptsStr}
@@ -349,9 +452,10 @@ export default function InteractivePipeCanvas({
                       pointerEvents: 'stroke',
                       cursor: splitMode ? 'crosshair' : 'pointer',
                     }}
-                    onClick={(e) => handleLineClick(idx, e)}
-                    onMouseEnter={() => setHoveredRunIdx(idx)}
-                    onMouseLeave={() => setHoveredRunIdx(null)}
+                     onClick={(e) => handleLineClick(idx, e)}
+                     onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                     onMouseEnter={() => setHoveredRunIdx(idx)}
+                     onMouseLeave={() => setHoveredRunIdx(null)}
                   />
 
                   {/* Selection Background Halo */}
@@ -410,6 +514,21 @@ export default function InteractivePipeCanvas({
                 </g>
               );
             })}
+
+            {roiRect && traceTool === 'rescan' && (
+              <rect
+                x={Math.min(roiRect.x1, roiRect.x2)} y={Math.min(roiRect.y1, roiRect.y2)}
+                width={Math.abs(roiRect.x2 - roiRect.x1)} height={Math.abs(roiRect.y2 - roiRect.y1)}
+                fill="#38BDF8" fillOpacity="0.12" stroke="#38BDF8" strokeWidth="4" strokeDasharray="12 8"
+                pointerEvents="none"
+              />
+            )}
+            {manualPoints.length > 0 && (
+              <polyline
+                points={manualPoints.map((p) => p.join(',')).join(' ')}
+                fill="none" stroke="#2563EB" strokeWidth="5" strokeDasharray="10 6" pointerEvents="none"
+              />
+            )}
 
             {/* Split Mode Interactive Cut Point Marker */}
             {splitMode && splitPreview && (
@@ -623,6 +742,13 @@ export default function InteractivePipeCanvas({
           </button>
         </div>
       )}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 rounded-xl bg-white/95 p-1.5 shadow-xl border border-slate-200">
+        <button onClick={() => { onSetTraceTool('pan'); setManualPoints([]); setRoiRect(null); }} className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold ${traceTool === 'pan' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-100'}`}>Pan</button>
+        <button onClick={() => { onSetTraceTool('rescan'); setManualPoints([]); }} className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 ${traceTool === 'rescan' ? 'bg-cyan-600 text-white' : 'hover:bg-slate-100'}`}><Crop className="w-3.5 h-3.5" />Box Trace</button>
+        <button onClick={() => { onSetTraceTool('pen'); setRoiRect(null); }} className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 ${traceTool === 'pen' ? 'bg-blue-600 text-white' : 'hover:bg-slate-100'}`}><Pencil className="w-3.5 h-3.5" />Manual Pen</button>
+        {traceTool === 'pen' && manualPoints.length >= 2 && <button disabled={toolBusy} onClick={finishManual} className="px-2 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold">Enter</button>}
+        {toolBusy && <span className="px-2 text-[11px] text-slate-500">Memproses...</span>}
+      </div>
     </>
   );
 }

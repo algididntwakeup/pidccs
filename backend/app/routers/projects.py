@@ -1,5 +1,7 @@
+import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db
@@ -7,6 +9,14 @@ from ..schemas.project import ProjectCreate, ProjectResponse, SheetResponse
 from ..services.project_service import ProjectService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+
+class TraceRegionRequest(BaseModel):
+    x1: float = Field(..., ge=0)
+    y1: float = Field(..., ge=0)
+    x2: float = Field(..., ge=0)
+    y2: float = Field(..., ge=0)
+    sheet_id: Optional[str] = None
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -83,6 +93,61 @@ async def upload_sheet(
         user_id=user_id,
     )
     return sheet
+
+
+@router.post("/{project_id}/trace-region")
+async def trace_region(
+    project_id: str,
+    payload: TraceRegionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-trace a selected image region with relaxed short-line detection."""
+    from ..adapters.storage import LocalStorageAdapter
+    from ..adapters.pdf_renderer import load_drawing_image
+    from ..config import settings
+    from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
+
+    project = await ProjectService.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    sheet = await ProjectService.get_sheet(db, payload.sheet_id) if payload.sheet_id else (project.sheets[0] if project.sheets else None)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found in this project")
+
+    storage_adapter = LocalStorageAdapter(settings.STORAGE_DIR)
+    image_path = storage_adapter.get_file_path(sheet.file_path)
+    img = load_drawing_image(image_path, dpi=sheet.dpi or 350)
+    height, width = img.shape[:2]
+    x1, y1 = max(0, min(int(payload.x1), width - 1)), max(0, min(int(payload.y1), height - 1))
+    x2, y2 = max(x1 + 1, min(int(payload.x2), width)), max(y1 + 1, min(int(payload.y2), height))
+    crop = img[y1:y2, x1:x2]
+    tracer = SkeletonLineTracer(min_length_px=6)
+    local_runs = tracer.trace(crop, dpi=sheet.dpi or 350, detections=[], furniture=[])
+
+    new_runs = []
+    for run in local_runs:
+        record = dict(run) if isinstance(run, dict) else {
+            "points": run.points,
+            "axis": run.axis,
+            "underline": getattr(run, "underline", False),
+        }
+        points = [[int(p[0]) + x1, int(p[1]) + y1] for p in record.get("points", [])]
+        if len(points) < 2:
+            continue
+        new_runs.append({
+            **record,
+            "id": f"rescan-run-{uuid.uuid4().hex[:12]}",
+            "points": points,
+            "x1": min(p[0] for p in points), "y1": min(p[1] for p in points),
+            "x2": max(p[0] for p in points), "y2": max(p[1] for p in points),
+            "color": "#2563EB", "manual": False, "source": "rescan",
+        })
+
+    result = dict(sheet.result_json or {})
+    result["runs"] = list(result.get("runs", [])) + new_runs
+    sheet.result_json = result
+    await db.commit()
+    return {"status": "success", "new_runs": new_runs, "total_runs": len(result["runs"])}
 
 
 @router.get("/{project_id}/sheets/{sheet_id}", response_model=SheetResponse)
@@ -416,4 +481,3 @@ async def update_sheet_run_label(
         "label": new_label,
         "result": sheet.result_json,
     }
-

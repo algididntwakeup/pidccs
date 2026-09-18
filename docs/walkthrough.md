@@ -1,5 +1,33 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Canvas Stability, Single Sidebar Tab, Re-scan ROI, & Manual Pen
+
+**Status**: Implemented and locally verified on 2026-09-18.
+
+### Scope
+
+- One sidebar tab row now contains `Lines`, `Pipa (Inspector)`, `Symbols`, and `OPCs`; the duplicate row is removed.
+- `viewer.clearOverlays()` was removed from run focus so clicks, sidebar zoom, and viewport changes do not delete the React SVG tracing layer.
+- Focus rectangles are independent, SVG events are isolated from OpenSeadragon, run keys are stable, and viewport sync covers `update-viewport`, `animation-finish`, and `resize`.
+- `POST /api/v1/projects/{project_id}/trace-region` crops the selected sheet region, runs `SkeletonLineTracer(min_length_px=6)`, offsets local points globally, persists runs with `source: "rescan"`, and returns `new_runs`.
+- `Box Trace / Re-scan` provides rubber-band ROI selection. `Manual Pen` creates persisted `manual-run-[timestamp]` runs with `manual: true` and default color `#2563EB`.
+
+### Shortcuts
+
+| Shortcut | Behavior |
+|---|---|
+| `Delete` / `Backspace` | Delete selected runs |
+| `Escape` | Cancel tool/selection and return to Pan |
+| `Enter` / double-click | Finish Manual Pen |
+| `Ctrl/Cmd+Z`, `Ctrl/Cmd+Y`, `Ctrl/Cmd+S` | Undo, redo, save |
+
+### Verification
+
+- `pytest backend/tests -q`: **33 passed**.
+- `npm run build`: **passed**.
+- `git diff --check`: **passed**.
+- Follow-up: add ROI boundary/empty-result tests and browser E2E overlay persistence tests.
+
 > **Status**: Phase A core components implemented and verified atomically.
 
 ---
@@ -308,6 +336,5 @@ Sebagai acuan untuk sesi berikutnya, berikut adalah backlog prioritas yang belum
 4. **Manual Pen / Polyline Draw Tool**:
    - *Kebutuhan*: Segmen pipa beresolusi rendah atau garis putus-putus (*dashed heat tracing/instrumentation*) yang terlewat oleh tracer otomatis harus dapat digambar manual oleh engineer.
    - *Rencana*: Menambahkan mode gambar garis bebas/ortogonal (click-to-point polyline) dengan snap otomatis ke endpoint terdekat, menghasilkan objek `PipeRun` baru dengan flag `manual: true`, dan langsung tersimpan ke database.
-
 
 

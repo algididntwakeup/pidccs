@@ -121,6 +121,7 @@ export default function ProjectWorkspace() {
   // Interactive Pipe Canvas & Tooling state (Phase B.5)
   const [selectedRunIndices, setSelectedRunIndices] = useState<Set<number>>(new Set());
   const [splitMode, setSplitMode] = useState<boolean>(false);
+  const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen'>('pan');
   const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
   const [history, setHistory] = useState<
     Array<{
@@ -135,10 +136,12 @@ export default function ProjectWorkspace() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
+  const [viewerReady, setViewerReady] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const osdModuleRef = useRef<any>(null);
+  const highlightOverlayRef = useRef<HTMLElement | null>(null);
 
   // Push action to Undo/Redo history stack (15-20 steps)
   const pushHistory = useCallback(
@@ -322,6 +325,42 @@ export default function ProjectWorkspace() {
     }
   }, [result, projectId, activeSheet, savingChanges]);
 
+  const handleManualRun = useCallback(async (points: [number, number][]) => {
+    if (!result || !projectId || !activeSheet || points.length < 2) return;
+    const now = Date.now();
+    const nextRun: PipeRun = {
+      id: `manual-run-${now}`,
+      points,
+      axis: points.length === 2 ? 'd' : 'poly',
+      x1: points[0][0], y1: points[0][1],
+      x2: points[points.length - 1][0], y2: points[points.length - 1][1],
+      color: '#2563EB',
+      manual: true,
+    };
+    const prevRuns = [...result.runs];
+    const nextRuns = [...result.runs, nextRun];
+    pushHistory('Tambah pipa manual', prevRuns, nextRuns, result.piping_ids, result.piping_ids);
+    const updated = await patchResult(projectId, activeSheet.id, { ...result, runs: nextRuns });
+    setResult(updated);
+    setSelectedRunIndices(new Set([updated.runs.length - 1]));
+    setTraceTool('pan');
+  }, [result, projectId, activeSheet, pushHistory]);
+
+  const handleRescan = useCallback(async (bounds: { x1: number; y1: number; x2: number; y2: number }) => {
+    if (!projectId || !activeSheet || !result) return;
+    const updated = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/v1/projects/${projectId}/trace-region`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...bounds, sheet_id: activeSheet.id }),
+    });
+    if (!updated.ok) throw new Error('Gagal melakukan re-scan area');
+    const data = await updated.json();
+    const nextRuns = [...result.runs, ...(data.new_runs || [])];
+    pushHistory('Re-scan area pipa', result.runs, nextRuns, result.piping_ids, result.piping_ids);
+    setResult({ ...result, runs: nextRuns });
+    setTraceTool('pan');
+  }, [projectId, activeSheet, result, pushHistory]);
+
   // Keyboard shortcuts listener: Ctrl+Z (Undo), Ctrl+Y (Redo), Ctrl+S (Save), Esc (Cancel)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -341,12 +380,16 @@ export default function ProjectWorkspace() {
         handleSaveAllChanges();
       } else if (e.key === 'Escape') {
         setSplitMode(false);
+        setTraceTool('pan');
         setSelectedRunIndices(new Set());
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedRunIndices.size > 0) {
+        e.preventDefault();
+        handleDeleteRuns(Array.from(selectedRunIndices));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, handleSaveAllChanges]);
+  }, [handleUndo, handleRedo, handleSaveAllChanges, selectedRunIndices, handleDeleteRuns]);
 
   // Load project & sheets
   useEffect(() => {
@@ -422,6 +465,7 @@ export default function ProjectWorkspace() {
       });
 
       viewerRef.current = viewer;
+      setViewerReady(true);
     });
 
     return () => {
@@ -430,6 +474,7 @@ export default function ProjectWorkspace() {
         viewerRef.current.destroy();
         viewerRef.current = null;
       }
+      setViewerReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, activeSheet]);
@@ -510,7 +555,10 @@ export default function ProjectWorkspace() {
 
       // Add high-visibility glowing target overlay on the exact feature
       if (targetRect && viewer.clearOverlays && viewer.addOverlay) {
-        viewer.clearOverlays();
+        if (highlightOverlayRef.current) {
+          try { viewer.removeOverlay(highlightOverlayRef.current); } catch (e) {}
+          highlightOverlayRef.current = null;
+        }
         const highlightEl = document.createElement('div');
         highlightEl.style.border = '3px solid #6366f1'; // Indigo-500
         highlightEl.style.backgroundColor = 'rgba(99, 102, 241, 0.18)';
@@ -524,6 +572,7 @@ export default function ProjectWorkspace() {
           element: highlightEl,
           location: targetRect,
         });
+        highlightOverlayRef.current = highlightEl;
       }
     } catch (e) {
       console.error('Failed to zoom to bbox:', e);
@@ -1072,7 +1121,7 @@ export default function ProjectWorkspace() {
           {/* Interactive Pipe Canvas Tooling (Phase B.5) */}
           {result && activeSheet && (
             <InteractivePipeCanvas
-              viewer={viewerRef.current}
+              viewer={viewerReady ? viewerRef.current : null}
               osdModule={osdModuleRef.current}
               width={result.w || activeSheet.width || 3000}
               height={result.h || activeSheet.height || 2000}
@@ -1091,8 +1140,12 @@ export default function ProjectWorkspace() {
               canUndo={historyIndex >= 0}
               canRedo={historyIndex < history.length - 1}
               onUndo={handleUndo}
-              onRedo={handleRedo}
-            />
+               onRedo={handleRedo}
+               traceTool={traceTool}
+               onSetTraceTool={setTraceTool}
+               onRescan={handleRescan}
+               onManualRun={handleManualRun}
+             />
           )}
 
           {/* Floating Canvas Controls */}
@@ -1460,62 +1513,6 @@ export default function ProjectWorkspace() {
               </div>
             ) : mode === 'digitize' ? (
               <div className="flex flex-col h-full overflow-hidden">
-                {/* Digitize Sub-tabs (Lines, Symbols, OPCs) */}
-                <div className="flex border-b border-slate-200 bg-slate-50 px-3 pt-2 gap-1.5 shrink-0">
-                  <button
-                    onClick={() => setDigitizeSubTab('lines')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
-                      digitizeSubTab === 'lines'
-                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    <span>Lines</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 font-semibold">
-                      {result.piping_ids?.length || 0}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => setDigitizeSubTab('pipes')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
-                      digitizeSubTab === 'pipes'
-                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    <span>Pipa (Inspector)</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-100 text-indigo-700 font-semibold">
-                      {result.runs?.length || 0}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => setDigitizeSubTab('symbols')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
-                      digitizeSubTab === 'symbols'
-                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    <span>Symbols</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 font-semibold">
-                      {result.symbols?.length || 0}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => setDigitizeSubTab('opcs')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-t-lg transition border-b-2 flex items-center gap-1.5 ${
-                      digitizeSubTab === 'opcs'
-                        ? 'border-indigo-600 text-indigo-700 bg-white shadow-sm'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    <span>OPCs</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 font-semibold">
-                      {result.opcs?.length || 0}
-                    </span>
-                  </button>
-                </div>
-
                 {/* Sub-tab 1: Piping Lines */}
                 {digitizeSubTab === 'lines' && (
                   <div className="divide-y divide-slate-100 flex-1 overflow-y-auto">

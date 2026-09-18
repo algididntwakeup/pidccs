@@ -1,5 +1,18 @@
 # P&ID Studio → Web Platform: Implementation Plan
 
+## Sprint Handover: Canvas Stability, Single Sidebar Tab, Re-scan ROI, & Manual Pen
+
+**Status**: Implemented and locally verified on 2026-09-18.
+
+- Sidebar navigation is now one row: `Lines`, `Pipa (Inspector)`, `Symbols`, and `OPCs`.
+- Removed the unsafe global `viewer.clearOverlays()` focus behavior; focus rectangles are managed independently from the React SVG tracing layer.
+- Added event isolation, stable run keys, viewer readiness, and viewport sync for `update-viewport`, `animation-finish`, and `resize`.
+- Added `POST /api/v1/projects/{project_id}/trace-region` with sensitive tracing, global coordinate offsets, persistence, and `source: "rescan"`.
+- Added `Box Trace / Re-scan` and `Manual Pen`; manual runs use `manual-run-[timestamp]`, `#2563EB`, and `manual: true`.
+- Added `Delete`/`Backspace`, `Escape`, and `Enter`/double-click shortcuts.
+- Verification: `pytest backend/tests -q` -> **33 passed**, `npm run build` -> **passed**, `git diff --check` -> **passed**.
+- Export continues to consume persisted `result.runs`, including re-scan and manual runs.
+- Follow-up: add ROI clipping/empty-result tests and browser E2E coverage for overlay persistence.
 > **Re-engineering P&ID Studio (desktop/PyQt5) menjadi modern Web-Based System**
 > Scalable, containerized, maintainable — dengan Loose Coupling & Interface/Adapter Pattern.
 
@@ -898,5 +911,3 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 4. **Manual Pen / Polyline Draw Tool**:
    - *Kebutuhan*: Segmen pipa beresolusi rendah atau garis putus-putus (*dashed instrumentation / heat tracing*) yang terlewat oleh algoritma otomatis perlu dapat digambar manual oleh engineer.
    - *Target*: Menambahkan drawing tool di kanvas (click-to-point polyline) dengan snap otomatis ke endpoint terdekat, menghasilkan objek `PipeRun` baru dengan `manual: true`, dan langsung tersimpan ke database.
-
-
