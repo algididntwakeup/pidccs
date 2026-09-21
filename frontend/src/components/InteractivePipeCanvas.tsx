@@ -1014,6 +1014,8 @@ export default function InteractivePipeCanvas({
             top: popoverPos?.y ?? 24,
             minWidth: 280,
             maxWidth: 340,
+            maxHeight: '70vh',
+            overflowY: 'auto',
             cursor: popoverDragging ? 'grabbing' : undefined,
           }}
         >
@@ -1175,6 +1177,9 @@ export default function InteractivePipeCanvas({
             top: '40%',
             transform: 'translate(-50%, -50%)',
             minWidth: 320,
+            maxWidth: '92vw',
+            maxHeight: '90vh',
+            overflowY: 'auto',
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1215,7 +1220,7 @@ export default function InteractivePipeCanvas({
 
       {/* 4. Split Mode Guide Banner */}
       {splitMode && (
-        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-red-600/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 animate-bounce">
+        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-red-600/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 animate-bounce max-w-[92vw] truncate">
           <Scissors className="w-3.5 h-3.5" />
           <span>Arahkan kursor ke garis pipa lalu klik untuk memotong (split)</span>
           <button
@@ -1229,7 +1234,7 @@ export default function InteractivePipeCanvas({
 
       {/* 5. Tool Helper Hints Bar */}
       {traceTool === 'pen' && (
-        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-blue-700/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2">
+        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-blue-700/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 max-w-[92vw] truncate">
           <Pencil className="w-3.5 h-3.5" />
           <span>
             {manualPoints.length === 0
@@ -1249,14 +1254,19 @@ export default function InteractivePipeCanvas({
       )}
 
       {traceTool === 'rescan' && !roiPendingModal && (
-        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-cyan-700/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2">
+        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-cyan-700/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 max-w-[92vw] truncate">
           <Crop className="w-3.5 h-3.5" />
           <span>Tarik kotak (drag rectangle) pada area pipa yang ingin di-scan ulang. Tahan [Shift] untuk auto-replace.</span>
         </div>
       )}
 
       {/* 6. Active Tool Dock / Pill Toolbar at Bottom-Center */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 rounded-2xl bg-white/95 backdrop-blur-md p-1.5 shadow-2xl border border-slate-200">
+      {/* z-50 + max-width + flex-wrap: keeps this dock above the floating page-controls bar (z-40).
+          The two bars collide on viewports narrower than ~1470px (14" Full-HD laptops, 125-150%
+          OS scaling). To guarantee separation they live in different vertical bands on anything
+          below 2xl (1536px): the dock is lifted to `bottom-24` and only drops back to `bottom-6`
+          (same band as the page bar) on wide desktop screens where there is room to spare. */}
+      <div className="absolute bottom-24 2xl:bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-wrap items-center justify-center gap-1 rounded-2xl bg-white/95 backdrop-blur-md p-1.5 shadow-2xl border border-slate-200 max-w-[calc(100%-1.5rem)]">
         <button
           onClick={() => {
             onSetTraceTool('pan');

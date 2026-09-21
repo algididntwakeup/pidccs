@@ -1210,3 +1210,78 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 - `pytest tests/ -q` → 29 passed, 1 skipped, 4 failed — keempatnya **pra-eksisting** (dikonfirmasi via `git stash` pada kode bersih; fixture path `/Contoh P&ID/...png` hilang), tidak terkait tracing.
 - `npx tsc --noEmit` → 0 error.
 - `docker compose build frontend` + `up -d frontend` + `restart api worker` → 5 container Up/healthy.
+
+---
+
+## Sprint Handover: Test-Suite Green, Playwright E2E & Responsive Toolbar Fix
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-21.
+
+### 1. Ringkasan Perubahan
+
+- **Full backend suite 100% hijau (sebelumnya 4 gagal pra-eksisting) (100% Selesai)**:
+  - Akar masalah **bukan kode tracing**, melainkan **resolusi path fixture di dalam container Docker**.
+    Test menghitung `_ROOT_DIR = <backend>/..` yang di host = root repo, tetapi **di dalam container `api`
+    (mount `./backend:/app`) menciut jadi `/`**, sehingga fixture merujuk `/Contoh P&ID/…` dan
+    `/combined_dataset/…` yang tidak ada. Selain itu `combined_dataset` **belum pernah di-mount**.
+  - Helper baru [`backend/tests/_fixtures.py`](file:///c:/Werk/pidccs/backend/tests/_fixtures.py):
+    `fixture_path(*parts)` memeriksa kandidat root (`<repo>`, `/app`, cwd), membuang segmen `backend`
+    berlebih, dan mengembalikan path pertama yang ada. Tanpa melemahkan assertion.
+  - [`docker-compose.yml`](file:///c:/Werk/pidccs/docker-compose.yml): menambahkan mount
+    `./combined_dataset:/app/combined_dataset` ke layanan **`api`** dan **`worker`**.
+- **Harness Playwright E2E (persistensi overlay & layout toolbar) (100% Selesai)**:
+  - [`frontend/playwright.config.ts`](file:///c:/Werk/pidccs/frontend/playwright.config.ts): dua project
+    viewport — `desktop-1080p` (1920×1080) dan `laptop-14in` (1366×768); menguji stack Docker yang
+    berjalan (tidak menyalakan dev server).
+  - [`frontend/e2e/canvas-overlay.spec.ts`](file:///c:/Werk/pidccs/frontend/e2e/canvas-overlay.spec.ts):
+    (a) tool dock bawah (*Box Trace* / *Manual Pen*) tidak boleh beririsan dengan bar kontrol halaman
+    (*Pipa: ON/OFF* + slider opacity); (b) SVG overlay tracing (`[data-pipe-interactive="true"]`) tetap
+    ter-attach saat berpindah mode Digitization ⇄ Corrosion System/Circuit dan saat resize ekstrem.
+  - Kode E2E dikecualikan dari image produksi (`frontend/.dockerignore`) dan dari typecheck Next
+    (`tsconfig.e2e.json`). Script: `npm run e2e`.
+- **Perbaikan layout responsif untuk <1080p / laptop 14" (100% Selesai)**:
+  - Akar masalah: tool dock (`InteractivePipeCanvas.tsx`, `bottom-6 left-1/2`, z-40) dan bar kontrol
+    halaman (`page.tsx`, `bottom-6 left-6`, z-40) berada pada **band bawah dan z-index yang sama**,
+    sehingga pada lebar kanvas < ~1470px (efek panel kanan tetap `w-96` pada panel FHD 14") bar halaman
+    menutupi dock dan menyembunyikan *Box Trace* / *Manual Pen*.
+  - Dock dinaikkan ke `bottom-24` di bawah breakpoint `2xl` (1536px) dan hanya kembali ke `bottom-6`
+    di desktop lebar; ditambah `z-50`, `flex-wrap`, `max-w-[calc(100%-1.5rem)]`.
+  - `page.tsx`: bar kontrol wrap, header wrap dengan label tombol verbose disembunyikan < `xl`/`2xl`,
+    switcher mode bisa scroll horizontal, panel kanan `w-80 xl:w-96`. Toast status pindah ke
+    `bottom-36 2xl:bottom-20`; popover seleksi & modal re-scan di-clamp (`max-height` + `overflow-y-auto`).
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`backend/tests/_fixtures.py`](file:///c:/Werk/pidccs/backend/tests/_fixtures.py) | Tests (baru) | Helper `fixture_path()` yang tahan terhadap perbedaan root host vs container. |
+| [`backend/tests/test_api_and_db.py`](file:///c:/Werk/pidccs/backend/tests/test_api_and_db.py) | Tests | Resolusi fixture via `fixture_path`. |
+| [`backend/tests/test_e2e_full_system.py`](file:///c:/Werk/pidccs/backend/tests/test_e2e_full_system.py) | Tests | Idem untuk sheet & Excel line-list. |
+| [`backend/tests/test_phase_c_engine.py`](file:///c:/Werk/pidccs/backend/tests/test_phase_c_engine.py) | Tests | Idem untuk dua lookup Excel. |
+| [`backend/tests/test_snap_equipment.py`](file:///c:/Werk/pidccs/backend/tests/test_snap_equipment.py) | Tests | Idem untuk PDF fixture manual-tracing. |
+| [`docker-compose.yml`](file:///c:/Werk/pidccs/docker-compose.yml) | Infra | Mount `./combined_dataset` ke `api` & `worker`. |
+| [`frontend/playwright.config.ts`](file:///c:/Werk/pidccs/frontend/playwright.config.ts) | Tests/E2E (baru) | Konfigurasi Playwright, 2 project viewport. |
+| [`frontend/e2e/canvas-overlay.spec.ts`](file:///c:/Werk/pidccs/frontend/e2e/canvas-overlay.spec.ts) | Tests/E2E (baru) | Guard persistensi overlay & non-overlap toolbar. |
+| [`frontend/tsconfig.e2e.json`](file:///c:/Werk/pidccs/frontend/tsconfig.e2e.json) | Frontend Config (baru) | Typecheck khusus kode E2E. |
+| [`frontend/tsconfig.json`](file:///c:/Werk/pidccs/frontend/tsconfig.json) | Frontend Config | Exclude `e2e` & `playwright.config.ts` dari build Next. |
+| [`frontend/.dockerignore`](file:///c:/Werk/pidccs/frontend/.dockerignore) | Frontend Config | Kecualikan artefak & kode E2E dari image produksi. |
+| [`frontend/package.json`](file:///c:/Werk/pidccs/frontend/package.json) | Frontend | DevDependency `@playwright/test`; script `e2e`/`e2e:report`. |
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend UI | Dock `bottom-24 2xl:bottom-6` + `z-50` + wrap; banner helper & modal di-clamp. |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Bar kontrol & header responsif; panel kanan `w-80 xl:w-96`; toast `bottom-36`. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover suite hijau, E2E, & fix toolbar responsif. |
+
+### 3. Verifikasi
+
+- `npx playwright test` → **4 passed, 0 skipped, 0 failed** (desktop-1080p + laptop-14in).
+- `pytest tests/ -q` (host & container) → **38 passed, 0 failed, 0 skipped**.
+- `npx tsc --noEmit` → 0 error.
+- `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
+
+### 4. Handover Roadmap: Task Berikutnya yang Belum Dieksekusi
+
+1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet untuk validasi caching thumbnail & raw
+   benar-benar menekan waktu muat dan pemakaian memori browser.
+2. **E2E Tambahan**: perluas Playwright untuk skenario edit (split trace, simpan tag duplikat) dan
+   integrasi ke CI.
+3. **Deferred** (future roadmap): AI-assisted anomaly suggestion, training data generation dari koreksi
+   user, serta multi-user collaboration real-time.

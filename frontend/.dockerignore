@@ -5,3 +5,12 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# E2E test artifacts & code (Playwright) — not needed in the production image
+e2e
+test-results
+playwright-report
+tmp-e2e
+e2e-result.json
+playwright.config.ts
+tsconfig.e2e.json

@@ -10,6 +10,8 @@ if _ROOT not in sys.path:
 from pidcorr.lines import PipeRun, snap_endpoints_to_equipment
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 
+from _fixtures import fixture_path
+
 
 def test_pipe_run_color_attribute():
     """Verify PipeRun default color is #2563EB and supports dict access."""
@@ -104,14 +106,14 @@ def test_snap_on_fixture_pdf():
         from app.adapters.pdf_renderer import load_drawing_image
     except ImportError:
         from backend.app.adapters.pdf_renderer import load_drawing_image
-    pdf_path = os.path.join(
-        _ROOT, "backend", "tests", "fixtures", "manual-tracing",
+    pdf_path = fixture_path(
+        "backend", "tests", "fixtures", "manual-tracing",
         "CC_AKT-PR-PID-11-1002_3_P&ID Inlet Separation & Produced Water System Inlet Separator.pdf"
     )
     if not os.path.exists(pdf_path):
-        pytest.skip("Fixture PDF not found")
+        pytest.skip(f"Fixture PDF not found: {pdf_path}")
 
-    img_bgr = load_drawing_image(pdf_path, dpi=150)
+    img_bgr = load_drawing_image(str(pdf_path), dpi=150)
     tracer = SkeletonLineTracer(min_length_px=20)
     # Simulated equipment bounding box for separator
     detections = [{

@@ -1,5 +1,59 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Test-Suite Green, Playwright E2E & Responsive Toolbar Fix
+
+**Status**: Implemented, built, and deployed locally on 2026-09-21.
+
+### Scope
+
+- **Full backend suite now 100% green (was 4 pre-existing failures).** Root cause was *fixture path
+  resolution inside the Docker container*, not the tracing code. Tests computed `_ROOT_DIR = <backend>/..`,
+  which on the host is the repo root but **inside the `api` container (`./backend:/app`) collapses to `/`**,
+  so fixtures resolved to the non-existent `/Contoh P&ID/…` and `/combined_dataset/…`. Additionally
+  `combined_dataset` was **never mounted** into the containers.
+  - New helper [`backend/tests/_fixtures.py`](file:///c:/Werk/pidccs/backend/tests/_fixtures.py) —
+    `fixture_path(*parts)` probes candidate roots (`<repo>`, `/app`, cwd), drops a redundant leading
+    `backend` segment, and returns the first existing match.
+  - Updated `test_api_and_db.py`, `test_e2e_full_system.py`, `test_phase_c_engine.py`, and
+    `test_snap_equipment.py` to resolve fixtures through the helper. No assertion was weakened.
+  - [`docker-compose.yml`](file:///c:/Werk/pidccs/docker-compose.yml): mounted `./combined_dataset:/app/combined_dataset`
+    into **`api`** and **`worker`** (previously missing).
+  - **Result**: `pytest tests/ -q` → **38 passed, 0 skipped, 0 failed** both on host and in-container
+    (previously 4 failed).
+- **Playwright E2E harness (overlay & toolbar persistence).** Added browser-level regression tests for
+  the two behaviours that unit tests cannot cover.
+  - [`frontend/playwright.config.ts`](file:///c:/Werk/pidccs/frontend/playwright.config.ts) — two viewport
+    projects: `desktop-1080p` (1920×1080) and `laptop-14in` (1366×768). Drives the live Docker stack
+    (frontend :3000), does **not** start a dev server.
+  - [`frontend/e2e/canvas-overlay.spec.ts`](file:///c:/Werk/pidccs/frontend/e2e/canvas-overlay.spec.ts) —
+    (a) the bottom tool dock (*Box Trace* / *Manual Pen*) must not intersect the floating page-controls
+    bar (*Pipa: ON/OFF* + opacity); (b) the tracing SVG overlay (`[data-pipe-interactive="true"]`) must
+    stay attached across Digitization ⇄ Corrosion System/Circuit switches and extreme resizes.
+  - E2E code is excluded from the production image (`frontend/.dockerignore`) and from the Next
+    typecheck (`tsconfig.e2e.json`). Scripts: `npm run e2e`.
+  - **Result**: `npx playwright test` → **4 passed, 0 skipped, 0 failed** (both viewports).
+- **Responsive layout fix for <1080p / 14" laptops.** Root cause: the tool dock
+  (`InteractivePipeCanvas.tsx`, `bottom-6 left-1/2`, z-40) and the page-controls bar
+  (`page.tsx`, `bottom-6 left-6`, z-40) shared the **same bottom band and the same z-index**, so at
+  canvas widths below ~1470px — exactly what a 14" Full-HD panel yields after the fixed 384px right
+  panel — the page bar painted on top of the dock and hid *Box Trace* / *Manual Pen*.
+  - Dock is now lifted to `bottom-24` on anything below `2xl` (1536px) and only shares `bottom-6` on
+    wide desktops; it gained `z-50`, `flex-wrap`, and `max-w-[calc(100%-1.5rem)]`.
+  - `page.tsx`: page bar wraps (`flex-wrap` + `max-w`), header wraps and its verbose button labels are
+    hidden below `xl`/`2xl`, the view-mode switcher scrolls horizontally, and the right panel is
+    `w-80 xl:w-96` instead of a fixed `w-96`.
+  - The status toast moved to `bottom-36 2xl:bottom-20`; the selection popover and re-scan modal are
+    clamped (`max-height` + `overflow-y-auto`).
+
+### Verification
+
+- `npx playwright test` → **4 passed** (desktop-1080p + laptop-14in).
+- `pytest tests/ -q` (host & container) → **38 passed, 0 failed, 0 skipped**.
+- `npx tsc --noEmit` → 0 errors.
+- `docker compose build frontend` + `up -d frontend` → all 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Text-Artifact Suppression, Highlight Toggle & Canvas Deselect
 
 **Status**: Implemented, built, and deployed locally on 2026-09-18.

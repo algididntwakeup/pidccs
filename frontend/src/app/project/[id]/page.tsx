@@ -1218,8 +1218,8 @@ export default function ProjectWorkspace() {
   return (
     <div className="h-full flex flex-col bg-slate-100 text-slate-900 overflow-hidden select-none">
       {/* Top Navigation Bar */}
-      <header className="bg-white border-b border-slate-200 px-6 py-2.5 flex items-center justify-between shadow-sm z-20">
-        <div className="flex items-center space-x-4">
+      <header className="bg-white border-b border-slate-200 px-3 lg:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2 gap-y-2 shadow-sm z-20">
+        <div className="flex items-center space-x-2 lg:space-x-4 min-w-0">
           <Link
             href="/"
             className="p-1.5 hover:bg-slate-100 text-slate-600 rounded-lg transition"
@@ -1268,7 +1268,7 @@ export default function ProjectWorkspace() {
         </div>
 
         {/* View Mode Switcher */}
-        <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+        <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 overflow-x-auto max-w-full order-3 lg:order-none">
           <button
             onClick={() => setMode('digitize')}
             className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
@@ -1330,7 +1330,7 @@ export default function ProjectWorkspace() {
             title="Import Line List Excel / CSV"
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Line List</span>
+            <span className="hidden xl:inline">Line List</span>
           </button>
 
           {activeSheet && (
@@ -1344,7 +1344,7 @@ export default function ProjectWorkspace() {
               }`}
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{detecting ? 'Detecting...' : 'Detect P&ID'}</span>
+              <span className="hidden xl:inline">{detecting ? 'Detecting...' : 'Detect P&ID'}</span>
             </button>
           )}
 
@@ -1360,7 +1360,7 @@ export default function ProjectWorkspace() {
               title="Toggle Color-Coded Circuit Marking on Canvas"
             >
               <Layers className="w-3.5 h-3.5" />
-              <span>{showOverlay ? 'Circuit Overlay: ON' : 'Circuit Overlay: OFF'}</span>
+              <span className="hidden 2xl:inline">{showOverlay ? 'Circuit Overlay: ON' : 'Circuit Overlay: OFF'}</span>
             </button>
           )}
 
@@ -1372,7 +1372,7 @@ export default function ProjectWorkspace() {
               title="Export hasil digitization / corrosion"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export</span>
+              <span className="hidden xl:inline">Export</span>
             </button>
           )}
         </div>
@@ -1438,7 +1438,7 @@ export default function ProjectWorkspace() {
           )}
 
           {/* Floating Canvas Controls */}
-          <div className="absolute bottom-6 left-6 flex items-center bg-white/95 backdrop-blur border border-slate-300 rounded-xl shadow-lg p-1.5 space-x-1.5 z-40">
+          <div className="absolute bottom-6 left-6 flex flex-wrap items-center bg-white/95 backdrop-blur border border-slate-300 rounded-xl shadow-lg p-1.5 space-x-1.5 z-40 max-w-[calc(100%-3rem)]">
             {/* Zoom / Viewport controls */}
             <button
               onClick={() => handleZoom(1)}
@@ -1553,7 +1553,7 @@ export default function ProjectWorkspace() {
 
           {/* Temporary Status Toast */}
           {statusToast && (
-            <div className="absolute bottom-20 left-6 z-50 bg-slate-900/90 backdrop-blur text-white text-xs font-medium px-3.5 py-2 rounded-xl shadow-xl flex items-center space-x-2 animate-in fade-in slide-in-from-bottom-2 duration-150">
+            <div className="absolute bottom-36 2xl:bottom-20 left-6 z-50 bg-slate-900/90 backdrop-blur text-white text-xs font-medium px-3.5 py-2 rounded-xl shadow-xl flex items-center space-x-2 animate-in fade-in slide-in-from-bottom-2 duration-150">
               <Check className="w-4 h-4 text-emerald-400" />
               <span>{statusToast}</span>
             </div>
@@ -1604,7 +1604,7 @@ export default function ProjectWorkspace() {
         </div>
 
         {/* Right: Inspection & Data Tables Panel */}
-        <div className="w-96 bg-white border-l border-slate-200 flex flex-col shadow-xl z-10">
+        <div className="w-80 xl:w-96 shrink-0 bg-white border-l border-slate-200 flex flex-col shadow-xl z-10">
           {/* Panel Header */}
           <div className="p-4 border-b border-slate-200 flex items-center justify-between">
             <h3 className="font-bold text-sm text-slate-900 uppercase tracking-wider">

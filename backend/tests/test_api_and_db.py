@@ -20,6 +20,8 @@ from app.schemas.result import DigitizationResult
 from app.services.grouping_service import GroupingService
 from app.services.export_service import ExportService
 
+from _fixtures import fixture_path
+
 TEST_DB_URL = "sqlite+aiosqlite:///./test_pidstudio.db"
 test_engine = create_async_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
 TestSessionLocal = async_sessionmaker(
@@ -117,7 +119,7 @@ def test_grouping_and_validation():
 
 def test_exports():
     mock_result = {
-        "image_path": os.path.join(_ROOT_DIR, "Contoh P&ID", "BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png"),
+        "image_path": str(fixture_path("Contoh P&ID", "BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png")),
         "dpi": 350,
         "rot": 0,
         "w": 3300,

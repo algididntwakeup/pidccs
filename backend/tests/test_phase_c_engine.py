@@ -15,6 +15,8 @@ from app.main import app
 from app.services.linelist_parser import LineListParser, canonical_line_key
 from pidcorr.systemize import material_of, circuitize, systemize
 
+from _fixtures import fixture_path
+
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.db.base import Base
 from app.db.session import get_db
@@ -42,7 +44,7 @@ async def override_get_db():
 
 def test_linelist_parser_excel():
     """Verify parsing real Excel engineering line list workbook."""
-    excel_path = _ROOT_DIR / "combined_dataset" / "605_CCD2_loop_dataset.xlsx"
+    excel_path = fixture_path("combined_dataset", "605_CCD2_loop_dataset.xlsx")
     assert excel_path.exists(), f"Sample dataset not found: {excel_path}"
 
     with open(excel_path, "rb") as f:
@@ -228,7 +230,7 @@ async def test_linelist_api_endpoint_lifecycle():
             assert res_patch.status_code == 200, res_patch.text
 
             # 4. Upload Line List Excel spreadsheet
-            excel_path = _ROOT_DIR / "combined_dataset" / "605_CCD2_loop_dataset.xlsx"
+            excel_path = fixture_path("combined_dataset", "605_CCD2_loop_dataset.xlsx")
             with open(excel_path, "rb") as f:
                 files = {"file": (excel_path.name, f.read(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
                 res_upload = await ac.post(f"/api/v1/projects/{project_id}/linelist", files=files)

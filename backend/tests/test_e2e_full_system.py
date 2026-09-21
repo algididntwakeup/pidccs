@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from app.db.base import Base
 from app.db.session import get_db
 
+from _fixtures import fixture_path
+
 TEST_DB_URL = "sqlite+aiosqlite:///./test_e2e_full_system.db"
 test_engine = create_async_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
 TestSessionLocal = async_sessionmaker(
@@ -78,8 +80,8 @@ async def test_end_to_end_full_system_lifecycle():
             # =================================================================
             # STEP 2: UPLOAD CONSECUTIVE SHEETS (Sheet 005 and Sheet 006)
             # =================================================================
-            sheet5_file = _ROOT_DIR / "Contoh P&ID" / "BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png"
-            sheet6_file = _ROOT_DIR / "Contoh P&ID" / "BCD3-605-42-PID-1-006-01 Rev.10-CCD2.png"
+            sheet5_file = fixture_path("Contoh P&ID", "BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png")
+            sheet6_file = fixture_path("Contoh P&ID", "BCD3-605-42-PID-1-006-01 Rev.10-CCD2.png")
             assert sheet5_file.exists(), f"Missing test file: {sheet5_file}"
             assert sheet6_file.exists(), f"Missing test file: {sheet6_file}"
 
@@ -200,7 +202,7 @@ async def test_end_to_end_full_system_lifecycle():
             # =================================================================
             # STEP 4: UPLOAD REAL INDUSTRIAL LINE LIST SPREADSHEET (476 rows)
             # =================================================================
-            excel_path = _ROOT_DIR / "combined_dataset" / "605_CCD2_loop_dataset.xlsx"
+            excel_path = fixture_path("combined_dataset", "605_CCD2_loop_dataset.xlsx")
             assert excel_path.exists(), f"Line list dataset missing: {excel_path}"
 
             with open(excel_path, "rb") as f:

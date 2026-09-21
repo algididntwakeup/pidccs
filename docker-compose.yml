@@ -58,6 +58,7 @@ services:
       - ./runs:/app/runs
       - ./data:/app/data
       - "./Contoh P&ID:/app/Contoh P&ID"
+      - ./combined_dataset:/app/combined_dataset
       - ./.pidcache:/app/.pidcache
       - pip_cache:/root/.cache/pip
     depends_on:
@@ -96,6 +97,7 @@ services:
       - ./runs:/app/runs
       - ./data:/app/data
       - "./Contoh P&ID:/app/Contoh P&ID"
+      - ./combined_dataset:/app/combined_dataset
       - ./.pidcache:/app/.pidcache
       - pip_cache:/root/.cache/pip
     depends_on:
