@@ -1,5 +1,32 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Draggable Line Action Popover
+
+**Status**: Implemented, built, and deployed locally on 2026-09-18.
+
+### Scope
+
+- **Made the floating "Pipa #" action popover draggable.** Previously the panel that appears when a
+  traced line is clicked was pinned to a fixed spot near the line, so it could obscure the very
+  polyline the user wanted to edit (especially short/tight lines). The popover header is now a drag
+  handle (`GripVertical` icon + `cursor-grab`/`cursor-grabbing`); grabbing it and dragging moves the
+  panel anywhere on the canvas, clamped to stay inside the viewer bounds.
+- **Drag implementation** (`InteractivePipeCanvas.tsx`): added `popoverDragging` state + a
+  `popoverDragRef` grab-offset ref, a `handlePopoverPointerDown` on the header, and a
+  `window` `pointermove`/`pointerup`/`pointercancel` listener registered only while dragging. The
+  close (X) button stops pointer propagation so it can't accidentally start a drag.
+- **No regression**: because the popover renders inside the OpenSeadragon overlay container (portal),
+  dragging never triggers OSD's `canvas-click` empty-space deselect, and `popoverPos` stays in the
+  same viewer-relative coordinate space used for initial placement.
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npm run build` → success (only pre-existing `finishManual` / `handleDeleteRuns` lint warnings).
+- `docker compose build frontend` + `up -d frontend` → all 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Overlay Persistence, Cross-Tab Tracing, & Performance Hardening
 
 **Status**: Implemented and locally verified on 2026-09-18.

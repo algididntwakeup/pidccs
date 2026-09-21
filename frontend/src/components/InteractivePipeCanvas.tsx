@@ -15,6 +15,7 @@ import {
   Hand,
   RotateCcw,
   Plus,
+  GripVertical,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
 
@@ -98,6 +99,9 @@ export default function InteractivePipeCanvas({
   const [savingTag, setSavingTag] = useState(false);
   const [popoverPos, setPopoverPos] = useState<{ x: number; y: number; imgX: number; imgY: number } | null>(null);
   const [tagInput, setTagInput] = useState<string>('');
+  // Draggable popover: track pointer grab offset relative to popover top-left
+  const [popoverDragging, setPopoverDragging] = useState(false);
+  const popoverDragRef = useRef<{ offsetX: number; offsetY: number; moved: boolean } | null>(null);
 
   // Box Trace state
   const [roiStart, setRoiStart] = useState<{ x: number; y: number } | null>(null);
@@ -275,6 +279,53 @@ export default function InteractivePipeCanvas({
     }
     return { ...bestProj, dist: minD };
   };
+
+  // --- Draggable popover handlers ---------------------------------------
+  // Grab the popover by its header and drag it anywhere on the canvas so it
+  // never blocks the tiny line the user wants to edit underneath it.
+  const handlePopoverPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const rect = viewer?.element?.getBoundingClientRect();
+    if (!rect || !popoverPos) return;
+    e.preventDefault();
+    e.stopPropagation();
+    popoverDragRef.current = {
+      offsetX: e.clientX - rect.left - popoverPos.x,
+      offsetY: e.clientY - rect.top - popoverPos.y,
+      moved: false,
+    };
+    setPopoverDragging(true);
+  };
+
+  useEffect(() => {
+    if (!popoverDragging) return;
+    const onMove = (e: PointerEvent) => {
+      const drag = popoverDragRef.current;
+      const rect = viewer?.element?.getBoundingClientRect();
+      if (!drag || !rect) return;
+      const rawX = e.clientX - rect.left - drag.offsetX;
+      const rawY = e.clientY - rect.top - drag.offsetY;
+      drag.moved = true;
+      setPopoverPos((prev) => {
+        if (!prev) return prev;
+        const clampedX = Math.max(8, Math.min(rect.width - 120, rawX));
+        const clampedY = Math.max(8, Math.min(rect.height - 48, rawY));
+        return { ...prev, x: clampedX, y: clampedY };
+      });
+    };
+    const onUp = () => {
+      setPopoverDragging(false);
+      popoverDragRef.current = null;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [popoverDragging, viewer]);
 
   // Line click handler with Shift+Click multi-select and dynamic popover placement
   const handleLineClick = (idx: number, e: React.MouseEvent | React.PointerEvent) => {
@@ -956,17 +1007,25 @@ export default function InteractivePipeCanvas({
       {selectedRunIndices.size > 0 && showOverlay && (
         <div
           className="absolute z-40 bg-white/95 backdrop-blur border border-slate-200 rounded-2xl shadow-2xl p-3 flex flex-col space-y-2.5 text-xs animate-in fade-in zoom-in-95 duration-150"
+          onClick={(e) => e.stopPropagation()}
           style={{
             left: popoverPos?.x ?? 24,
             top: popoverPos?.y ?? 24,
             minWidth: 280,
             maxWidth: 340,
+            cursor: popoverDragging ? 'grabbing' : undefined,
           }}
-          onClick={(e) => e.stopPropagation()}
         >
-          {/* Popover Header: Info + Close */}
-          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+          {/* Popover Header: Info + Close (header doubles as drag handle) */}
+          <div
+            className={`flex items-center justify-between border-b border-slate-100 pb-2 select-none ${
+              popoverDragging ? 'cursor-grabbing' : 'cursor-grab'
+            }`}
+            onPointerDown={handlePopoverPointerDown}
+            title="Tahan & geser untuk memindahkan panel"
+          >
             <div className="flex items-center space-x-2">
+              <GripVertical className="w-3.5 h-3.5 text-slate-300 shrink-0" />
               {singleSelectedIdx !== null ? (
                 <div className="flex items-center space-x-1.5 font-semibold text-slate-800">
                   <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
@@ -988,6 +1047,7 @@ export default function InteractivePipeCanvas({
                 setPopoverPos(null);
                 onSetSplitMode(false);
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               className="p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition"
               title="Tutup (Esc)"
             >

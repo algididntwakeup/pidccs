@@ -1013,3 +1013,36 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 3. **Pengujian Beban Banyak Sheet**:
    - *Target*: Benchmark ingestion 20+ sheet untuk memvalidasi caching thumbnail & raw benar-benar menekan
      waktu muat dan pemakaian memori browser.
+
+---
+
+## Sprint Handover: Draggable Line Action Popover
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-18.
+
+### 1. Ringkasan Perubahan
+
+- **Popup aksi garis ("Pipa #…") kini dapat digeser (draggable) (100% Selesai)**:
+  - Sebelumnya panel melayang saat sebuah line diklik terkunci pada posisi dekat garis, sehingga sering
+    menutupi polyline kecil yang ingin diedit pengguna.
+  - Header popover kini menjadi drag handle (`GripVertical` + `cursor-grab`/`cursor-grabbing`). Tahan &
+    tarik untuk memindahkan panel ke mana pun di canvas; posisi di-clamp agar tetap di dalam area viewer.
+  - Implementasi (`InteractivePipeCanvas.tsx`): state `popoverDragging` + ref `popoverDragRef`
+    (grab-offset), handler `handlePopoverPointerDown` pada header, dan listener
+    `pointermove`/`pointerup`/`pointercancel` di `window` yang hanya aktif saat dragging.
+  - Tombol close (X) menghentikan propagasi pointer agar tidak memicu drag tak sengaja.
+  - Tanpa regresi: popover dirender di dalam overlay container OpenSeadragon (portal) sehingga dragging
+    tidak memicu deselect OSD `canvas-click`, dan `popoverPos` tetap di ruang koordinat viewer-relative.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend Canvas Overlay | Popover line kini draggable via header (state/ref drag + listener pointer di window); import `GripVertical`. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover draggable popover. |
+
+### 3. Verifikasi
+
+- `npx tsc --noEmit` → 0 error.
+- `npm run build` → sukses (hanya warning lint pra-eksisting).
+- `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
