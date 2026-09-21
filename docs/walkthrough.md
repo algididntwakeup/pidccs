@@ -1,5 +1,33 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Overlay State Leak Fixes (Stuck Selection & Stuck Highlight)
+
+**Status**: Implemented, built, and deployed locally on 2026-09-18.
+
+### Scope
+
+- **Fixed stuck orange "selected" halo after split + delete.** The backend re-indexes runs on every
+  mutation (`split_poly_run` inserts `run_b` at `run_idx + 1`, shifting all later indices; delete shifts
+  indices down). The frontend kept a `selectedRunIndices` set that was never validated against the new
+  runs array, so an index remembered from an earlier state could point past the end / at a different
+  run — leaving the pulsing orange selection (halo + white vertex handles) on a line the user had
+  already removed. A sanitizing `useEffect` now prunes any out-of-range index whenever `result.runs`
+  changes and exits split mode when the selection becomes empty.
+- **Fixed stuck purple "focused target" highlight.** `zoomToBbox` both zooms and installs an indigo
+  highlight overlay, but nothing ever removed it when the user navigated away. Switching Corrosion
+  System ⇄ Circuit ⇄ Digitize (or sheets) left the pulsing box on the canvas. Added a reusable
+  `clearHighlight()` helper, refactored `zoomToBbox` to use it, and a `useEffect` keyed on
+  `[mode, activeSheet.id]` that clears the highlight on navigation (these transitions never co-occur
+  with a fresh `zoomToBbox`, so there's no race with a newly installed highlight).
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npm run build` → success (only pre-existing lint warnings).
+- `docker compose build frontend` + `up -d frontend` → all 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Draggable Line Action Popover
 
 **Status**: Implemented, built, and deployed locally on 2026-09-18.

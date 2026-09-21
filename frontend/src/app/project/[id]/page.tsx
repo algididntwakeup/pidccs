@@ -353,6 +353,29 @@ export default function ProjectWorkspace() {
     }
   }, [selectedRunIndices, result?.runs, digitizeSubTab]);
 
+  // Sanitize stale selection whenever the runs array mutates (split / delete /
+  // re-scan / undo-redo). The backend REINDEXES runs on split (inserts run_b at
+  // run_idx+1) and shifts indices on delete, so a selection remembered from an
+  // earlier state can point past the end of the array or at a different run —
+  // leaving a stuck orange "selected" halo on a line the user already removed.
+  // Drop any out-of-range index (and bail out of split mode if the selection
+  // became empty) so the highlight can never outlive its run.
+  useEffect(() => {
+    const total = result?.runs?.length ?? 0;
+    setSelectedRunIndices((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<number>();
+      for (const idx of prev) {
+        if (Number.isInteger(idx) && idx >= 0 && idx < total) next.add(idx);
+        else changed = true;
+      }
+      if (!changed) return prev;
+      if (next.size === 0) setSplitMode(false);
+      return next;
+    });
+  }, [result?.runs]);
+
   // Persist all manual changes to database
   const handleSaveAllChanges = useCallback(async () => {
     if (!result || !projectId || !activeSheet || savingChanges) return;
@@ -619,6 +642,18 @@ export default function ProjectWorkspace() {
     return map;
   }, [mode, systems]);
 
+  // Remove the purple "focused target" highlight overlay from the OpenSeadragon
+  // viewer. This must be called on its own (not only inside zoomToBbox) so the
+  // highlight can be cleared when the user navigates away — otherwise the box
+  // keeps pulsing over the canvas after switching System/Circuit tabs.
+  const clearHighlight = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (viewer && highlightOverlayRef.current) {
+      try { viewer.removeOverlay(highlightOverlayRef.current); } catch (e) {}
+    }
+    highlightOverlayRef.current = null;
+  }, []);
+
   // Zoom & Pan to Bounding Box on OpenSeadragon Canvas with High-Visibility Overlay
   const zoomToBbox = (minX: number, minY: number, maxX: number, maxY: number) => {
     if (!viewerRef.current || !viewerRef.current.viewport) return;
@@ -664,10 +699,7 @@ export default function ProjectWorkspace() {
 
       // Add high-visibility glowing target overlay on the exact feature
       if (targetRect && viewer.clearOverlays && viewer.addOverlay) {
-        if (highlightOverlayRef.current) {
-          try { viewer.removeOverlay(highlightOverlayRef.current); } catch (e) {}
-          highlightOverlayRef.current = null;
-        }
+        clearHighlight();
         const highlightEl = document.createElement('div');
         highlightEl.style.border = '3px solid #6366f1'; // Indigo-500
         highlightEl.style.backgroundColor = 'rgba(99, 102, 241, 0.18)';
@@ -687,6 +719,16 @@ export default function ProjectWorkspace() {
       console.error('Failed to zoom to bbox:', e);
     }
   };
+
+  // Clear the purple target highlight whenever the user navigates away from the
+  // item that created it: switching view mode (System ⇄ Circuit ⇄ Digitize) or
+  // switching sheets. These transitions never co-occur with a fresh zoomToBbox,
+  // so it's safe to clear here without racing the highlight that a new selection
+  // just installed. Without this the pulsing box lingers on the canvas after the
+  // user moves on to another tab/list item.
+  useEffect(() => {
+    clearHighlight();
+  }, [mode, activeSheet?.id, clearHighlight]);
 
   const handleSelectPipingId = (p: PipingID, idx: number) => {
     setSelectedPidIdx(idx);

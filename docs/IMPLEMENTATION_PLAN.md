@@ -1018,7 +1018,7 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 
 ## Sprint Handover: Draggable Line Action Popover
 
-**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-18.
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-21.
 
 ### 1. Ringkasan Perubahan
 
@@ -1040,6 +1040,41 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 |---|---|---|
 | [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend Canvas Overlay | Popover line kini draggable via header (state/ref drag + listener pointer di window); import `GripVertical`. |
 | [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover draggable popover. |
+
+### 3. Verifikasi
+
+- `npx tsc --noEmit` → 0 error.
+- `npm run build` → sukses (hanya warning lint pra-eksisting).
+- `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
+
+---
+
+## Sprint Handover: Overlay State Leak Fixes (Stuck Selection & Stuck Highlight)
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-18.
+
+### 1. Ringkasan Perubahan
+
+- **Highlight oranye (seleksi garis) nyantol setelah split + delete (100% Selesai)**:
+  - Backend me-reindex `runs` tiap mutasi (`split_poly_run` menyisipkan `run_b` di `run_idx + 1`
+    sehingga semua index setelahnya bergeser; delete menggeser index turun).
+  - `selectedRunIndices` di frontend tidak pernah divalidasi ulang → index lama bisa menunjuk ke luar
+    jangkauan atau ke run lain, sehingga halo oranye + handle vertex tetap muncul di garis yang sudah
+    dihapus.
+  - Ditambahkan `useEffect` sanitizer yang membuang index di luar jangkauan setiap `result.runs`
+    berubah dan keluar dari split mode saat seleksi jadi kosong.
+- **Highlight ungu (focused target) tidak bisa di-deselect (100% Selesai)**:
+  - `zoomToBbox` menambah overlay highlight indigo tapi tidak pernah menghapusnya saat pindah tab/list.
+  - Ditambahkan helper `clearHighlight()`, `zoomToBbox` direfaktor memakainya, dan `useEffect`
+    ber-key `[mode, activeSheet.id]` yang membersihkan highlight saat navigasi (transisi ini tidak
+    pernah berbarengan dengan `zoomToBbox` baru, jadi tidak ada race).
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Helper `clearHighlight()` + `useEffect` pembersih highlight (mode/sheet); `useEffect` sanitizer `selectedRunIndices` saat `result.runs` berubah. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover perbaikan state leak. |
 
 ### 3. Verifikasi
 
