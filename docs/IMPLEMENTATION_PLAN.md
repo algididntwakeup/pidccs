@@ -1119,3 +1119,37 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 - `npx tsc --noEmit` → 0 error.
 - `npm run build` → sukses (hanya warning lint pra-eksisting).
 - `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
+
+---
+
+## Sprint Handover: Line Tag Save Fix + Duplicate-Tag Merge Fallback
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-18.
+
+### 1. Ringkasan Perubahan
+
+- **Fix error "Run index N out of range" saat simpan tag (100% Selesai)**:
+  - Simpan tag sebelumnya via `PATCH /runs/{run_idx}/label` yang berbasis index, sedangkan beberapa
+    edit lokal (undo/redo, manual pen, box trace) mengubah `result.runs` di memori tanpa menyinkron ke DB.
+    Begitu array run frontend melenceng dari backend, index lama menunjuk ke luar array dan request gagal.
+  - Simpan tag kini menulis **seluruh result** via `patchResult`; undo/redo juga menyinkronkan state
+    yang dipulihkan ke server, sehingga array `runs` backend tidak pernah divergen dari yang dilihat user.
+    Ditambah guard range yang menampilkan toast ramah ketimbang alert popup.
+- **Fallback tag duplikat + merge (100% Selesai)**:
+  - Sebelumnya menulis tag yang sudah ada langsung gagal tanpa penjelasan & tanpa cara memakai ulang line itu.
+    Kini bila tag yang diinput sudah dimiliki line lain, user diminta konfirmasi: **OK = merge** segmen ini
+    ke line tersebut (attach sebagai `run_idx`/`extra_runs` + stempel tag), **Cancel = batalkan** agar bisa
+    mengetik tag lain. Handler baru `handleMergeRunIntoPid` melakukan merge dan mencatatnya di undo history.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | `handleUpdateRunLabel` via `patchResult` + deteksi tag duplikat + guard range; `handleMergeRunIntoPid`; undo/redo kini sinkron ke server. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover perbaikan tag line. |
+
+### 3. Verifikasi
+
+- `npx tsc --noEmit` → 0 error.
+- `npm run build` → sukses (hanya warning lint pra-eksisting).
+- `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.

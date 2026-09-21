@@ -71,7 +71,6 @@ import {
   batchUpdateRunColors,
   deleteRun,
   batchDeleteRuns,
-  updateRunLabel,
   updateRunPoints,
   traceRegion,
 } from '@/lib/api';
@@ -214,24 +213,35 @@ export default function ProjectWorkspace() {
   const handleUndo = useCallback(() => {
     if (historyIndex >= 0 && history[historyIndex]) {
       const action = history[historyIndex];
-      if (result) {
-        setResult({ ...result, runs: action.prevRuns, piping_ids: action.prevPids });
+      if (result && projectId && activeSheet) {
+        const restored = { ...result, runs: action.prevRuns, piping_ids: action.prevPids };
+        setResult(restored);
+        // Persist the restored state so the backend's runs array stays in sync
+        // with what the user sees. Without this, undo/redo left the DB on a
+        // different run count and later index-based edits errored out.
+        patchResult(projectId, activeSheet.id, restored).catch((e) =>
+          console.error('Gagal sinkronisasi undo ke server:', e)
+        );
       }
       setHistoryIndex((idx) => idx - 1);
       showToast(`Undo: ${action.desc}`, 2000);
     }
-  }, [historyIndex, history, result, showToast]);
+  }, [historyIndex, history, result, projectId, activeSheet, showToast]);
 
   const handleRedo = useCallback(() => {
     if (historyIndex < history.length - 1 && history[historyIndex + 1]) {
       const action = history[historyIndex + 1];
-      if (result) {
-        setResult({ ...result, runs: action.nextRuns, piping_ids: action.nextPids });
+      if (result && projectId && activeSheet) {
+        const restored = { ...result, runs: action.nextRuns, piping_ids: action.nextPids };
+        setResult(restored);
+        patchResult(projectId, activeSheet.id, restored).catch((e) =>
+          console.error('Gagal sinkronisasi redo ke server:', e)
+        );
       }
       setHistoryIndex((idx) => idx + 1);
       showToast(`Redo: ${action.desc}`, 2000);
     }
-  }, [historyIndex, history, result, showToast]);
+  }, [historyIndex, history, result, projectId, activeSheet, showToast]);
 
   // Recolor selected runs in frontend state
   const handleRecolorRuns = (runIdxs: number[], newColor: string) => {
@@ -300,25 +310,121 @@ export default function ProjectWorkspace() {
     }
   };
 
-  // Update label / tag of a run via backend API
+  // Update label / tag of a run.
+  //
+  // NOTE: we deliberately persist via the whole-result PATCH (`patchResult`)
+  // instead of the index-based `/runs/{run_idx}/label` endpoint. Index-based
+  // mutations race with local-only edits (undo/redo, manual pen, box trace) that
+  // change `result.runs` in memory without round-tripping to the DB, so a
+  // remembered index could point past the backend's array and raise
+  // "Run index N out of range". Sending the full result keeps the backend's runs
+  // array byte-for-byte in sync with what the user sees.
   const handleUpdateRunLabel = async (runIdx: number, label: string) => {
+    if (!result || !projectId || !activeSheet) return;
+    if (runIdx < 0 || runIdx >= (result.runs?.length || 0)) {
+      showToast('Garis pipa tidak ditemukan (mungkin sudah berubah) — coba klik ulang.', 3000);
+      return;
+    }
+    const trimmed = label.trim();
+
+    // Duplicate-tag detection: if another line already carries this tag, ask the
+    // user whether to MERGE this segment into that existing line instead of
+    // blindly creating a second line with the same tag.
+    const existingIdx = trimmed
+      ? (result.piping_ids || []).findIndex(
+          (p) => (p.pid || '').trim().toLowerCase() === trimmed.toLowerCase()
+        )
+      : -1;
+    if (existingIdx >= 0) {
+      const existing = result.piping_ids[existingIdx];
+      const alreadyLinked =
+        existing.run_idx === runIdx || (existing.extra_runs || []).includes(runIdx);
+      if (!alreadyLinked) {
+        const ok = window.confirm(
+          `Tag pipa "${trimmed}" sudah dipakai oleh line lain.\n\n` +
+            `OK  = Gabungkan segmen ini ke line tersebut (merge).\n` +
+            `Cancel = Batalkan, supaya kamu bisa memakai tag lain.`
+        );
+        if (ok) {
+          await handleMergeRunIntoPid(runIdx, existingIdx, trimmed);
+          return;
+        }
+        return; // user chose to cancel — leave the tag unchanged
+      }
+    }
+
+    try {
+      const prevRuns = [...result.runs];
+      const prevPids = [...result.piping_ids];
+      const nextRuns = result.runs.map((r, i) =>
+        i === runIdx ? { ...r, label: trimmed, manual: true } : r
+      );
+      const nextPids = (result.piping_ids || []).map((p) =>
+        p.run_idx === runIdx && (p.pid || '').toLowerCase() === trimmed.toLowerCase()
+          ? { ...p, pid: trimmed }
+          : p
+      );
+      const updated = await patchResult(projectId, activeSheet.id, {
+        ...result,
+        runs: nextRuns,
+        piping_ids: nextPids,
+      });
+      pushHistory(
+        `Ubah tag pipa #${runIdx}`,
+        prevRuns,
+        updated.runs,
+        prevPids,
+        updated.piping_ids || prevPids
+      );
+      setResult(updated);
+      setHasUnsavedChanges(true);
+      showToast(`Tag pipa diperbarui: ${trimmed || '(dikosongkan)'}`, 2500);
+    } catch (err: any) {
+      alert(err.message || 'Gagal memperbarui tag pipa');
+    }
+  };
+
+  // Merge a run (segment) into an existing piping ID line: attach the run to the
+  // target pid (as its run_idx if it has none, otherwise as an extra run) and
+  // stamp the same tag on the run so the canvas shows the combined line.
+  const handleMergeRunIntoPid = async (runIdx: number, pidIdx: number, tag: string) => {
     if (!result || !projectId || !activeSheet) return;
     try {
       const prevRuns = [...result.runs];
       const prevPids = [...result.piping_ids];
-      const res = await updateRunLabel(projectId, activeSheet.id, runIdx, label);
-      const nextRuns = res.result.runs;
-      pushHistory(
-        `Ubah tag pipa #${runIdx}`,
-        prevRuns,
-        nextRuns,
-        prevPids,
-        res.result.piping_ids || prevPids
+      const nextRuns = result.runs.map((r, i) =>
+        i === runIdx ? { ...r, label: tag, pid: tag, manual: true } : r
       );
-      setResult(res.result);
-      showToast(`Tag pipa diperbarui: ${label || '(dikosongkan)'}`, 2500);
+      const nextPids = (result.piping_ids || []).map((p, i) => {
+        if (i !== pidIdx) return p;
+        const p2 = { ...p };
+        if (p2.run_idx == null || p2.run_idx < 0) {
+          p2.run_idx = runIdx;
+          p2.state = 'attached';
+        } else {
+          const extra = new Set(p2.extra_runs || []);
+          extra.add(runIdx);
+          p2.extra_runs = Array.from(extra).filter((e) => e !== p2.run_idx);
+        }
+        return p2;
+      });
+      const updated = await patchResult(projectId, activeSheet.id, {
+        ...result,
+        runs: nextRuns,
+        piping_ids: nextPids,
+      });
+      pushHistory(
+        `Gabung pipa #${runIdx} ke line "${tag}"`,
+        prevRuns,
+        updated.runs,
+        prevPids,
+        updated.piping_ids || prevPids
+      );
+      setResult(updated);
+      setHasUnsavedChanges(true);
+      showToast(`Pipa #${runIdx} digabungkan ke line "${tag}"`, 3000);
     } catch (err: any) {
-      alert(err.message || 'Gagal memperbarui tag pipa');
+      alert(err.message || 'Gagal menggabungkan pipa');
     }
   };
 

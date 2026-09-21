@@ -1,5 +1,32 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Line Tag Save Fix + Duplicate-Tag Merge Fallback
+
+**Status**: Implemented, built, and deployed locally on 2026-09-18.
+
+### Scope
+
+- **Fixed "Run index N out of range" when saving a line tag.** Tag saves went through the
+  index-based `PATCH /runs/{run_idx}/label`, but several local-only edits (undo/redo, manual pen,
+  box trace) change `result.runs` in memory without round-tripping to the DB. Whenever the frontend's
+  run array drifted from the backend's, the remembered index pointed past the stored array and the
+  request failed. The tag save now persists the **whole result** via `patchResult`, and undo/redo also
+  sync the restored state back to the server, so the backend's `runs` array can never diverge from
+  what the user sees. A cheap range-guard shows a friendly toast instead of an alert popup.
+- **Added a duplicate-tag fallback with merge.** Previously typing an existing tag silently failed
+  with no explanation and no way to reuse the line. Now, when the entered tag already belongs to
+  another line, the user is prompted: **OK = merge** this segment into the existing line (attach as
+  `run_idx`/`extra_runs` + stamp the tag), **Cancel = abort** so they can type a different tag. A new
+  `handleMergeRunIntoPid` performs the merge and records it in undo history.
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npm run build` → success (only pre-existing lint warnings).
+- `docker compose build frontend` + `up -d frontend` → all 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Selection Cleanup, Export Modal & Mode-Aware Export
 
 **Status**: Implemented, built, and deployed locally on 2026-09-18.
