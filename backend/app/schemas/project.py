@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel, Field
+from typing import Optional, List, Any
+from pydantic import BaseModel, Field, model_validator
 
 from .common import TenantUserBase
 
@@ -30,8 +30,29 @@ class SheetResponse(TenantUserBase):
     rot: int = Field(default=0)
     width: Optional[int] = None
     height: Optional[int] = None
+    latest_job_id: Optional[str] = Field(
+        default=None,
+        description="ID of the most recent detection job for this sheet (used to resume in-flight observation after navigation)",
+    )
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_latest_job_id(cls, data: Any) -> Any:
+        """Populate latest_job_id from the eagerly-loaded ORM `jobs`
+        relationship (lazy="selectin", so no extra query). Lets the frontend
+        RESUME observing an in-flight detection after a remount.
+        """
+        if isinstance(data, dict):
+            return data
+        jobs = getattr(data, "jobs", None)
+        if jobs:
+            latest = max(jobs, key=lambda j: j.created_at or datetime.min)  # noqa: DTZ901
+            # Attach to the (transient) ORM instance; SheetResponse reads it via
+            # from_attributes. Not a mapped column, so this is a plain attribute.
+            data.latest_job_id = latest.id
+        return data
 
     class Config:
         from_attributes = True

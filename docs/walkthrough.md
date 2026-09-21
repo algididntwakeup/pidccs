@@ -1,5 +1,49 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Detection-Progress Resume, Root Cleanup & README Refresh
+
+**Status**: Implemented, built, and deployed locally on 2026-09-21.
+
+### Scope
+
+- **Detection progress no longer disappears on Back-and-return.** Root cause: the in-flight job id
+  lived in a component-local closure (`const job` in `handleRunDetection`) and the progress UI was
+  gated on a local `detecting` boolean — both destroyed on unmount. On remount the page never queried
+  the server for the sheet's persisted state, so it rendered a blank canvas with no spinner. Users read
+  the blank as a bug.
+  - **Backend**: `SheetResponse` gains `latest_job_id`, derived by a `model_validator(mode="before")`
+    from the eagerly-loaded (`lazy="selectin"`) `Sheet.jobs` relationship — **zero extra queries**. New
+    `GET /api/v1/jobs?sheet_id=&project_id=` (most-recent-first, `LIMIT 50`) as a fallback lookup.
+  - **Frontend**: new resume effect — when `activeSheet.status === 'detecting'` on mount, it resolves the
+    job id (`latest_job_id` or the jobs endpoint), loads current progress via `fetchJob`, opens the WS,
+    and starts a **self-terminating 3s fallback poll** capped at ~10 min. A new `showDetectionProgress`
+    gate drives both the top progress bar and a **centered canvas overlay** (spinner + explanation +
+    percentage), so a remount mid-detection always shows progress instead of a blank image.
+  - **Resource profile**: idle pages open **no timers and no WS** (the effect returns early unless the
+    sheet is detecting); while detecting there is exactly one WS plus a capped poll, all torn down on
+    completion/unmount.
+- **Root-folder cleanup after the PyQt5 → web migration.** Evidence-based audit confirmed exactly four
+  tracked files were dead: `gui.py` (no live importer), root `requirements.txt` (only the legacy
+  installer used it; Docker/CI use `backend/requirements.txt`), and the two desktop installers
+  `1 - Install (jalankan sekali).bat` / `2 - Buka GUI.bat`. Removed them, plus two empty stub dirs
+  (`backend/Contoh P&ID/`, `backend/combined_dataset/`).
+  - `start_local.bat` was **kept** — despite the name it launches the web stack (`uvicorn` + `npm run dev`).
+  - `BACA DULU - Cara Menjalankan.txt` was **rewritten** web-only (dropped the legacy desktop section
+    and the `gui.py`/root-`requirements.txt` folder listing).
+- **README refreshed.** Test section corrected (38 tests, not 19) and a new **Playwright E2E** subsection
+  added. Project layout updated (new test files, `frontend/e2e/`, `playwright.config.ts`) and the
+  "dark-mode UI" claim fixed to reflect the responsive light UI. Added a note that detection progress
+  persists across navigation.
+
+### Verification
+
+- `pytest tests/ -q` (container) → **38 passed, 0 failed**.
+- `npx playwright test` → **4 passed, 0 skipped, 0 failed**.
+- `npx tsc --noEmit` → 0 errors; `GET /api/v1/projects` now returns `latest_job_id` per sheet.
+- `docker compose restart api worker` + `build frontend` + `up -d` → 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Test-Suite Green, Playwright E2E & Responsive Toolbar Fix
 
 **Status**: Implemented, built, and deployed locally on 2026-09-21.

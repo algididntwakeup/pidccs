@@ -143,7 +143,7 @@ sequenceDiagram
 * **Layer Visualisasi Warna Sirkuit**: Setiap sirkuit korosi diberi warna kontras unik dengan slider transparansi (*opacity control*).
 * **Line Register Interaktif**: Tabel lengkap seluruh segmen pipa dengan filter status, pencarian instan, dan inspektur atribut.
 * **Circuit Override Modal**: Antarmuka mudah untuk memindahkan garis antar sirkuit, membuat sirkuit baru, memecah sirkuit, serta menyertakan justifikasi teknis resmi.
-* **Live WebSocket Telemetry**: Indikator progres inference real-time langkah-demi-langkah (Render PDF -> Deteksi Simbol -> Tracing Garis -> Synthesis API RP 970).
+* **Live WebSocket Telemetry**: Indikator progres inference real-time langkah-demi-langkah (Render PDF -> Deteksi Simbol -> Tracing Garis -> Synthesis API RP 970). Progres ini **tetap tampil walau pengguna berpindah halaman dan kembali** — state deteksi yang berjalan di server di-*resume* otomatis saat halaman dibuka ulang, sehingga kanvas tidak pernah tampak kosong tanpa penjelasan.
 
 ### 5. Format Ekspor Deliverable Lengkap
 * **Annotated Vector PDF**: Dokumen PDF berkualitas tinggi dengan garis pipa diwarnai sesuai sirkuit korosi dan dilengkapi blok legenda teknis.
@@ -164,7 +164,7 @@ sequenceDiagram
 | **Computer Vision** | OpenCV 4.9, PyMuPDF, pypdfium2, Shapely | Rendering gambar beresolusi tinggi & operasi geometri spasial |
 | **AI / ML Models** | Ultralytics YOLOv8, SAHI, RapidOCR (ONNX) | Deteksi simbol teknik & ekstraksi teks single-pass |
 | **Frontend Framework** | Next.js 14.2 (App Router), TypeScript, React 18 | Web interface modern, server-side rendering & client components |
-| **Styling & Icons** | Tailwind CSS 3.4, Lucide React | Modern dark-mode UI/UX responsif |
+| **Styling & Icons** | Tailwind CSS 3.4, Lucide React | Web UI/UX responsif (dioptimalkan untuk 1080p dan laptop 14" ke bawah) |
 | **Deep Zoom Canvas** | OpenSeadragon 4.1 | Visualisasi gambar dokumen resolusi raksasa (20MP+) |
 | **Container & CI/CD** | Docker, Docker Compose, GitHub Actions | Otomatisasi pengujian & packaging produksi |
 
@@ -281,8 +281,8 @@ Platform ini dilengkapi rangkaian pengujian otomatis end-to-end yang menguji int
 
 ### 1. Menjalankan Backend Pytest Suite
 ```bash
-# Menjalankan seluruh 19 unit & integration test
-pytest backend/tests/ -v
+# Menjalankan seluruh 38 unit & integration test
+pytest backend/tests/ -q
 
 # Menjalankan pengujian End-to-End sistem industri penuh (Unit 605 Real Data)
 pytest backend/tests/test_e2e_full_system.py -v -s
@@ -293,7 +293,12 @@ pytest backend/tests/test_e2e_full_system.py -v -s
 * `test_phase_b_perception.py`: Verifikasi kontrak interface, parsing tag perpipaan regex, dan dependency injection orchestrator.
 * `test_phase_c_engine.py`: Verifikasi engine API RP 970, partisi fase/suhu/material, dan audit trail provenance.
 * `test_phase_c_topology.py`: Verifikasi pembentukan graph multi-sheet dan continuum sirkuit korosi lintas halaman.
+* `test_snap_equipment.py` / `test_split_and_color.py`: Verifikasi snapping endpoint ke equipment, pemisahan run, dan persistensi warna.
+* `test_masking_and_runs.py`: Verifikasi penekan artefak teks pra-skeletisasi dan filter stub pada line tracing.
+* `test_sheet_tiles_cache.py`: Verifikasi header cache `/raw` dan `/thumbnail`.
 * `test_e2e_full_system.py`: Pengujian siklus penuh 8 tahap (Proyek -> 2 Sheet berturut-turut -> 476 baris Line List -> API RP 970 -> Multi-Sheet Graph -> Manual Override -> Ekspor PDF/Excel/Word).
+
+> Catatan: fixture pengujian diresolusi melalui `backend/tests/_fixtures.py` (`fixture_path()`), yang tahan terhadap perbedaan path root antara host dan container Docker.
 
 ### 2. Menjalankan Frontend Linting & Build Verification
 ```bash
@@ -306,7 +311,23 @@ npm run lint
 npm run build
 ```
 
-### 3. Continuous Integration (GitHub Actions)
+### 3. Menjalankan Frontend End-to-End (Playwright)
+Pengujian browser E2E yang menguji perilaku kanvas terhadap stack Docker yang sedang berjalan
+(frontend di `:3000`, api di `:8000`):
+```bash
+cd frontend
+npx playwright install chromium   # sekali saja (unduh binary browser)
+npm run e2e                       # jalankan semua project viewport
+npm run e2e:report                # buka laporan HTML hasil run
+```
+
+*Cakupan E2E* (`frontend/e2e/canvas-overlay.spec.ts`, dijalankan pada viewport `desktop-1080p` 1920x1080 dan `laptop-14in` 1366x768):
+* Guard layout responsif: tool dock (*Box Trace* / *Manual Pen*) tidak boleh tertutup bar kontrol halaman pada layar sempit.
+* Persistensi SVG overlay tracing saat berpindah mode (Digitization <-> Corrosion System/Circuit) dan saat resize ekstrem.
+
+> Praktik: jalankan E2E ini secara berkala (mis. setelah *big revamp*), bukan setiap edit kecil.
+
+### 4. Continuous Integration (GitHub Actions)
 Setiap *push* atau *pull request* ke branch `main`/`master` secara otomatis memicu alur kerja CI di `.github/workflows/ci.yml`:
 * **Job Backend**: Menyiapkan runner `ubuntu-latest`, menginstal library sistem (`libgl1`, `libglib2.0-0`, `libgomp1`), menginstal Python 3.13, dan mengeksekusi seluruh pengujian pytest.
 * **Job Frontend**: Menyiapkan Node.js 20, mengeksekusi `npm ci`, menjalankan validasi `npm run lint`, dan memverifikasi kompilasi `npm run build`.
@@ -332,11 +353,16 @@ pidccs/
 │   │   ├── config.py              # Centralized environment settings
 │   │   └── main.py                # FastAPI ASGI application entrypoint
 │   ├── tests/                     # Automated test suites (Pytest)
+│   │   ├── _fixtures.py           # Path-resolution helper (host vs container)
 │   │   ├── test_api_and_db.py
 │   │   ├── test_e2e_full_system.py
+│   │   ├── test_masking_and_runs.py
 │   │   ├── test_phase_b_perception.py
 │   │   ├── test_phase_c_engine.py
-│   │   └── test_phase_c_topology.py
+│   │   ├── test_phase_c_topology.py
+│   │   ├── test_sheet_tiles_cache.py
+│   │   ├── test_snap_equipment.py
+│   │   └── test_split_and_color.py
 │   ├── Dockerfile                 # Backend container definition
 │   └── requirements.txt           # Python dependencies
 ├── frontend/                      # Web Application (Next.js 14)
@@ -345,7 +371,10 @@ pidccs/
 │   │   ├── components/            # UI components (Viewer, CircuitPanel, Table, Upload)
 │   │   ├── lib/                   # API client, WebSocket hooks, Zustand stores
 │   │   └── types/                 # TypeScript type definitions
+│   ├── e2e/                       # Playwright browser E2E specs
+│   │   └── canvas-overlay.spec.ts # Guard layout toolbar & persistensi overlay
 │   ├── public/                    # Static assets & OpenSeadragon images
+│   ├── playwright.config.ts       # Konfigurasi E2E (viewports desktop & laptop)
 │   ├── .eslintrc.json             # ESLint configuration
 │   ├── Dockerfile                 # Frontend container definition
 │   ├── package.json               # Node.js dependencies & scripts

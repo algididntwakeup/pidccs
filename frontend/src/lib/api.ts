@@ -1,4 +1,4 @@
-import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport } from '@/types/schema';
+import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse } from '@/types/schema';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -61,6 +61,21 @@ export async function triggerDetection(projectId: string, sheetId: string, dpi?:
   });
   if (!res.ok) throw new Error('Failed to trigger detection');
   return res.json();
+}
+
+export async function fetchJob(jobId: string): Promise<JobResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`);
+  if (!res.ok) throw new Error('Failed to fetch job status');
+  return res.json();
+}
+
+/** Most recent detection job for a sheet, or null if none. Used to resume
+ *  observing an in-flight detection after navigation/remount. */
+export async function fetchLatestJobForSheet(sheetId: string): Promise<JobResponse | null> {
+  const res = await fetch(`${API_BASE}/api/v1/jobs?sheet_id=${encodeURIComponent(sheetId)}`);
+  if (!res.ok) throw new Error('Failed to fetch jobs for sheet');
+  const jobs: JobResponse[] = await res.json();
+  return jobs && jobs.length > 0 ? jobs[0] : null;
 }
 
 export async function fetchResult(projectId: string, sheetId: string): Promise<DigitizationResult> {

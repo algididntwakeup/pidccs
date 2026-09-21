@@ -60,6 +60,8 @@ import {
   fetchSystems,
   fetchValidation,
   triggerDetection,
+  fetchLatestJobForSheet,
+  fetchJob,
   getRawImageUrl,
   deleteSheet,
   getExportUrl,
@@ -647,6 +649,135 @@ export default function ProjectWorkspace() {
     }
   }, [projectId, activeSheet]);
 
+  // ---------------------------------------------------------------------------
+  // RESUME in-flight detection after navigation/remount.
+  //
+  // The job id is NOT persisted client-side, so when the user presses Back and
+  // re-opens the same sheet, the page mounts fresh with blank detection state.
+  // Previously this left the user staring at a blank canvas with no spinner.
+  //
+  // Fix: derive state from the SERVER. If the sheet's persisted status is
+  // 'detecting', re-attach to its most recent job and show the SAME loading UI.
+  // This only polls WHILE the sheet is detecting; once it resolves (or on
+  // unmount) all resources are torn down, so idle pages cost nothing.
+  // ---------------------------------------------------------------------------
+  const resumedJobRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!projectId || !activeSheet) return;
+    if (activeSheet.status !== 'detecting') return;
+
+    // Already attached to this exact sheet/job (e.g. we started it ourselves via
+    // handleRunDetection) — don't attach twice.
+    if (resumedJobRef.current === activeSheet.id) return;
+    resumedJobRef.current = activeSheet.id;
+
+    let cancelled = false;
+
+    setDetecting(true);
+    setProgressMsg((prev) => prev || 'Detection in progress — resuming status…');
+
+    const onCompleted = () => {
+      if (cancelled) return;
+      stopDetectionResources();
+      setDetecting(false);
+      setProgressPct(100);
+      setProgressMsg('Digitasi & Sistemisasi selesai.');
+      resumedJobRef.current = null;
+      fetchProject(projectId).then((p) => {
+        setProject(p);
+        const updated = p.sheets?.find((sh) => sh.id === activeSheet.id);
+        if (updated) setActiveSheet(updated);
+      });
+      fetchResult(projectId, activeSheet.id).then(setResult).catch(console.error);
+      fetchSystems(projectId, activeSheet.id).then(setSystems).catch(console.error);
+      fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
+    };
+
+    const onFailed = (msg?: string) => {
+      if (cancelled) return;
+      stopDetectionResources();
+      setDetecting(false);
+      resumedJobRef.current = null;
+      if (msg) setProgressMsg(msg);
+    };
+
+    const attach = async () => {
+      let jobId = activeSheet.latest_job_id ?? null;
+      if (!jobId) {
+        try {
+          const job = await fetchLatestJobForSheet(activeSheet.id);
+          jobId = job?.job_id ?? null;
+        } catch (e) {
+          /* fall through to polling below */
+        }
+      }
+      if (cancelled) return;
+
+      // Apply any already-known progress immediately.
+      if (jobId) {
+        fetchJob(jobId)
+          .then((j) => {
+            if (cancelled) return;
+            if (j.progress_pct !== undefined) setProgressPct(j.progress_pct);
+            if (j.message) setProgressMsg(j.message);
+            if (j.status === 'failed') onFailed(j.message || j.error || 'Detection failed');
+          })
+          .catch(() => {});
+
+        const wsUrl =
+          (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${jobId}`;
+        try {
+          const ws = new WebSocket(wsUrl);
+          detectionWsRef.current = ws;
+          ws.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (data.pct !== undefined) setProgressPct(data.pct);
+              if (data.message) setProgressMsg(data.message);
+              if (data.step === 'completed') onCompleted();
+              else if (data.step === 'failed') onFailed(data.message || 'Detection failed');
+            } catch (err) {}
+          };
+          ws.onerror = () => {};
+        } catch (e) {
+          /* polling fallback handles it */
+        }
+      }
+
+      // Lightweight fallback: poll only while the sheet is still 'detecting'.
+      // Max ~10 minutes (200 * 3s) then give up to avoid an endless timer.
+      let ticks = 0;
+      pollIntervalRef.current = setInterval(async () => {
+        ticks += 1;
+        if (ticks > 200) {
+          stopDetectionResources();
+          return;
+        }
+        try {
+          if (jobId) {
+            const j = await fetchJob(jobId);
+            if (j.progress_pct !== undefined) setProgressPct(j.progress_pct);
+            if (j.message) setProgressMsg(j.message);
+            if (j.status === 'completed') return onCompleted();
+            if (j.status === 'failed') return onFailed(j.message || j.error || 'Detection failed');
+          }
+          const p = await fetchProject(projectId);
+          const s = p.sheets?.find((sh) => sh.id === activeSheet.id);
+          if (s && s.status === 'detected') onCompleted();
+          else if (s && s.status === 'error') onFailed('Detection failed.');
+        } catch (e) {}
+      }, 3000);
+    };
+
+    attach();
+
+    return () => {
+      cancelled = true;
+      stopDetectionResources();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, activeSheet?.id, activeSheet?.status, activeSheet?.latest_job_id]);
+
   // Initialize OpenSeadragon Canvas
   useEffect(() => {
     if (!canvasRef.current || !activeSheet) return;
@@ -707,6 +838,13 @@ export default function ProjectWorkspace() {
   // mode/showOverlay, which previously forced a full-res `viewer.open()` that wiped
   // the tracing overlay on every tab switch.
   const isDetected = activeSheet?.status === 'detected' || Boolean(result);
+
+  // Show the detection progress UI whenever EITHER we locally started a job OR
+  // the persisted sheet status says a job is running. The persisted-status branch
+  // is what guarantees a spinner is shown after a Back-and-reopen remount (the
+  // local `detecting` flag is lost on navigation, but server `status` is not).
+  const showDetectionProgress =
+    (detecting || activeSheet?.status === 'detecting') && !result;
   useEffect(() => {
     if (!viewerRef.current || !activeSheet || !projectId) return;
     const viewer = viewerRef.current;
@@ -1052,6 +1190,11 @@ export default function ProjectWorkspace() {
 
       const job = await triggerDetection(projectId, activeSheet.id);
 
+      // Mark this sheet as locally-attached so the resume effect below does not
+      // re-attach to the same in-flight job (it would otherwise create a second
+      // WebSocket + poll interval for a job we already own).
+      resumedJobRef.current = activeSheet.id;
+
       // WebSocket connection for live progress
       const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${job.job_id}`;
       const ws = new WebSocket(wsUrl);
@@ -1066,6 +1209,7 @@ export default function ProjectWorkspace() {
         setDetecting(false);
         setProgressPct(100);
         setProgressMsg('Digitasi & Sistemisasi selesai.');
+        resumedJobRef.current = null;
 
         // Refresh project and active sheet state
         fetchProject(projectId).then((p) => {
@@ -1113,6 +1257,7 @@ export default function ProjectWorkspace() {
     } catch (err) {
       stopDetectionResources();
       setDetecting(false);
+      resumedJobRef.current = null;
       alert('Failed to trigger detection: ' + err);
     }
   };
@@ -1336,15 +1481,15 @@ export default function ProjectWorkspace() {
           {activeSheet && (
             <button
               onClick={handleRunDetection}
-              disabled={detecting}
+              disabled={showDetectionProgress}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition ${
-                detecting
+                showDetectionProgress
                   ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
                   : 'bg-indigo-600 hover:bg-indigo-700 text-white'
               }`}
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span className="hidden xl:inline">{detecting ? 'Detecting...' : 'Detect P&ID'}</span>
+              <span className="hidden xl:inline">{showDetectionProgress ? 'Detecting...' : 'Detect P&ID'}</span>
             </button>
           )}
 
@@ -1379,7 +1524,7 @@ export default function ProjectWorkspace() {
       </header>
 
       {/* Progress Bar (during detection) */}
-      {detecting && (
+      {showDetectionProgress && (
         <div className="bg-indigo-50 border-b border-indigo-100 px-6 py-2 flex items-center justify-between text-xs text-indigo-900 font-medium">
           <div className="flex items-center space-x-2">
             <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-600" />
@@ -1403,6 +1548,35 @@ export default function ProjectWorkspace() {
         <div className="flex-1 relative bg-slate-900 overflow-hidden">
           {/* Canvas Container */}
           <div ref={canvasRef} className="w-full h-full" />
+
+          {/* Detection-in-progress canvas overlay: guarantees a visible spinner +
+              explanation on the canvas itself, so a remount mid-detection never
+              shows a blank-looking image with no feedback. */}
+          {showDetectionProgress && !result && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm pointer-events-none">
+              <div className="bg-white/95 border border-slate-200 rounded-2xl shadow-2xl px-8 py-6 flex flex-col items-center space-y-3 max-w-sm text-center">
+                <RefreshCw className="w-8 h-8 animate-spin text-indigo-600" />
+                <div className="text-sm font-bold text-slate-800">
+                  Deteksi P&ID sedang berjalan…
+                </div>
+                <div className="text-xs text-slate-600 leading-relaxed">
+                  {progressMsg ||
+                    'Sistem sedang membaca gambar, mendeteksi simbol, dan melacak garis pipa. Progres tetap berjalan di server walau Anda berpindah halaman.'}
+                </div>
+                <div className="w-full flex items-center space-x-2">
+                  <div className="flex-1 h-2 bg-indigo-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 transition-all duration-300"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-bold text-indigo-700 w-9 text-right">
+                    {progressPct}%
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Interactive Pipe Canvas Tooling (Phase B.5) */}
           {result && activeSheet && (

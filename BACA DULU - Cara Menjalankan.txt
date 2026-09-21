@@ -1,27 +1,28 @@
 ============================================================
-  P&ID STUDIO
+  P&ID STUDIO WEB PLATFORM
   Otomasi Corrosion System & Circuit pada P&ID (API RP 970)
 
-  Razi Delviar Farrukhi - 13722048
-  Teknik Material, FTMD, Institut Teknologi Bandung
 ============================================================
 
 
 APA INI
 -------
-Aplikasi yang membaca gambar P&ID kosongan, mendeteksi komponennya
-(pipa, valve, instrumen, equipment, dan line number), lalu
-mengelompokkan pipa menjadi corrosion system dan corrosion circuit
-dan mewarnainya di atas gambar - berdasarkan API RP 970.
+Aplikasi web yang membaca gambar P&ID kosongan, mendeteksi
+komponennya (pipa, valve, instrumen, equipment, dan line
+number), lalu mengelompokkan pipa menjadi corrosion system dan
+corrosion circuit dan mewarnainya di atas gambar - berdasarkan
+API RP 970.
 
 
 YANG DIBUTUHKAN
 ---------------
-- Windows
-- Python 3.13 (installer otomatis memilih versi ini)
-  Kalau belum ada, unduh di: https://www.python.org/downloads/
-  PENTING: saat memasang Python, centang kotak "Add Python to PATH".
-- Koneksi internet (hanya untuk pemasangan pertama)
+Pilihan A (Docker - direkomendasikan):
+- Docker Desktop (Windows/macOS/Linux)
+- Koneksi internet (hanya untuk build/pemasangan pertama)
+
+Pilihan B (Mode lokal tanpa Docker):
+- Python 3.11+ (backend FastAPI), Node.js 20+ (frontend Next.js)
+- Koneksi internet (untuk memasang dependensi)
 
 Kartu grafis NVIDIA TIDAK wajib. Tanpa GPU aplikasi tetap jalan,
 hanya proses deteksi sedikit lebih lama.
@@ -32,52 +33,59 @@ CARA MENJALANKAN
 Pilihan A: MODERN WEB PLATFORM (Sangat Direkomendasikan)
   1. Menggunakan Docker (On-Premise Containerized):
      - Pastikan Docker Desktop sudah aktif.
-     - Dobel-klik "start_docker.bat".
+     - Dobel-klik "start_docker.bat" (Windows) atau jalankan
+       "./start_docker.sh" (Linux/macOS).
      - Buka browser di http://localhost:3000.
-     - Backend API & Dokumentasi Swagger otomatis tersedia di http://localhost:8000/docs.
+     - Backend API & Dokumentasi Swagger otomatis tersedia di
+       http://localhost:8000/docs.
 
   2. Menggunakan Mode Lokal (Tanpa Docker):
-     - Dobel-klik "start_local.bat".
-     - Backend FastAPI (Port 8000) dan Next.js Web UI (Port 3000) akan berjalan di terminal terpisah.
-
-Pilihan B: DESKTOP GUI LAMA (Legacy)
-  Langkah 1. Dobel-klik "1 - Install (jalankan sekali).bat" (hanya sekali).
-  Langkah 2. Dobel-klik "2 - Buka GUI.bat" untuk membuka jendela desktop PyQt5.
+     - Dobel-klik "start_local.bat" (Windows).
+     - Backend FastAPI (Port 8000) dan Next.js Web UI (Port 3000)
+       akan berjalan di terminal terpisah.
 
 
 CARA MEMAKAI (SINGKAT)
 ----------------------
-  1. Klik  "Open P&ID"  dan pilih salah satu berkas di folder
-     "Contoh P&ID".  Disarankan mulai dari:
+  1. Buat project / buka salah satu sheet di folder "Contoh P&ID".
+     Disarankan mulai dari:
         BCD3-605-42-PID-1-001-01 REV.6J0-CCD2.png
 
-  2. Klik  "Detect".  Sistem akan mendeteksi semua komponen dan
-     membaca line number-nya. (Gambar contoh di atas sudah punya
-     hasil tersimpan, jadi muncul seketika.)
+  2. Klik  "Detect P&ID".  Sistem akan mendeteksi semua komponen
+     dan membaca line number-nya. Progres deteksi tampil sebagai
+     loading/progress bar di kanvas (tetap terlihat walau pindah
+     tab dan kembali).
 
-  3. Buka menu (tombol tiga garis di kiri atas) untuk berpindah
-     antara tampilan Digitization, Corrosion System, dan
-     Corrosion Circuit.
+  3. Buka mode tampilan untuk berpindah antara Digitization,
+     Corrosion System, Corrosion Circuit, Multi-Sheet Topology,
+     dan Validation & Report.
 
-  4. Panel "Report" menampilkan performa model AI dan
-     perbandingan pengelompokan terhadap data engineer.
+  4. Panel kanan menampilkan daftar pipa, sistem korosi, circuit,
+     simbol, dan OPC. Gunakan alat kanvas (Box Trace, Manual Pen,
+     Split) untuk mengoreksi hasil deteksi.
 
 
 ISI FOLDER
 ----------
-  gui.py ................... program utama
-  pidcorr/ ................. modul-modul sistem
+  frontend/ ................ Web UI (Next.js / React / Tailwind)
+  backend/ ................. REST API (FastAPI) + Celery worker
+  pidcorr/ ................. modul CV & engine (deteksi, tracing,
+                             pengelompokan API RP 970)
   runs/ .................... model AI yang sudah dilatih
   Contoh P&ID/ ............. gambar P&ID untuk dicoba
-  combined_dataset/ ........ data acuan engineer (untuk panel Report)
-  data/ .................... data uji equipment (untuk panel Report)
-  .pidcache/ ............... hasil deteksi tersimpan
-  requirements.txt ......... daftar komponen yang dipasang otomatis
+  combined_dataset/ ........ data acuan engineer (untuk Validation
+                             & Report)
+  data/ .................... data uji equipment + storage runtime
+  scripts/ ................. smoke test & tooling
+  docs/ .................... dokumentasi arsitektur & deployment
+  .pidcache/ ............... cache hasil deteksi (runtime)
+  docker-compose.yml ....... orkestrasi seluruh stack
+  start_docker.bat / .sh ... launcher Docker (Windows / Linux-macOS)
+  start_local.bat .......... launcher mode lokal tanpa Docker
 
 
 KALAU ADA MASALAH
 -----------------
-Screenshot jendela hitam yang menampilkan pesan error, lalu
-kirim ke Razi. Sebagian besar masalah pemasangan bisa diatasi
-dengan menjalankan ulang Langkah 1.
-============================================================
+Cek status container dengan  "docker compose ps"  dan lihat log
+dengan  "docker compose logs -f api worker frontend".
+====================================

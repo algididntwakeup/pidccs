@@ -1,7 +1,7 @@
 import uuid
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -162,3 +162,40 @@ async def get_job_status(
         created_at=job.created_at,
         completed_at=job.completed_at,
     )
+
+
+@router.get("/jobs", response_model=List[JobResponse])
+async def list_jobs(
+    sheet_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List detection jobs, optionally filtered by sheet (most recent first).
+
+    Used by the frontend to RE-ATTACH to an in-flight detection job after a
+    navigation/remount, so the loading/progress UI can be resumed without the
+    user having kept the page open.
+    """
+    query = select(Job)
+    if sheet_id:
+        query = query.where(Job.sheet_id == sheet_id)
+    elif project_id:
+        query = query.join(Sheet, Sheet.id == Job.sheet_id).where(Sheet.project_id == project_id)
+    query = query.order_by(Job.created_at.desc()).limit(50)
+
+    result = await db.execute(query)
+    jobs = result.scalars().all()
+    return [
+        JobResponse(
+            job_id=j.id,
+            sheet_id=j.sheet_id,
+            status=j.status,
+            progress_pct=j.progress_pct,
+            step=j.step,
+            message=j.message,
+            error=j.error,
+            created_at=j.created_at,
+            completed_at=j.completed_at,
+        )
+        for j in jobs
+    ]

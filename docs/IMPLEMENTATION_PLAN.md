@@ -1285,3 +1285,63 @@ Sebagai acuan prioritas untuk sesi berikutnya:
    integrasi ke CI.
 3. **Deferred** (future roadmap): AI-assisted anomaly suggestion, training data generation dari koreksi
    user, serta multi-user collaboration real-time.
+
+---
+
+## Sprint Handover: Detection-Progress Resume, Root Cleanup & README Refresh
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-21.
+
+### 1. Ringkasan Perubahan
+
+- **Progres deteksi tidak lagi hilang saat Back-and-return (100% Selesai)**:
+  - Akar masalah: id job yang sedang berjalan hanya hidup di closure lokal (`const job`) dan UI progres
+    di-gate oleh boolean lokal `detecting` — keduanya musnah saat unmount. Pada remount halaman tidak
+    pernah menanyakan status persisten sheet ke server, sehingga kanvas tampak kosong tanpa spinner.
+  - **Backend**: `SheetResponse.latest_job_id` diturunkan via `model_validator(mode="before")` dari
+    relasi `Sheet.jobs` (`lazy="selectin"`, tanpa query tambahan). Endpoint baru
+    `GET /api/v1/jobs?sheet_id=&project_id=` (terbaru lebih dulu, `LIMIT 50`) sebagai fallback.
+  - **Frontend**: efek resume — saat `activeSheet.status === 'detecting'` dipasang, resolve id job,
+    muat progres via `fetchJob`, buka WS, dan jalankan poll fallback 3s yang **berhenti sendiri**
+    (cap ~10 menit). Gate baru `showDetectionProgress` menggerakkan progress bar atas **dan overlay
+    tengah kanvas** (spinner + penjelasan + persentase), sehingga remount di tengah deteksi selalu
+    menampilkan progres, bukan gambar kosong.
+  - **Profil resource**: halaman idle tidak membuka timer/WS apa pun (efek keluar lebih awal kecuali
+    sedang detecting); saat detecting hanya satu WS + poll terbatas, semuanya di-teardown saat
+    selesai/unmount.
+- **Pembersihan folder root pasca migrasi PyQt5 → web (100% Selesai)**:
+  - Dihapus (tracked, sudah mati): `gui.py`, `requirements.txt` root, `1 - Install (jalankan sekali).bat`,
+    `2 - Buka GUI.bat`. Ditambah dua direktori stub kosong: `backend/Contoh P&ID/`,
+    `backend/combined_dataset/`.
+  - `start_local.bat` **dipertahankan** — meski namanya lokal, ia menjalankan web stack (uvicorn + npm).
+  - `BACA DULU - Cara Menjalankan.txt` **ditulis ulang** web-only.
+  - `start_docker.bat`/`.sh`, `Contoh P&ID/`, `combined_dataset/`, `runs/`, `data/`, `scripts/` tetap
+    dipakai (bind-mount / test fixture / weights).
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`backend/app/schemas/project.py`](file:///c:/Werk/pidccs/backend/app/schemas/project.py) | Backend Schema | `SheetResponse.latest_job_id` via `model_validator` dari relasi `jobs` (eager, tanpa N+1). |
+| [`backend/app/routers/detection.py`](file:///c:/Werk/pidccs/backend/app/routers/detection.py) | Backend REST API | Endpoint `GET /api/v1/jobs` (filter `sheet_id`/`project_id`, terbaru lebih dulu). |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Efek resume deteksi + gate `showDetectionProgress` + overlay progres tengah kanvas. |
+| [`frontend/src/lib/api.ts`](file:///c:/Werk/pidccs/frontend/src/lib/api.ts) | Frontend Client | Helper `fetchJob`, `fetchLatestJobForSheet`. |
+| [`frontend/src/types/schema.ts`](file:///c:/Werk/pidccs/frontend/src/types/schema.ts) | Frontend Types | `SheetResponse.latest_job_id`, tipe `JobResponse`. |
+| `gui.py`, `requirements.txt`, `1 - Install (jalankan sekali).bat`, `2 - Buka GUI.bat` | Root (dihapus) | Artefak era desktop PyQt5 yang sudah tidak direferensikan. |
+| [`BACA DULU - Cara Menjalankan.txt`](file:///c:/Werk/pidccs/BACA%20DULU%20-%20Cara%20Menjalankan.txt) | Root Docs | Ditulis ulang web-only (hapus bagian desktop legacy). |
+| [`README.md`](file:///c:/Werk/pidccs/README.md) | Root Docs | Section testing diperbarui (38 test + Playwright E2E), project layout & klaim UI diperbarui. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover resume progres & cleanup root. |
+
+### 3. Verifikasi
+
+- `pytest tests/ -q` (container) → **38 passed, 0 failed**.
+- `npx playwright test` → **4 passed, 0 skipped, 0 failed**.
+- `npx tsc --noEmit` → 0 error; `GET /api/v1/projects` mengembalikan `latest_job_id` per sheet.
+- `docker compose restart api worker` + `build frontend` + `up -d frontend` → 5 container Up/healthy.
+
+### 4. Handover Roadmap: Task Berikutnya yang Belum Dieksekusi
+
+1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet (tugas user).
+2. **E2E Tambahan**: skenario edit (split trace, tag duplikat) + integrasi CI. Jalankan Playwright
+   secara berkala (setelah *big revamp*), bukan setiap edit kecil.
+3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.

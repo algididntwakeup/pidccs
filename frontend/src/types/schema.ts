@@ -152,8 +152,21 @@ export interface SheetResponse {
   rot: number;
   width?: number;
   height?: number;
+  latest_job_id?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface JobResponse {
+  job_id: string;
+  sheet_id: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  progress_pct: number;
+  step: string;
+  message: string;
+  error?: string | null;
+  created_at: string;
+  completed_at?: string | null;
 }
 
 export interface ProjectResponse {
