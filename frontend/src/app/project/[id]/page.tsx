@@ -116,6 +116,7 @@ export default function ProjectWorkspace() {
   // Engineer Edit modal state
   const [editingPid, setEditingPid] = useState<PipingID | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
   const [showDeleteSheetModal, setShowDeleteSheetModal] = useState(false);
   const [deletingSheet, setDeletingSheet] = useState(false);
 
@@ -375,6 +376,15 @@ export default function ProjectWorkspace() {
       return next;
     });
   }, [result?.runs]);
+
+  // The line selection / split mode only makes sense in DIGITIZE mode. When the
+  // user switches to Corrosion System / Circuit / Topology / Report (or re-opens
+  // the digitizer on another sheet), drop the selection so the orange selection
+  // halo can never linger on the canvas after the user navigates away.
+  useEffect(() => {
+    setSelectedRunIndices(new Set());
+    setSplitMode(false);
+  }, [mode, activeSheet?.id]);
 
   // Persist all manual changes to database
   const handleSaveAllChanges = useCallback(async () => {
@@ -641,6 +651,15 @@ export default function ProjectWorkspace() {
     }
     return map;
   }, [mode, systems]);
+
+  // Map the active view mode to a backend export mode so the exported
+  // PDF/PNG reflects exactly what the user is looking at:
+  //   digitize -> engineer (per-run pipe coloring)
+  //   system   -> corrosion system coloring
+  //   circuit  -> corrosion circuit coloring
+  // Topology/Report have no raster counterpart, so they fall back to engineer.
+  const exportMode: 'engineer' | 'system' | 'circuit' =
+    mode === 'system' ? 'system' : mode === 'circuit' ? 'circuit' : 'engineer';
 
   // Remove the purple "focused target" highlight overlay from the OpenSeadragon
   // viewer. This must be called on its own (not only inside zoomToBbox) so the
@@ -1204,44 +1223,16 @@ export default function ProjectWorkspace() {
             </button>
           )}
 
-          {/* Export Dropdown Menu */}
+          {/* Export Button (opens modal) */}
           {(result || activeSheet?.status === 'detected') && (
-            <div className="relative group">
-              <button className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition">
-                <Download className="w-3.5 h-3.5" />
-                <span>Export</span>
-              </button>
-              <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-slate-200 rounded-xl shadow-xl py-1 hidden group-hover:block z-50">
-                <a
-                  href={getExportUrl(projectId, activeSheet!.id, 'xlsx')}
-                  download
-                  className="block px-3 py-1.5 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 font-medium"
-                >
-                  Excel Line Register (.xlsx)
-                </a>
-                <a
-                  href={getExportUrl(projectId, activeSheet!.id, 'docx')}
-                  download
-                  className="block px-3 py-1.5 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 font-medium"
-                >
-                  Word Asset Register (.docx)
-                </a>
-                <a
-                  href={getExportUrl(projectId, activeSheet!.id, 'pdf', 'engineer')}
-                  download
-                  className="block px-3 py-1.5 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 font-medium"
-                >
-                  Acrobat Vector PDF (.pdf)
-                </a>
-                <a
-                  href={getExportUrl(projectId, activeSheet!.id, 'png', 'engineer')}
-                  download
-                  className="block px-3 py-1.5 text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-600 font-medium"
-                >
-                  Marked PNG Image (.png)
-                </a>
-              </div>
-            </div>
+            <button
+              onClick={() => setShowExportModal(true)}
+              className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition"
+              title="Export hasil digitization / corrosion"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export</span>
+            </button>
           )}
         </div>
       </header>
@@ -2311,6 +2302,121 @@ export default function ProjectWorkspace() {
           </div>
         </div>
       </div>
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setShowExportModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 space-y-4 max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <Download className="w-5 h-5 text-indigo-600" />
+                <h2 className="text-lg font-bold text-slate-800">Export Deliverables</h2>
+              </div>
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition"
+                title="Tutup"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Active view context banner */}
+            <div className="flex items-start space-x-2 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2.5">
+              <Layers className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+              <div className="text-xs text-indigo-900">
+                <p className="font-semibold">
+                  Mode aktif:{
+                    mode === 'system'
+                      ? ' Corrosion System'
+                      : mode === 'circuit'
+                      ? ' Corrosion Circuit'
+                      : mode === 'topology'
+                      ? ' Multi-Sheet Topology'
+                      : mode === 'report'
+                      ? ' Engineering Audit'
+                      : ' Digitization'
+                  }
+                </p>
+                <p className="text-indigo-700/80 mt-0.5">
+                  {exportMode === 'system'
+                    ? 'Export gambar (PDF/PNG) akan berisi pewarnaan Corrosion System sesuai tampilan saat ini.'
+                    : exportMode === 'circuit'
+                    ? 'Export gambar (PDF/PNG) akan berisi pewarnaan Corrosion Circuit sesuai tampilan saat ini.'
+                    : 'Export gambar (PDF/PNG) akan berisi pewarnaan per-pipa (Digitization).'}
+                </p>
+              </div>
+            </div>
+
+            {/* Export options */}
+            <div className="space-y-2">
+              {[
+                {
+                  format: 'png' as const,
+                  icon: <Download className="w-5 h-5 text-emerald-600" />,
+                  title: 'Marked PNG Image (.png)',
+                  desc: 'Gambar P&ID ter-marking resolusi tinggi beserta legend, sesuai mode aktif.',
+                  modeAware: true,
+                },
+                {
+                  format: 'pdf' as const,
+                  icon: <Download className="w-5 h-5 text-red-600" />,
+                  title: 'Acrobat Vector PDF (.pdf)',
+                  desc: 'PDF vektor siap cetak dengan penandaan warna sesuai mode aktif.',
+                  modeAware: true,
+                },
+                {
+                  format: 'xlsx' as const,
+                  icon: <FileSpreadsheet className="w-5 h-5 text-green-600" />,
+                  title: 'Excel Line Register (.xlsx)',
+                  desc: 'Register seluruh line pipa (tag, fluid, ukuran, material) dalam bentuk spreadsheet.',
+                  modeAware: false,
+                },
+                {
+                  format: 'docx' as const,
+                  icon: <FileSpreadsheet className="w-5 h-5 text-blue-600" />,
+                  title: 'Word Asset Register (.docx)',
+                  desc: 'Dokumen Word berisi daftar aset & piping untuk keperluan dokumentasi engineering.',
+                  modeAware: false,
+                },
+              ].map((opt) => (
+                <a
+                  key={opt.format}
+                  href={getExportUrl(
+                    projectId,
+                    activeSheet!.id,
+                    opt.format,
+                    opt.modeAware ? exportMode : 'engineer'
+                  )}
+                  download
+                  onClick={() => setShowExportModal(false)}
+                  className="flex items-start space-x-3 p-3 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition group"
+                >
+                  <div className="mt-0.5 shrink-0">{opt.icon}</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-slate-800 group-hover:text-indigo-700">
+                      {opt.title}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+                    {opt.modeAware && (
+                      <span className="inline-block mt-1 text-[10px] font-semibold uppercase tracking-wider text-indigo-600 bg-indigo-100 rounded px-1.5 py-0.5">
+                        Mengikuti mode aktif
+                      </span>
+                    )}
+                  </div>
+                  <Download className="w-4 h-4 text-slate-300 group-hover:text-indigo-500 mt-1 shrink-0" />
+                </a>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Line List Import Modal */}
       {showLineListModal && (

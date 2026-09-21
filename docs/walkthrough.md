@@ -1,5 +1,35 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Selection Cleanup, Export Modal & Mode-Aware Export
+
+**Status**: Implemented, built, and deployed locally on 2026-09-18.
+
+### Scope
+
+- **Orange selection halo no longer survives navigation.** The line selection only makes sense in
+  Digitization mode, yet `selectedRunIndices` was never cleared when leaving it, so the pulsing orange
+  halo kept rendering on the selected run in Corrosion System/Circuit (and after split+delete the
+  remembered index drifted to a surviving run). Added an effect keyed on `[mode, activeSheet.id]` that
+  drops the selection + split mode on any mode/sheet change (on top of the existing out-of-range
+  sanitizer).
+- **Export is now a modal, not a hover dropdown.** The old `group-hover:block` menu vanished when the
+  cursor crossed the gap on its way down, making options hard to click. Replaced with a proper modal
+  (`showExportModal`): each format has an icon, a title, and a plain-language description of what the
+  file contains, plus a header banner showing the currently active view mode.
+- **Export now follows the active view mode.** PDF/PNG export was hard-coded to `mode=engineer`, so
+  exporting from Corrosion System/Circuit always produced per-pipe coloring. Added an `exportMode`
+  memo (`digitize→engineer`, `system→system`, `circuit→circuit`) and pass it through `getExportUrl`
+  for the mode-aware formats (PNG/PDF). spreadsheet formats (xlsx/docx) remain mode-independent
+  line/asset registers.
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npm run build` → success (only pre-existing lint warnings).
+- `docker compose build frontend` + `up -d frontend` → all 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Overlay State Leak Fixes (Stuck Selection & Stuck Highlight)
 
 **Status**: Implemented, built, and deployed locally on 2026-09-18.

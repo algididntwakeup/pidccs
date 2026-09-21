@@ -1081,3 +1081,41 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 - `npx tsc --noEmit` → 0 error.
 - `npm run build` → sukses (hanya warning lint pra-eksisting).
 - `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
+
+---
+
+## Sprint Handover: Selection Cleanup, Export Modal & Mode-Aware Export
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-18.
+
+### 1. Ringkasan Perubahan
+
+- **Halo seleksi oranye tidak lagi bertahan saat pindah tab (100% Selesai)**:
+  - Seleksi garis hanya relevan di mode Digitization, tapi `selectedRunIndices` tidak pernah
+    dibersihkan saat keluar dari mode itu — halo oranye terus dirender di Corrosion System/Circuit
+    (dan setelah split+delete index lama bergeser ke run yang masih ada).
+  - Ditambahkan `useEffect` ber-key `[mode, activeSheet.id]` yang mengosongkan seleksi + split mode
+    tiap ganti mode/sheet (di atas sanitizer out-of-range yang sudah ada).
+- **Export kini modal, bukan hover dropdown (100% Selesai)**:
+  - Dropdown `group-hover:block` lama hilang saat kursor melewati celah `mt-1` → opsi susah diklik.
+    Diganti modal (`showExportModal`) dengan ikon, judul, dan penjelasan isi file per format, plus
+    banner mode aktif.
+- **Export mengikuti mode tampilan yang aktif (100% Selesai)**:
+  - Export PDF/PNG sebelumnya di-hardcode `mode=engineer`, jadi export dari Corrosion System/Circuit
+    selalu menghasilkan pewarnaan per-pipa. Ditambahkan memo `exportMode`
+    (`digitize→engineer`, `system→system`, `circuit→circuit`) yang diteruskan ke `getExportUrl`
+    untuk format bergantung-mode (PNG/PDF). Format spreadsheet (xlsx/docx) tetap register
+    line/asset yang tidak bergantung mode.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | `useEffect` pembersih seleksi saat ganti mode/sheet; modal Export (`showExportModal`) dengan deskripsi per format; memo `exportMode` diteruskan ke `getExportUrl`. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover perbaikan seleksi & export. |
+
+### 3. Verifikasi
+
+- `npx tsc --noEmit` → 0 error.
+- `npm run build` → sukses (hanya warning lint pra-eksisting).
+- `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
