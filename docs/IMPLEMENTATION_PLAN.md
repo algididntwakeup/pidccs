@@ -1153,3 +1153,60 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 - `npx tsc --noEmit` → 0 error.
 - `npm run build` → sukses (hanya warning lint pra-eksisting).
 - `docker compose build frontend` + `up -d frontend` → 5 container Up/healthy.
+
+---
+
+## Sprint Handover: Text-Artifact Suppression (Pre-Skeletonization), Highlight Toggle & Canvas Deselect
+
+**Status**: Selesai (Implemented, Built, Deployed) — 2026-09-18.
+
+### 1. Ringkasan Perubahan
+
+- **Penekan artefak teks pra-skeletisasi (kualitas line tracing, 100% Selesai)**:
+  - Akar masalah: masking OCR hanya menghitamkan *bounding box string* yang berhasil dikenali.
+    Setiap karakter yang gagal dikenali OCR (pecahan ukuran `3/4`, kata `BY INSTR`, coretan huruf)
+    tetap menjadi piksel ink lalu di-skeletonize menjadi garis liar (garbage trace).
+    Audit pada lembar nyata: citra biner pra-skeleton menyimpan **±2.270 pulau seukuran glyph**
+    sementara OCR hanya mengeluarkan **162 token** → masking tidak menangkap glyph yang lolos.
+  - Fungsi baru `suppress_text_artifacts()` di `pidcorr/lines.py`: analisis komponen terhubung
+    (`cv2.connectedComponentsWithStats`) pada citra biner pra-skeleton, lalu blackout pulau dengan
+    profil karakter P&ID: `max_side <= 10pt`, `area <= 40pt²`, `aspect_ratio < 4.0`.
+    Cabang nyata (stub tipis w=2,h=12 → AR 6) & jaringan pipa besar dipertahankan; `protect_boxes`
+    (bbox equipment/valve/instrument) melindungi area sensitif; ambang berskala DPI.
+  - Post-filter opsional `suppress_floating_stubs()`: hanya membuang segmen **pendek + terisolasi +
+    diagonal** yang tidak menempel ke simbol terdeteksi (no-op bila `detections` kosong / ROI re-scan).
+  - Diintegrasikan ke `SkeletonLineTracer` antara furniture masking dan skeletisasi, di balik flag
+    konstruktor `suppress_text_artifacts` / `suppress_floating_stubs` (default `True`).
+- **Dampak terukur pada P&ID nyata** (200 dpi, pipeline penuh dgn deteksi):
+
+  | Lembar | Runs sebelum | Runs sesudah | Δ | total_len sebelum | total_len sesudah |
+  |---|---:|---:|---:|---:|---:|
+  | PID-1-011-02 | 341 | 235 | **−31.1%** | 41.280 | 38.515 (−6.7%) |
+  | PID-1-005-01 | 257 | 154 | **−40.1%** | 37.854 | 36.738 (−3.0%) |
+  | PID-1-012-01 | 329 | 221 | **−32.8%** | 36.433 | 32.907 (−9.7%) |
+
+  Jumlah run turun ±⅓ sementara total panjang nyaris tetap → yang terbuang adalah garis pendek liar,
+  bukan pipa nyata. Skrip bukti: `backend/scripts/compare_runs_count.py`, `backend/scripts/diag_trace_artifacts.py`.
+- **Toggle highlight ungu + deselect di kanvas (100% Selesai)**: klik ulang kartu Corrosion System /
+  Circuit yang sama kini menghapus highlight & deselect; klik ruang kosong di kanvas juga menghapus
+  kotak ungu (beserta seleksi System/Circuit/Piping-ID) tanpa mengganggu klik pada overlay pipa/popover.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py) | Core CV | Fungsi baru `suppress_text_artifacts()` (komponen terhubung pra-skeleton) & `suppress_floating_stubs()` (post-filter stub diagonal terisolasi). |
+| [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py) | Core CV | Flag konstruktor baru; panggilan `suppress_text_artifacts` (step 3b) & `suppress_floating_stubs` (step 8) di pipeline trace. |
+| [`backend/tests/test_masking_and_runs.py`](file:///c:/Werk/pidccs/backend/tests/test_masking_and_runs.py) | Tests | 4 test baru: glyph dibuang & pipa/stub dipertahankan, `protect_boxes`, stub diagonal terisolasi, no-op tanpa deteksi. |
+| [`backend/scripts/compare_runs_count.py`](file:///c:/Werk/pidccs/backend/scripts/compare_runs_count.py) | Tooling | Benchmark jumlah run sebelum/sesudah filtering pada PDF nyata. |
+| [`backend/scripts/diag_trace_artifacts.py`](file:///c:/Werk/pidccs/backend/scripts/diag_trace_artifacts.py) | Tooling | Diagnostik komponen terhubung pada citra biner pra-skeleton. |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Toggle `handleSelectSystem`/`handleSelectCircuit`; `useEffect` deselect saat klik ruang kosong kanvas. |
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend UI | `data-pipe-interactive` pada root SVG agar klik overlay terdeteksi andal. |
+| [`docs/walkthrough.md`](file:///c:/Werk/pidccs/docs/walkthrough.md) | Docs | Sprint handover kualitas tracing & toggle highlight. |
+
+### 3. Verifikasi
+
+- `pytest tests/test_masking_and_runs.py tests/test_snap_equipment.py tests/test_split_and_color.py -q` → **17 passed, 1 skipped** (4 test baru).
+- `pytest tests/ -q` → 29 passed, 1 skipped, 4 failed — keempatnya **pra-eksisting** (dikonfirmasi via `git stash` pada kode bersih; fixture path `/Contoh P&ID/...png` hilang), tidak terkait tracing.
+- `npx tsc --noEmit` → 0 error.
+- `docker compose build frontend` + `up -d frontend` + `restart api worker` → 5 container Up/healthy.

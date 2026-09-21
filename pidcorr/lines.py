@@ -604,6 +604,118 @@ def split_poly_run(
     return new_runs, new_pids, run_a, run_b, new_run_idx
 
 
+def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
+                           max_side_pt=10.0, max_area_pt2=40.0, max_aspect=4.0,
+                           min_area_px=8, protect_boxes=None):
+    """Pra-skeletisasi: hitamkan (blackout) pulau piksel yang secara geometri menyerupai
+    GLYPH TEKS / coretan kecil yang lolos dari masking OCR.
+
+    Latar belakang: OCR hanya mengembalikan string utuh yang terdeteksinya; satu karakter
+    yang gagal dikenali (mis. pecahan ukuran '3/4', kata 'BY INSTR', atau coretan huruf)
+    tetap menjadi piksel putih yang lalu di-skeletonize menjadi garis liar (garbage trace).
+    Filter ini bekerja pada citra biner (sebelum skeletisasi/morphological skeleton)
+    memakai analisis komponen terhubung (`connectedComponentsWithStats`) dan melenyapkan
+    pulau dengan profil geometri karakter tipikal P&ID:
+
+      * ukuran sisi pendek (<= 10pt @ 350dpi, i.e. ~48-50px pada 200dpi) -> bukan pipa,
+      * area piksel kecil (8..40pt^2) -> bukan header/perimeter equipment,
+      * aspect ratio tidak memanjang ekstrem (max_side/min_side < 4.0) -> pipa lurus selalu
+        JAUH lebih memanjang (ratusan px panjang vs 2-3px tebal => AR > 10).
+
+    Pengaman pipa cabang nyata (nipel pendek, vent, drain, stub tegak lurus):
+      * ambang aspect ratio 4.0 MENJAGA stub tipis (w=2,h=12 -> AR 6) tetap hidup,
+      * komponen yang LEBIH BESAR dari ambang tidak disentuh (pipa ber-elbow/bercabang
+        menyatu dengan jaringan panjang, jadi bagian dari komponen besar),
+      * `protect_boxes` (mis. bbox equipment/nozzle) menjaga isi area sensitif,
+      * ambang skala mengikuti DPI.
+
+    Mengembalikan citra biner yang sudah dibersihkan (in-place copy).
+    """
+    if binary is None:
+        return binary
+    S = dpi / 350.0
+    max_side = max(6, int((max_side_pt / 72.0) * dpi))
+    max_area = max(12, int((max_area_pt2 / (72.0 ** 2)) * (dpi ** 2)))
+
+    out = binary.copy()
+    ink = (out > 0).astype(np.uint8)
+    if cv2.countNonZero(ink) == 0:
+        return out
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    protect = [(int(b[0]), int(b[1]), int(b[2]), int(b[3])) for b in (protect_boxes or [])]
+
+    drop_ids = []
+    for i in range(1, n):
+        x, y, w, h, area = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                            int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]),
+                            int(stats[i, cv2.CC_STAT_AREA]))
+        if area < min_area_px:
+            drop_ids.append(i)          # bintik noise mikro
+            continue
+        if area > max_area or max(w, h) > max_side:
+            continue
+        ar = max(w, h) / max(1, min(w, h))
+        if ar >= max_aspect:
+            continue                    # pipa/stub tipis -> jangan buang
+        if protect:
+            cx, cy = x + w / 2.0, y + h / 2.0
+            if any(bx0 <= cx <= bx1 and by0 <= cy <= by1 for bx0, by0, bx1, by1 in protect):
+                continue
+        drop_ids.append(i)
+
+    if drop_ids:
+        drop_mask = np.isin(labels, drop_ids)
+        out[drop_mask] = 0
+
+    out[out > 0] = 255
+    return out
+
+
+def suppress_floating_stubs(segs, detections=None, page_wh=None, dpi=350,
+                            max_len_px=28, near_margin_pt=10):
+    """Filter pasca-tracing (opsional): buang segmen yang SANGAT PENDEK, melayang
+    sendirian TANPA menempel ke equipment/valve/instrument mana pun, DAN bergaya
+    diagonal (coretan huruf / sisa teks yang lolos).
+
+    Konservatif by design - untuk menjaga cabang nyata (vent/drain/stub tegak lurus):
+      * hanya segmen ber-axis 'd' (diagonal) yang dibuang; pipa H/V pendek tetap hidup,
+      * panjang <= max_len_px,
+      * TIDAK ada ujung/segmen dalam radius near_margin dari bbox deteksi (valve/equip/
+        instrument) -> kalau nempel ke simbol, kemungkinan besar itu elemen nyata,
+      * kalau `detections` kosong (mis. ROI re-scan), fungsi ini TIDAK membuang apa pun.
+    """
+    if not segs or not detections:
+        return segs
+    S = dpi / 350.0
+    max_len = max_len_px * S
+    near = near_margin_pt * dpi / 72.0
+    boxes = [(float(d.get("x1", 0)), float(d.get("y1", 0)),
+              float(d.get("x2", 0)), float(d.get("y2", 0))) for d in detections]
+
+    def near_any(px, py):
+        for bx0, by0, bx1, by1 in boxes:
+            if (bx0 - near) <= px <= (bx1 + near) and (by0 - near) <= py <= (by1 + near):
+                return True
+        return False
+
+    out = []
+    for s in segs:
+        if getattr(s, "axis", "") != "d" or s.length > max_len:
+            out.append(s)
+            continue
+        pts = list(s.points)
+        # sample midpoints too, so a run crossing a box is protected
+        samples = pts + [((pts[i][0] + pts[i + 1][0]) / 2.0, (pts[i][1] + pts[i + 1][1]) / 2.0)
+                         for i in range(len(pts) - 1)]
+        if any(near_any(px, py) for px, py in samples):
+            out.append(s)
+            continue
+        # isolated diagonal short stroke -> garbage
+        continue
+    return out
+
+
 def suppress_furniture(segs, furniture, dpi=350, margin_pt=6):
     """Buang segmen yg berada DI DALAM region furniture (title block/tabel/notes) hasil
     layout-detector -> tabel tak ke-trace jadi pipa. Pakai titik tengah segmen: garis grid

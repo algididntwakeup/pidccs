@@ -1,5 +1,55 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Text-Artifact Suppression, Highlight Toggle & Canvas Deselect
+
+**Status**: Implemented, built, and deployed locally on 2026-09-18.
+
+### Scope
+
+- **Pre-skeletonization text-artifact suppression (line-tracing quality).** Audit of the tracing
+  pipeline showed why garbage traces persisted despite dilated OCR masking: OCR returns only the
+  full *strings* it recognises, so any character it misses (size fractions like `3/4`, note words
+  like `BY INSTR`, hand scratches) stays as white ink and gets skeletonized into a stray run. On a
+  real sheet the pre-skeleton binary held **~2,270 glyph-sized islands** while OCR emitted only
+  **162 tokens** — i.e. masking removed boxes, not the leaked glyphs.
+  - New `suppress_text_artifacts()` in [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py)
+    runs `cv2.connectedComponentsWithStats` on the pre-skeleton binary and blackouts compact
+    glyph islands: `max_side <= 10pt`, `area <= 40pt²`, `aspect_ratio < 4.0`. Elongated pipe
+    stubs (w=2, h=12 → AR 6) and large networks are preserved; `protect_boxes` (equipment/valve/
+    instrument bboxes) shield sensitive regions. All thresholds scale with DPI.
+  - New `suppress_floating_stubs()` post-filter removes only **short, isolated, diagonal** strokes
+    that touch no detected symbol (no-op when `detections` is empty, e.g. ROI re-scan).
+  - Wired into `SkeletonLineTracer` between furniture masking and skeletonization, behind the
+    constructor flags `suppress_text_artifacts` / `suppress_floating_stubs` (both default `True`).
+- **Measured impact on real P&IDs** (200 dpi, full pipeline incl. detections):
+
+  | Sheet | Runs before | Runs after | Δ | total_len before | total_len after |
+  |---|---:|---:|---:|---:|---:|
+  | PID-1-011-02 | 341 | 235 | **−31.1%** | 41,280 | 38,515 (−6.7%) |
+  | PID-1-005-01 | 257 | 154 | **−40.1%** | 37,854 | 36,738 (−3.0%) |
+  | PID-1-012-01 | 329 | 221 | **−32.8%** | 36,433 | 32,907 (−9.7%) |
+
+  Run count drops by ~⅓ while total traced length barely moves — the removed runs are short junk,
+  not real pipes. Scripts: [`backend/scripts/compare_runs_count.py`](file:///c:/Werk/pidccs/backend/scripts/compare_runs_count.py),
+  [`backend/scripts/diag_trace_artifacts.py`](file:///c:/Werk/pidccs/backend/scripts/diag_trace_artifacts.py).
+- **Purple focus highlight toggle + canvas deselect.** Clicking the same Corrosion System / Circuit
+  card again now clears the highlight and deselects it; clicking empty canvas space also clears the
+  purple box (and the System/Circuit/Piping-ID selection) without disturbing clicks that land on the
+  pipe overlay or its popover.
+
+### Verification
+
+- `pytest tests/test_masking_and_runs.py tests/test_snap_equipment.py tests/test_split_and_color.py -q`
+  → **17 passed, 1 skipped** (4 new tests for the artifact/stub filters).
+- Full `pytest tests/ -q` → 29 passed, 1 skipped, 4 failed; the 4 failures
+  (`test_exports`, `test_end_to_end_full_system_lifecycle`, `test_linelist_parser_excel`,
+  `test_linelist_api_endpoint_lifecycle`) are **pre-existing** — reproduced identically on the
+  pristine checkout via `git stash` (missing `/Contoh P&ID/...png` fixture path), unrelated to tracing.
+- `npx tsc --noEmit` → 0 errors.
+- `docker compose build frontend` + `up -d frontend` + `restart api worker` → all 5 containers Up/healthy.
+
+---
+
 ## Sprint Handover: Line Tag Save Fix + Duplicate-Tag Merge Fallback
 
 **Status**: Implemented, built, and deployed locally on 2026-09-18.
@@ -87,7 +137,7 @@
 
 ## Sprint Handover: Draggable Line Action Popover
 
-**Status**: Implemented, built, and deployed locally on 2026-09-18.
+**Status**: Implemented, built, and deployed locally on 2026-09-21.
 
 ### Scope
 
@@ -539,5 +589,3 @@ Sebagai acuan untuk sesi berikutnya, berikut adalah backlog prioritas yang belum
   - **13 passed, 1 skipped, 100% PASSED**.
   - Termasuk verifikasi unit test baru untuk endpoint `update_run_points`.
 - Frontend compile: `npx tsc --noEmit` $\rightarrow$ **0 errors (100% Clean TypeScript build)**.
-
-

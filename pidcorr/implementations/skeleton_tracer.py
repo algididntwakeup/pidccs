@@ -16,6 +16,8 @@ from ..lines import (
     suppress_drawing_margins,
     suppress_revision_clouds,
     suppress_diagonal_artifacts,
+    suppress_text_artifacts,
+    suppress_floating_stubs,
     bridge_collinear_headers,
     bridge_inline_valve_gaps,
 )
@@ -352,8 +354,19 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
-    def __init__(self, min_length_px: int = 12):
+    def __init__(self, min_length_px: int = 12, suppress_text_artifacts: bool = True,
+                 text_artifact_max_side_pt: float = 10.0,
+                 text_artifact_max_area_pt2: float = 40.0,
+                 text_artifact_max_aspect: float = 4.0,
+                 suppress_floating_stubs: bool = True,
+                 floating_stub_max_len_px: float = 28.0):
         self.min_length_px = min_length_px
+        self.suppress_text_artifacts = suppress_text_artifacts
+        self.text_artifact_max_side_pt = text_artifact_max_side_pt
+        self.text_artifact_max_area_pt2 = text_artifact_max_area_pt2
+        self.text_artifact_max_aspect = text_artifact_max_aspect
+        self.suppress_floating_stubs = suppress_floating_stubs
+        self.floating_stub_max_len_px = floating_stub_max_len_px
 
     def trace(
         self,
@@ -422,6 +435,28 @@ class SkeletonLineTracer(BaseLineTracer):
                 fx1, fy1, fx2, fy2 = f
                 clean_binary[max(0, int(fy1)):min(H, int(fy2)), max(0, int(fx1)):min(W, int(fx2))] = 0
 
+        # 3b. Text-artifact island suppression (pre-skeletonization).
+        # OCR bounding-box masking is leaky: single characters that OCR fails to label
+        # (size fractions "3/4", notes "BY INSTR", hand scratches) survive as ink and get
+        # skeletonized into garbage traces. This geometry-based pass blackouts compact
+        # glyph-like islands while preserving thin, elongated pipe stubs.
+        if self.suppress_text_artifacts:
+            protect_boxes = [
+                (int(d.get("x1", 0)), int(d.get("y1", 0)), int(d.get("x2", 0)), int(d.get("y2", 0)))
+                for d in (detections or [])
+                if d.get("coarse") in ("equipment", "valve", "instrument")
+            ]
+            clean_binary = suppress_text_artifacts(
+                clean_binary,
+                detections=detections,
+                dpi=dpi,
+                tokens=tokens,
+                max_side_pt=self.text_artifact_max_side_pt,
+                max_area_pt2=self.text_artifact_max_area_pt2,
+                max_aspect=self.text_artifact_max_aspect,
+                protect_boxes=protect_boxes,
+            )
+
         # 4. Skeletonize
         skel = _morphological_skeleton(clean_binary)
 
@@ -453,5 +488,13 @@ class SkeletonLineTracer(BaseLineTracer):
 
         # 7. Bridge pipe runs cut by inline valves
         filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=90)
+
+        # 8. Post-filter: drop isolated short diagonal strokes (surviving text/hand scratches)
+        #    that do not attach to any detected symbol. No-op when detections is empty.
+        if self.suppress_floating_stubs:
+            filtered = suppress_floating_stubs(
+                filtered, detections=detections, page_wh=(W, H), dpi=dpi,
+                max_len_px=self.floating_stub_max_len_px,
+            )
 
         return filtered

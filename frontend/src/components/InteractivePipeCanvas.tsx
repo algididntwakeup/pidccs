@@ -734,6 +734,7 @@ export default function InteractivePipeCanvas({
         createPortal(
           <svg
             ref={svgRef}
+            data-pipe-interactive="true"
             viewBox={`0 0 ${width} ${height}`}
             preserveAspectRatio="none"
             style={{

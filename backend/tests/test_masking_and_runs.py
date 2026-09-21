@@ -7,7 +7,7 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from pidcorr.lines import PipeRun, bridge_inline_valve_gaps
+from pidcorr.lines import PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts, suppress_floating_stubs
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 
 
@@ -65,3 +65,55 @@ def test_skeleton_tracer_dilated_text_and_equipment_masking():
         for r in runs
     )
     assert not baffle_found, "Internal vessel baffles must be suppressed"
+
+
+def test_suppress_text_artifacts_removes_glyphs_keeps_pipes():
+    """Text glyph islands (compact, AR<4) get blacked out; elongated pipe stubs survive."""
+    binary = np.zeros((300, 400), dtype=np.uint8)
+    # A real long horizontal pipe (elongated, AR >> 4) -> must survive
+    binary[100:103, 20:380] = 255
+    # A real thin vertical stub (w=2, h=14 -> AR 7) -> must survive
+    binary[150:164, 200:202] = 255
+    # A text-glyph island "0": 12x16, AR<4 -> must be removed
+    binary[200:216, 60:72] = 255
+    # another glyph "3/4" fragment
+    binary[200:214, 120:130] = 255
+
+    out = suppress_text_artifacts(binary, dpi=200)
+    assert out[100:103, 20:380].sum() > 0, "long pipe must be preserved"
+    assert out[150:164, 200:202].sum() > 0, "thin vertical stub must be preserved"
+    assert out[200:216, 60:72].sum() == 0, "glyph island must be blacked out"
+    assert out[200:214, 120:130].sum() == 0, "size-fraction fragment must be blacked out"
+    assert set(np.unique(out)).issubset({0, 255})
+
+
+def test_suppress_text_artifacts_protect_boxes():
+    """Islands inside protected symbol boxes are NOT removed."""
+    binary = np.zeros((200, 200), dtype=np.uint8)
+    binary[50:66, 50:62] = 255  # glyph-sized but inside a protected box
+    out = suppress_text_artifacts(
+        binary, dpi=200, protect_boxes=[(40, 40, 80, 80)]
+    )
+    assert out[50:66, 50:62].sum() > 0, "island inside protected box must survive"
+
+
+def test_suppress_floating_stubs_removes_isolated_diagonal():
+    """Short isolated diagonal strokes are dropped; symbols protect real branches."""
+    garbage = PipeRun(points=[(10, 10), (30, 32)], axis="d")
+    near_symbol = PipeRun(points=[(100, 100), (118, 118)], axis="d")
+    short_horiz = PipeRun(points=[(200, 50), (220, 50)], axis="h")
+    detections = [{"coarse": "valve", "x1": 95, "y1": 95, "x2": 130, "y2": 130}]
+
+    out = suppress_floating_stubs(
+        [garbage, near_symbol, short_horiz], detections=detections, dpi=350, max_len_px=40
+    )
+    kinds = [r.axis for r in out]
+    assert garbage not in out, "isolated short diagonal must be dropped"
+    assert near_symbol in out, "diagonal attached to a symbol must survive"
+    assert short_horiz in out, "short horizontal pipe must survive"
+
+
+def test_suppress_floating_stubs_noop_without_detections():
+    g = PipeRun(points=[(10, 10), (30, 32)], axis="d")
+    out = suppress_floating_stubs([g], detections=None, dpi=350)
+    assert g in out, "must be a no-op when detections is empty/None"

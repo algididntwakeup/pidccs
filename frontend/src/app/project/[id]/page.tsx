@@ -855,6 +855,28 @@ export default function ProjectWorkspace() {
     clearHighlight();
   }, [mode, activeSheet?.id, clearHighlight]);
 
+  // Clear the purple focus highlight when the user clicks empty canvas space.
+  // Clicks that land on an interactive SVG element (pipe hit-target, vertex,
+  // drawing tool, popover) are ignored so this never fights the tracing tools.
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const onCanvasClick = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      // Anything inside the interactive pipe overlay (or a tool/popover) keeps its state.
+      if (target.closest('[data-pipe-interactive], .osd-pipe-overlay, svg, button, [role="dialog"]')) {
+        return;
+      }
+      clearHighlight();
+      setSelectedSystemIdx(null);
+      setSelectedCircuitCode(null);
+      setSelectedPidIdx(null);
+    };
+    el.addEventListener('click', onCanvasClick);
+    return () => el.removeEventListener('click', onCanvasClick);
+  }, [clearHighlight]);
+
   const handleSelectPipingId = (p: PipingID, idx: number) => {
     setSelectedPidIdx(idx);
     if (!result) return;
@@ -908,6 +930,13 @@ export default function ProjectWorkspace() {
   };
 
   const handleSelectSystem = (s: CorrosionSystem, idx: number) => {
+    // Toggle: clicking the same system again deselects it and clears the purple
+    // focus highlight, so the marker never gets stuck on the canvas.
+    if (selectedSystemIdx === idx) {
+      setSelectedSystemIdx(null);
+      clearHighlight();
+      return;
+    }
     setSelectedSystemIdx(idx);
     if (!result) return;
     const allXs: number[] = [];
@@ -947,6 +976,12 @@ export default function ProjectWorkspace() {
   };
 
   const handleSelectCircuit = (c: CorrosionCircuit) => {
+    // Toggle: clicking the same circuit again deselects it and clears the highlight.
+    if (selectedCircuitCode === c.code) {
+      setSelectedCircuitCode(null);
+      clearHighlight();
+      return;
+    }
     setSelectedCircuitCode(c.code);
     if (!result) return;
     const allXs: number[] = [];
