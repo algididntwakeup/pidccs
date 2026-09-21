@@ -23,7 +23,7 @@ import {
   uploadSheet,
   deleteProject,
   deleteSheet,
-  getRawImageUrl,
+  getThumbnailUrl,
 } from '@/lib/api';
 
 export default function ProjectsPage() {
@@ -231,7 +231,7 @@ export default function ProjectsPage() {
                     {/* Sheet Cards */}
                     {p.sheets &&
                       p.sheets.map((s) => {
-                        const rawUrl = getRawImageUrl(p.id, s.id);
+                        const thumbUrl = getThumbnailUrl(p.id, s.id, 480);
                         const isDetected = s.status === 'detected';
                         return (
                           <div
@@ -244,8 +244,9 @@ export default function ProjectsPage() {
                               className="block relative aspect-[4/3] bg-slate-900/5 overflow-hidden border-b border-slate-200"
                             >
                               <img
-                                src={rawUrl}
+                                src={thumbUrl}
                                 alt={s.filename}
+                                loading="lazy"
                                 className="w-full h-full object-contain p-1.5 group-hover:scale-105 transition-transform duration-300"
                               />
 

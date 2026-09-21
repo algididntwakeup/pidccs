@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
@@ -106,6 +107,7 @@ async def trace_region(
     from ..adapters.storage import LocalStorageAdapter
     from ..adapters.pdf_renderer import load_drawing_image
     from ..config import settings
+    from ..services.export_service import ExportService
     from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 
     project = await ProjectService.get_project(db, project_id)
@@ -117,7 +119,16 @@ async def trace_region(
 
     storage_adapter = LocalStorageAdapter(settings.STORAGE_DIR)
     image_path = storage_adapter.get_file_path(sheet.file_path)
-    img = load_drawing_image(image_path, dpi=sheet.dpi or 350)
+    # Reuse the disk-cached full-resolution base render so repeated ROI re-scans
+    # do not re-rasterize the entire drawing from PDF on every request.
+    if os.path.exists(image_path):
+        img = ExportService._cached_base_image({
+            "image_path": image_path,
+            "dpi": sheet.dpi or 350,
+            "rot": getattr(sheet, "rot", 0),
+        })
+    else:
+        img = load_drawing_image(image_path, dpi=sheet.dpi or 350)
     height, width = img.shape[:2]
     x1, y1 = max(0, min(int(payload.x1), width - 1)), max(0, min(int(payload.y1), height - 1))
     x2, y2 = max(x1 + 1, min(int(payload.x2), width)), max(y1 + 1, min(int(payload.y2), height))

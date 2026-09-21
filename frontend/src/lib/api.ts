@@ -104,6 +104,10 @@ export function getRawImageUrl(projectId: string, sheetId: string): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/raw`;
 }
 
+export function getThumbnailUrl(projectId: string, sheetId: string, size: number = 480): string {
+  return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/thumbnail?size=${size}`;
+}
+
 export function getMarkedImageUrl(projectId: string, sheetId: string, mode: 'system' | 'circuit' | 'engineer' = 'engineer'): string {
   return `${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/export?format=png&mode=${mode}`;
 }

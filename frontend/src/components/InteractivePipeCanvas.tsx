@@ -53,6 +53,11 @@ interface InteractivePipeCanvasProps {
   onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen') => void;
   onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }, replaceExisting?: boolean) => Promise<void>;
   onManualRun: (points: [number, number][]) => Promise<void>;
+  // Optional mode-driven color override: maps run index -> CSS color.
+  // Used for Corrosion System / Circuit views so circuit coloring is rendered
+  // as a vector layer on the raw CAD image instead of swapping to a server PNG.
+  colorOverrideMap?: Map<number, string> | null;
+  dimUncolored?: boolean;
 }
 
 export default function InteractivePipeCanvas({
@@ -81,6 +86,8 @@ export default function InteractivePipeCanvas({
   onSetTraceTool,
   onRescan,
   onManualRun,
+  colorOverrideMap,
+  dimUncolored,
 }: InteractivePipeCanvasProps) {
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [hoveredRunIdx, setHoveredRunIdx] = useState<number | null>(null);
@@ -114,8 +121,16 @@ export default function InteractivePipeCanvas({
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const pointerDownRecordRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const traceToolRef = useRef(traceTool);
+  traceToolRef.current = traceTool;
 
-  // Mount OpenSeadragon overlay container that syncs with pan & zoom
+  // Mount OpenSeadragon overlay container that syncs with pan & zoom.
+  //
+  // IMPORTANT: `viewer.open()` internally calls `close()`, which runs
+  // `clearOverlays()` and wipes the overlays container. The parent swaps the
+  // base image via `viewer.open()` on mode change (digitize <-> system/circuit),
+  // so we must RE-ATTACH our overlay every time the viewer (re)opens, otherwise
+  // the SVG tracing layer silently disappears and is never restored.
   useEffect(() => {
     if (!viewer || !osdModule || !width || !height) return;
 
@@ -127,20 +142,40 @@ export default function InteractivePipeCanvas({
     overlayEl.style.top = '0';
     overlayEl.style.left = '0';
     // Pointer-events on container: 'none' in pan mode (to allow OSD pan), 'auto' in rescan/pen modes
-    overlayEl.style.pointerEvents = traceTool === 'pan' ? 'none' : 'auto';
+    overlayEl.style.pointerEvents = traceToolRef.current === 'pan' ? 'none' : 'auto';
 
     const aspectRatio = height / width;
     const rect = new osdModule.Rect(0, 0, 1.0, aspectRatio);
 
-    viewer.addOverlay({
-      element: overlayEl,
-      location: rect,
-      checkResize: false,
-    });
+    const attachOverlay = () => {
+      // Re-assert DOM identity in case OSD cleared its overlays container.
+      if (overlayEl.parentNode !== null) {
+        overlayEl.parentNode.removeChild(overlayEl);
+      }
+      try {
+        viewer.addOverlay({
+          element: overlayEl,
+          location: rect,
+          checkResize: false,
+        });
+      } catch (e) {
+        // viewer may be tearing down
+      }
+      // Restore tool-driven pointer-events after a re-attach.
+      overlayEl.style.pointerEvents = traceToolRef.current === 'pan' ? 'none' : 'auto';
+    };
 
+    attachOverlay();
     setContainer(overlayEl);
 
+    // Re-attach on every (re)open — this is what fixes the "tracing disappears
+    // after switching tabs" regression.
+    viewer.addHandler('open', attachOverlay);
+
     return () => {
+      try {
+        viewer.removeHandler('open', attachOverlay);
+      } catch (e) {}
       try {
         viewer.removeOverlay(overlayEl);
       } catch (e) {
@@ -694,7 +729,9 @@ export default function InteractivePipeCanvas({
               if (!run.points || run.points.length < 2) return null;
               const isSelected = selectedRunIndices.has(idx);
               const isHovered = hoveredRunIdx === idx;
-              const strokeColor = run.color || '#2563EB';
+              const overrideColor = colorOverrideMap?.get(idx);
+              const strokeColor = overrideColor || run.color || '#2563EB';
+              const isDimmed = Boolean(dimUncolored && colorOverrideMap && !overrideColor);
 
               // If dragging vertices of this run, use the live drag points
               const activePoints =
@@ -760,9 +797,10 @@ export default function InteractivePipeCanvas({
                     strokeLinejoin="round"
                     strokeDasharray={isSelected ? '10 5' : undefined}
                     filter={isHovered && !isSelected ? 'url(#hover-glow)' : undefined}
+                    opacity={isDimmed ? 0.18 : 1}
                     style={{
                       pointerEvents: 'none',
-                      transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease',
+                      transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',
                     }}
                   />
 

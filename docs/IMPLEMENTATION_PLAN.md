@@ -956,3 +956,60 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 | [`frontend/src/lib/api.ts`](file:///c:/Werk/pidccs/frontend/src/lib/api.ts) | Frontend Client | Method API client: `updateRunPoints(projectId, sheetId, runIdx, points)` dan `traceRegion(projectId, sheetId, bounds, replaceExisting)`. |
 | [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend Canvas Overlay | Refactor event handling, draggable vertex handles dengan snap assist H/V, rubber-band Box Trace dengan Option (C) modal, Manual Pen dengan magnet snap, dynamic cursor styling, dan OpenSeadragon mouse navigation synchronization. |
 | [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Handler `handleUpdateRunPoints` dengan integrasi 20-step undo/redo stack, perbaruan `handleRescan` dengan opsi replace vs append, dan binding props ke `InteractivePipeCanvas`. |
+
+---
+
+## Sprint Handover: Overlay Persistence, Cross-Tab Tracing & Performance Hardening
+
+**Status**: Implemented and locally verified on 2026-09-18.
+
+### 1. Status Terakhir Komponen yang Dikerjakan
+
+- **Perbaikan Line Tracing Hilang Saat Pindah Tab (100% Selesai)**:
+  - *Root cause*: `viewer.open()` di OpenSeadragon secara internal memanggil `close()`, yang menjalankan
+    `clearOverlays()` dan mengosongkan `overlaysContainer`. Parent memanggil `viewer.open()` setiap kali
+    berganti mode DIGITIZE ⇄ SYSTEM ⇄ CIRCUIT, sehingga layer SVG `InteractivePipeCanvas` ikut terhapus
+    dan tidak pernah dipasang ulang.
+  - *Fix*: Overlay kini di-attach ulang pada event OpenSeadragon `open` (`viewer.addHandler('open', attachOverlay)`),
+    sehingga garis tracing tetap ada setelah berpindah tab dan kembali ke Digitization.
+- **Eliminasi Base-Image Swap ke Marked PNG Server (100% Selesai)**:
+  - Pewarnaan Corrosion System / Circuit kini dirender sebagai layer vektor melalui `colorOverrideMap`
+    (dihitung client-side dari `systems[].circuits[].color` dan `run_idxs`) di atas gambar CAD mentah.
+  - Base image dikunci ke `getRawImageUrl` di semua mode → tidak ada lagi fetch/render PNG resolusi penuh
+    saat ganti mode.
+- **Penghapusan Resource Leak (100% Selesai)**:
+  - `pollInterval`, WebSocket progress, semua `setTimeout` toast, dan instance OpenSeadragon kini
+    dibersihkan saat unmount / ganti sheet (`pollIntervalRef`, `detectionWsRef`, `toastTimeoutsRef`,
+    `stopDetectionResources`). Sebelumnya interval polling deteksi terus berjalan setelah navigasi,
+    membuat aplikasi makin berat tiap project dibuka.
+- **Caching HTTP + Thumbnail untuk Citra Sheet (100% Selesai)**:
+  - `/raw` kini mengirim `Cache-Control: public, max-age=31536000, immutable` + `ETag`.
+  - Endpoint baru `GET /projects/{id}/sheets/{id}/thumbnail?size=` menyajikan PNG downscaled tercache
+    untuk kartu project (sebelumnya kartu mengunduh drawing resolusi penuh).
+- **Cache Base Render untuk ROI Re-scan (100% Selesai)**:
+  - `POST /trace-region` menggunakan `ExportService._cached_base_image` alih-alih merasterisasi ulang
+    seluruh PDF tiap request.
+
+### 2. Daftar File yang Dimodifikasi & Fungsi Utamanya
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend Canvas Overlay | Re-attach overlay SVG pada event OSD `open`; props baru `colorOverrideMap` & `dimUncolored` untuk pewarnaan vektor mode System/Circuit. |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Base image dipin ke raw CAD (hapus swap marked PNG); `useMemo` `colorOverrideMap`; cleanup refs (`pollIntervalRef`, `detectionWsRef`, `toastTimeoutsRef`) + `stopDetectionResources`; helper `showToast`. |
+| [`frontend/src/app/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/page.tsx) | Frontend Page | Kartu sheet memakai `getThumbnailUrl` + `loading="lazy"` alih-alih full-res `/raw`. |
+| [`frontend/src/lib/api.ts`](file:///c:/Werk/pidccs/frontend/src/lib/api.ts) | Frontend Client | Helper baru `getThumbnailUrl(projectId, sheetId, size)`. |
+| [`backend/app/routers/tiles.py`](file:///c:/Werk/pidccs/backend/app/routers/tiles.py) | Backend REST API | Header cache (`Cache-Control` + `ETag`) pada `/raw`; endpoint baru `/thumbnail` dengan cache disk. |
+| [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py) | Backend REST API | `POST /trace-region` memakai base image tercache untuk menghindari rasterisasi PDF berulang. |
+| [`backend/tests/test_sheet_tiles_cache.py`](file:///c:/Werk/pidccs/backend/tests/test_sheet_tiles_cache.py) | Tests | Regression test untuk header cache `/raw` dan `/thumbnail`. |
+
+### 3. Handover Roadmap: Task Berikutnya yang Belum Sempat Dieksekusi
+
+1. **Investigasi Overlay pada Skenario Ekstrem**:
+   - *Issue*: Verifikasi sinkronisasi matriks SVG saat resizing window ekstrem atau berpindah tab browser
+     pada zoom maksimal (re-attach overlay kini menutup kasus ganti mode; perlu uji browser E2E).
+   - *Target*: Tambah browser E2E (Playwright) untuk persistensi overlay lintas tab & resize.
+2. **Kondensasi Tampilan Tab Sidebar**:
+   - *Status*: Tab duplikat sudah dikonsolidasi (satu baris tab: `Lines`, `Pipa (Inspector)`, `Symbols`, `OPCs`).
+3. **Pengujian Beban Banyak Sheet**:
+   - *Target*: Benchmark ingestion 20+ sheet untuk memvalidasi caching thumbnail & raw benar-benar menekan
+     waktu muat dan pemakaian memori browser.

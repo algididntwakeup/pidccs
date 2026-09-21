@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -62,7 +62,6 @@ import {
   triggerDetection,
   getRawImageUrl,
   deleteSheet,
-  getMarkedImageUrl,
   getExportUrl,
   uploadLineList,
   fetchProjectTopology,
@@ -145,6 +144,55 @@ export default function ProjectWorkspace() {
   const osdModuleRef = useRef<any>(null);
   const highlightOverlayRef = useRef<HTMLElement | null>(null);
 
+  // Detection job resources (WebSocket + polling) — tracked so they can be torn
+  // down on unmount or when the active sheet/project changes. Without this the
+  // poll interval keeps running after navigation and the app gets progressively
+  // heavier each time a project is opened.
+  const pollIntervalRef = useRef<any>(null);
+  const detectionWsRef = useRef<WebSocket | null>(null);
+
+  // All pending status-toast timeouts, cleared on unmount to avoid setState leaks.
+  const toastTimeoutsRef = useRef<any[]>([]);
+
+  const showToast = useCallback((msg: string, ms: number = 2000) => {
+    setStatusToast(msg);
+    const t = setTimeout(() => setStatusToast(null), ms);
+    toastTimeoutsRef.current.push(t);
+    // Keep the tracked list bounded.
+    if (toastTimeoutsRef.current.length > 40) {
+      toastTimeoutsRef.current = toastTimeoutsRef.current.slice(-20);
+    }
+  }, []);
+
+  const stopDetectionResources = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (detectionWsRef.current) {
+      try {
+        detectionWsRef.current.onmessage = null;
+        detectionWsRef.current.onerror = null;
+        detectionWsRef.current.close();
+      } catch (e) {}
+      detectionWsRef.current = null;
+    }
+  }, []);
+
+  // Global teardown: stop detection resources, timers and the OSD viewer when
+  // the workspace unmounts so nothing leaks across project navigations.
+  useEffect(() => {
+    return () => {
+      stopDetectionResources();
+      toastTimeoutsRef.current.forEach((t) => clearTimeout(t));
+      toastTimeoutsRef.current = [];
+      if (viewerRef.current) {
+        try { viewerRef.current.destroy(); } catch (e) {}
+        viewerRef.current = null;
+      }
+    };
+  }, [stopDetectionResources]);
+
   // Push action to Undo/Redo history stack (15-20 steps)
   const pushHistory = useCallback(
     (desc: string, prevRuns: PipeRun[], nextRuns: PipeRun[], prevPids: PipingID[], nextPids: PipingID[]) => {
@@ -169,10 +217,9 @@ export default function ProjectWorkspace() {
         setResult({ ...result, runs: action.prevRuns, piping_ids: action.prevPids });
       }
       setHistoryIndex((idx) => idx - 1);
-      setStatusToast(`Undo: ${action.desc}`);
-      setTimeout(() => setStatusToast(null), 2000);
+      showToast(`Undo: ${action.desc}`, 2000);
     }
-  }, [historyIndex, history, result]);
+  }, [historyIndex, history, result, showToast]);
 
   const handleRedo = useCallback(() => {
     if (historyIndex < history.length - 1 && history[historyIndex + 1]) {
@@ -181,10 +228,9 @@ export default function ProjectWorkspace() {
         setResult({ ...result, runs: action.nextRuns, piping_ids: action.nextPids });
       }
       setHistoryIndex((idx) => idx + 1);
-      setStatusToast(`Redo: ${action.desc}`);
-      setTimeout(() => setStatusToast(null), 2000);
+      showToast(`Redo: ${action.desc}`, 2000);
     }
-  }, [historyIndex, history, result]);
+  }, [historyIndex, history, result, showToast]);
 
   // Recolor selected runs in frontend state
   const handleRecolorRuns = (runIdxs: number[], newColor: string) => {
@@ -201,8 +247,7 @@ export default function ProjectWorkspace() {
       result.piping_ids
     );
     setResult({ ...result, runs: nextRuns });
-    setStatusToast(`Warna diperbarui ke ${newColor}`);
-    setTimeout(() => setStatusToast(null), 2000);
+    showToast(`Warna diperbarui ke ${newColor}`, 2000);
   };
 
   // Split selected line via backend API
@@ -218,8 +263,7 @@ export default function ProjectWorkspace() {
         pushHistory(`Split pipa #${runIdx}`, prevRuns, nextRuns, prevPids, nextPids);
         setResult({ ...result, runs: nextRuns, piping_ids: nextPids });
         setSelectedRunIndices(new Set([res.new_run_idx]));
-        setStatusToast(`Pipa #${runIdx} berhasil dipecah menjadi 2 segmen!`);
-        setTimeout(() => setStatusToast(null), 3000);
+        showToast(`Pipa #${runIdx} berhasil dipecah menjadi 2 segmen!`, 3000);
       }
     } catch (err: any) {
       alert(err.message || 'Gagal memecah pipa');
@@ -249,8 +293,7 @@ export default function ProjectWorkspace() {
       );
       setResult(updatedResult);
       setSelectedRunIndices(new Set());
-      setStatusToast(`${runIdxs.length} pipa berhasil dihapus!`);
-      setTimeout(() => setStatusToast(null), 3000);
+      showToast(`${runIdxs.length} pipa berhasil dihapus!`, 3000);
     } catch (err: any) {
       alert(err.message || 'Gagal menghapus pipa');
     }
@@ -272,8 +315,7 @@ export default function ProjectWorkspace() {
         res.result.piping_ids || prevPids
       );
       setResult(res.result);
-      setStatusToast(`Tag pipa diperbarui: ${label || '(dikosongkan)'}`);
-      setTimeout(() => setStatusToast(null), 2500);
+      showToast(`Tag pipa diperbarui: ${label || '(dikosongkan)'}`, 2500);
     } catch (err: any) {
       alert(err.message || 'Gagal memperbarui tag pipa');
     }
@@ -318,14 +360,13 @@ export default function ProjectWorkspace() {
     try {
       await patchResult(projectId, activeSheet.id, result);
       setHasUnsavedChanges(false);
-      setStatusToast('Semua perubahan pipa berhasil disimpan ke database!');
-      setTimeout(() => setStatusToast(null), 3000);
+      showToast('Semua perubahan pipa berhasil disimpan ke database!', 3000);
     } catch (err: any) {
       alert('Gagal menyimpan perubahan: ' + (err.message || 'Server error'));
     } finally {
       setSavingChanges(false);
     }
-  }, [result, projectId, activeSheet, savingChanges]);
+  }, [result, projectId, activeSheet, savingChanges, showToast]);
 
   const handleManualRun = useCallback(async (points: [number, number][]) => {
     if (!result || !projectId || !activeSheet || points.length < 2) return;
@@ -366,13 +407,12 @@ export default function ProjectWorkspace() {
         );
         setResult(res.result);
         setHasUnsavedChanges(true);
-        setStatusToast(`Titik koordinat pipa #${runIdx} berhasil disesuaikan!`);
-        setTimeout(() => setStatusToast(null), 2500);
+        showToast(`Titik koordinat pipa #${runIdx} berhasil disesuaikan!`, 2500);
       } catch (err: any) {
         alert('Gagal mengupdate titik pipa: ' + (err.message || 'Server error'));
       }
     },
-    [result, projectId, activeSheet, pushHistory]
+    [result, projectId, activeSheet, pushHistory, showToast]
   );
 
   const handleRescan = useCallback(
@@ -390,18 +430,18 @@ export default function ProjectWorkspace() {
         );
         setResult(data.result || { ...result, runs: nextRuns });
         setHasUnsavedChanges(true);
-        setStatusToast(
+        showToast(
           replaceExisting
             ? `Re-scan selesai! Pipa di area telah diganti (${data.new_runs?.length || 0} pipa baru)`
-            : `Re-scan selesai! Menambahkan ${data.new_runs?.length || 0} pipa baru`
+            : `Re-scan selesai! Menambahkan ${data.new_runs?.length || 0} pipa baru`,
+          3000
         );
-        setTimeout(() => setStatusToast(null), 3000);
         setTraceTool('pan');
       } catch (err: any) {
         alert('Gagal melakukan re-scan area: ' + (err.message || 'Server error'));
       }
     },
-    [projectId, activeSheet, result, pushHistory]
+    [projectId, activeSheet, result, pushHistory, showToast]
   );
 
   // Keyboard shortcuts listener: Ctrl+Z (Undo), Ctrl+Y (Redo), Ctrl+S (Save), Esc (Cancel)
@@ -483,10 +523,11 @@ export default function ProjectWorkspace() {
         viewerRef.current.destroy();
       }
 
-      const isDetected = activeSheet?.status === 'detected' || Boolean(result);
-      const initialUrl = (mode === 'circuit' || mode === 'system') && showOverlay && isDetected
-        ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
-        : getRawImageUrl(projectId, activeSheet.id);
+      // The base image is ALWAYS the raw CAD drawing. Circuit/system coloring is
+      // rendered as a vector layer by InteractivePipeCanvas (see colorOverrideMap),
+      // so we never swap the OSD tile source on mode change. This keeps the SVG
+      // tracing overlay attached and avoids re-downloading/re-rendering a full-res PNG.
+      const initialUrl = getRawImageUrl(projectId, activeSheet.id);
 
       viewer = OpenSeadragon.default({
         element: canvasRef.current,
@@ -522,18 +563,17 @@ export default function ProjectWorkspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, activeSheet]);
 
-  // Dynamically swap between Raw P&ID and Marked Overlay while preserving viewport
+  // Keep the base image pinned to the raw CAD drawing. Circuit/system coloring is a
+  // vector overlay, so this effect only needs to react to sheet changes — NOT to
+  // mode/showOverlay, which previously forced a full-res `viewer.open()` that wiped
+  // the tracing overlay on every tab switch.
   const isDetected = activeSheet?.status === 'detected' || Boolean(result);
   useEffect(() => {
     if (!viewerRef.current || !activeSheet || !projectId) return;
     const viewer = viewerRef.current;
     if (!viewer.viewport) return;
 
-    // In digitize mode, the base image is strictly the raw CAD drawing.
-    // showOverlay is handled purely in CSS by InteractivePipeCanvas.
-    const targetUrl = (mode === 'circuit' || mode === 'system') && showOverlay && isDetected
-      ? getMarkedImageUrl(projectId, activeSheet.id, mode === 'circuit' ? 'circuit' : 'system')
-      : getRawImageUrl(projectId, activeSheet.id);
+    const targetUrl = getRawImageUrl(projectId, activeSheet.id);
 
     const currentItem = viewer.world?.getItemAt(0);
     const currentSource = currentItem?.source?.url || currentItem?._url;
@@ -551,7 +591,33 @@ export default function ProjectWorkspace() {
       viewer.removeHandler('open', onOpen);
     };
     viewer.addHandler('open', onOpen);
-  }, [mode, showOverlay, isDetected, projectId, activeSheet]);
+  }, [projectId, activeSheet]);
+
+  // Client-side color override for Corrosion System / Circuit views.
+  // Maps run index -> CSS rgb() color so circuits are rendered as a vector layer
+  // on the raw CAD image (no server-rendered marked PNG needed).
+  const colorOverrideMap = useMemo<Map<number, string> | null>(() => {
+    if (mode !== 'system' && mode !== 'circuit') return null;
+    if (!systems || systems.length === 0) return null;
+
+    const map = new Map<number, string>();
+    const rgb = (c: number[]) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+
+    if (mode === 'system') {
+      for (const sys of systems) {
+        const color = rgb(sys.color);
+        for (const idx of sys.run_idxs || []) map.set(idx, color);
+      }
+    } else {
+      for (const sys of systems) {
+        for (const circ of sys.circuits || []) {
+          const color = rgb(circ.color);
+          for (const idx of circ.run_idxs || []) map.set(idx, color);
+        }
+      }
+    }
+    return map;
+  }, [mode, systems]);
 
   // Zoom & Pan to Bounding Box on OpenSeadragon Canvas with High-Visibility Overlay
   const zoomToBbox = (minX: number, minY: number, maxX: number, maxY: number) => {
@@ -775,6 +841,9 @@ export default function ProjectWorkspace() {
   const handleRunDetection = async () => {
     if (!projectId || !activeSheet) return;
     try {
+      // Ensure any previous job's resources are torn down first.
+      stopDetectionResources();
+
       setDetecting(true);
       setProgressPct(0);
       setProgressMsg('Initializing P&ID pipeline...');
@@ -784,15 +853,14 @@ export default function ProjectWorkspace() {
       // WebSocket connection for live progress
       const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${job.job_id}`;
       const ws = new WebSocket(wsUrl);
+      detectionWsRef.current = ws;
 
       let completedHandled = false;
-      let pollInterval: any = null;
 
       const onCompleted = () => {
         if (completedHandled) return;
         completedHandled = true;
-        if (pollInterval) clearInterval(pollInterval);
-        try { ws.close(); } catch (e) {}
+        stopDetectionResources();
         setDetecting(false);
         setProgressPct(100);
         setProgressMsg('Digitasi & Sistemisasi selesai.');
@@ -810,8 +878,9 @@ export default function ProjectWorkspace() {
         fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
       };
 
-      // Periodic polling fallback in case WebSocket drops or times out
-      pollInterval = setInterval(async () => {
+      // Periodic polling fallback in case WebSocket drops or times out.
+      // Tracked in a ref so it is cleared on unmount / sheet change.
+      pollIntervalRef.current = setInterval(async () => {
         try {
           const res = await fetchProject(projectId);
           const s = res.sheets?.find((sh) => sh.id === activeSheet.id);
@@ -829,8 +898,7 @@ export default function ProjectWorkspace() {
           if (data.step === 'completed') {
             onCompleted();
           } else if (data.step === 'failed') {
-            if (pollInterval) clearInterval(pollInterval);
-            ws.close();
+            stopDetectionResources();
             setDetecting(false);
             alert('Detection error: ' + data.message);
           }
@@ -841,6 +909,7 @@ export default function ProjectWorkspace() {
         // WebSocket error, fallback polling continues to monitor progress
       };
     } catch (err) {
+      stopDetectionResources();
       setDetecting(false);
       alert('Failed to trigger detection: ' + err);
     }
@@ -1189,6 +1258,8 @@ export default function ProjectWorkspace() {
                onSetTraceTool={setTraceTool}
                onRescan={handleRescan}
                onManualRun={handleManualRun}
+               colorOverrideMap={colorOverrideMap}
+               dimUncolored={mode === 'system' || mode === 'circuit'}
              />
           )}
 

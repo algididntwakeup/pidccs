@@ -1,5 +1,39 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Overlay Persistence, Cross-Tab Tracing, & Performance Hardening
+
+**Status**: Implemented and locally verified on 2026-09-18.
+
+### Scope
+
+- **Fixed disappearing line tracing across tab switches.** `viewer.open()` internally calls
+  `close()`, which runs `clearOverlays()` and empties the overlays container. The parent used to
+  call `viewer.open()` on every DIGITIZE ⇄ SYSTEM ⇄ CIRCUIT switch, silently destroying the
+  `InteractivePipeCanvas` SVG layer. The overlay is now re-attached on the OpenSeadragon `open`
+  event, so tracing survives mode changes.
+- **Eliminated the server-side marked-PNG base swap.** Circuit/System coloring is now rendered as a
+  vector layer via a client-computed `colorOverrideMap` (`systems[].circuits[].color` / `run_idxs`)
+  on top of the raw CAD image. The base image is pinned to `getRawImageUrl` in all modes, so no
+  full-resolution PNG is fetched/rendered on mode change.
+- **Stopped resource leaks that made the app heavier per project opened.** The detection
+  `pollInterval`, progress `WebSocket`, all toast `setTimeout`s, and the OpenSeadragon viewer are
+  now torn down on unmount / sheet change (`pollIntervalRef`, `detectionWsRef`, `toastTimeoutsRef`,
+  `stopDetectionResources`).
+- **Added HTTP caching + thumbnails for sheet imagery.** `/raw` now sends
+  `Cache-Control: public, max-age=31536000, immutable` + `ETag`. New `GET
+  /projects/{id}/sheets/{id}/thumbnail?size=` serves a cached downscaled PNG used by the project
+  cards (previously the cards downloaded full-resolution drawings).
+- **Cached the full-resolution base render for ROI re-scan.** `POST /trace-region` reuses
+  `ExportService._cached_base_image` instead of re-rasterizing the entire PDF on every request.
+
+### Verification
+
+- `pytest backend/tests -q`: **34 passed** (added `test_sheet_tiles_cache.py`).
+- `npx tsc --noEmit`: **0 errors**.
+- `npm run build`: **passed**.
+
+---
+
 ## Sprint Handover: Canvas Stability, Single Sidebar Tab, Re-scan ROI, & Manual Pen
 
 **Status**: Implemented and locally verified on 2026-09-18.
