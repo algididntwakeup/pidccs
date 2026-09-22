@@ -1,5 +1,59 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Line Continuity, Table Suppression, Vessel Curve & Box-Trace Stitching
+
+**Status**: Implemented, tested, and deployed locally on 2026-09-23.
+
+### Scope
+
+- **T-junction orthogonal snap (new `snap_t_junctions` in `pidcorr/lines.py`).** Skeleton graph
+  segmentation cropped branch edges at the dilated junction cluster, leaving a visible 5–15px gap at
+  every T. This pass walks every *dead-end* polyline endpoint; when it lies within `near_px`
+  (default 16px raw, DPI-scaled) of the **body** of another run and the approach is roughly
+  perpendicular (75°–105°), the endpoint is projected exactly onto the nearest point of that body.
+  Collinear butt-joints are left untouched (approach angle guard), and runs are never merged — only
+  the endpoint coordinate moves. Wired into `SkeletonLineTracer.trace` step 7b.
+- **Relaxed inline-valve gap bridging (`bridge_inline_valve_gaps`).** Signature widened to
+  `max_gap_px=115, tol_px=10, angle_tol_deg=20.0, containment_margin_px=12`. Two joining modes now:
+  1. **Containment** — when both facing pipe ends sit inside the *same* valve bbox (12px margin),
+     they merge *regardless of angle* (big/bulbous valves used to sever pipes with diagonal gaps).
+  2. **Collinear** — same-axis segments with tangent deviation ≤20° and a much larger 115px gap.
+  The old `has_valve_between` midpoint heuristic was replaced by the containment test.
+- **Table & border-frame suppression.** `suppress_drawing_margins` gained an absolute
+  `guard_px=15` band: any segment lying entirely within 15px of the outermost image edge (blueprint
+  border frame / coordinate ticks) is dropped independent of the paper-size ratio. Furniture
+  (title block / notes / revision grid) blackout already runs before skeletonization (step 3), so
+  table grid lines never reach the tracer.
+- **Curve preservation for vessel/equipment outlines (`_graph_segments`).** `approxPolyDP` used a
+  fixed `epsilon=1.5`, which turned smooth cylinder/ellipse boundaries into stiff zig-zag polylines.
+  The simplifier now measures the edge's chord *bow* (perpendicular deviation of the ordered pixels
+  from the p0→p1 chord): genuinely curved edges use a fine `epsilon=0.6`, straight orthogonal
+  edges keep `1.5`. Vertex density on arcs is preserved through chaining to the frontend/SVG.
+- **Box Trace stitching (`stitch_region_runs` + `/trace-region`).** The ROI endpoint now tries to
+  absorb a freshly traced path into existing runs instead of always appending a duplicate:
+  - **1-to-1** (new path touches exactly one existing end within 18px of the selection box) → the
+    existing run is *extended* (`base + ext` / `ext + base` with correct orientation); no new run.
+  - **1-to-2** (new path linearly bridges two pipe ends) → `M + S + F` merged into one polyline; the
+    second run (`F`) is dropped and its id reported as consumed → no duplicate run in DB/sidebar.
+  - **Ambiguous** (3+ touching ends, T-junction, non-collinear) → the new path stays an independent
+    run but its endpoints are force-snapped to the nearest existing endpoints.
+  The response adds `stitched: <n>` (count of consumed run ids).
+
+### Verification
+
+- Host backend suite: `pytest tests/ -q` → **48 passed** (was 41; +7 new tests in
+  `test_masking_and_runs.py` covering T-junction snap, collinear-gap guard, valve containment,
+  margin guard band, and all three stitching modes).
+- Regression files green: `test_snap_equipment.py`, `test_split_and_color.py`,
+  `test_masking_and_runs.py`.
+- Real P&ID A/B (`BCD3-605-42-PID-1-005-01`, 3309×2339): 135 runs, **0 border-frame leaks** inside
+  the 15px guard band, 18 runs retaining ≥4 vertices (arcs/elbows preserved).
+- Live `/trace-region` smoke test on project `9f4e4a36…` → `status: success`; second overlapping box
+  returned `stitched: 0` (no endpoint within 18px that pass — geometry-dependent) and appended the
+  region runs normally.
+
+---
+
 ## Sprint Handover: Right-Edge Tool Rack, Multi-Select Marquee & Non-Blocking Popover
 
 **Status**: Implemented, tested, and deployed locally on 2026-09-22.

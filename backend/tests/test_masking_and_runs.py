@@ -168,3 +168,86 @@ def test_roi_mode_bridges_ocr_masking_holes():
     # The bridged result should contain a run that spans most of the width.
     wide = [r for r in runs if (max(p[0] for p in r.points) - min(p[0] for p in r.points)) > 200]
     assert wide, "MORPH_CLOSE in ROI mode should bridge the small gap"
+
+
+# ---------------------------------------------------------------------------
+# Bagian 1: T-junction snap, valve gap bridging, border-frame guard band
+# ---------------------------------------------------------------------------
+
+from pidcorr.lines import (
+    snap_t_junctions,
+    suppress_drawing_margins,
+    stitch_region_runs,
+)
+
+def test_snap_t_junctions_pulls_dead_end_onto_perpendicular_body():
+    """A short branch ending 10px short of a perpendicular header is snapped onto it."""
+    header = PipeRun(points=[(0, 100), (300, 100)], axis="h")
+    branch = PipeRun(points=[(150, 90), (150, 40)], axis="v")  # dead-end at y=90, 10px above header
+    out = snap_t_junctions([header, branch], near_px=16)
+    b = next(r for r in out if r.axis == "v")
+    # The lower endpoint (nearest the header) must now touch y=100.
+    assert min(p[1] for p in b.points) == 100 or max(p[1] for p in b.points) == 100, \
+        "branch endpoint should be projected onto the header body"
+
+def test_snap_t_junctions_ignores_collinear_continuation():
+    """A collinear butt-joint gap must NOT be snapped (approach is not perpendicular)."""
+    a = PipeRun(points=[(0, 100), (100, 100)], axis="h")
+    b = PipeRun(points=[(110, 100), (200, 100)], axis="h")
+    out = snap_t_junctions([a, b], near_px=16)
+    pts_b = next(r for r in out if r.points[0][0] == 110).points
+    assert (110, 100) in [(int(p[0]), int(p[1])) for p in pts_b], "collinear gap must be left alone"
+
+def test_bridge_inline_valve_gaps_containment_without_angle():
+    """Two facing pipe ends inside the SAME valve bbox are bridged regardless of angle."""
+    r1 = PipeRun(points=[(50, 100), (100, 100)], axis="h")
+    r2 = PipeRun(points=[(110, 88), (170, 88)], axis="h")  # offset vertically (diagonal-ish gap)
+    valves = [{"coarse": "valve", "x1": 95, "y1": 80, "x2": 115, "y2": 130}]
+    bridged = bridge_inline_valve_gaps([r1, r2], detections=valves)
+    assert len(bridged) == 1, "endpoints inside the same valve bbox must merge"
+
+def test_suppress_drawing_margins_guard_band():
+    """A border segment fully inside the 15px perimeter band is dropped."""
+    page = (2000, 1500)
+    frame = PipeRun(points=[(5, 8), (1990, 8)], axis="h")       # 8px from top -> inside guard band
+    real = PipeRun(points=[(500, 700), (900, 700)], axis="h")  # interior pipe -> kept
+    out = suppress_drawing_margins([frame, real], page_wh=page)
+    assert frame not in out, "border frame inside guard band must be suppressed"
+    assert real in out, "interior pipe must survive"
+
+def test_stitch_region_runs_one_to_one_extends_existing():
+    """A new ROI path touching exactly one existing end extends it (no new run)."""
+    existing = [{"id": "runA", "points": [[0, 100], [100, 100]]}]
+    new = [{"id": "rescan-1", "points": [[100, 100], [200, 100]]}]
+    upd, remaining, consumed = stitch_region_runs(new, existing, bbox=(95, 95, 205, 105))
+    assert not remaining, "the new run should be absorbed"
+    assert consumed == ["rescan-1"], "the new run id should be marked consumed"
+    assert len(upd) == 1
+    assert upd[0]["points"][-1] == [200, 100], "existing run should be extended"
+
+def test_stitch_region_runs_one_to_two_bridges_and_drops():
+    """A new path bridging two pipe ends merges them and drops the second run."""
+    existing = [
+        {"id": "runM", "points": [[0, 100], [100, 100]]},
+        {"id": "runF", "points": [[200, 100], [300, 100]]},
+    ]
+    new = [{"id": "rescan-x", "points": [[100, 100], [200, 100]]}]
+    upd, remaining, consumed = stitch_region_runs(new, existing, bbox=(95, 95, 205, 105))
+    assert not remaining, "bridged run must be absorbed"
+    assert len(upd) == 1, "the two existing runs must collapse into one"
+    pts = upd[0]["points"]
+    assert pts[0] == [0, 100] and pts[-1] == [300, 100], "merged polyline spans M..F"
+    assert set(consumed) == {"rescan-x", "runF"}, "both the new and the merged-away F are consumed"
+
+def test_stitch_region_runs_ambiguous_keeps_independent_but_snaps():
+    """With 3+ touching ends (T-junction) the new run is kept but endpoints snapped."""
+    existing = [
+        {"id": "runA", "points": [[0, 100], [100, 100]]},
+        {"id": "runB", "points": [[200, 100], [300, 100]]},
+        {"id": "runC", "points": [[100, 0], [100, 100]]},
+    ]
+    new = [{"id": "rescan-amb", "points": [[105, 100], [195, 100]]}]
+    upd, remaining, consumed = stitch_region_runs(new, existing, bbox=(95, 95, 205, 105))
+    assert len(remaining) == 1, "ambiguous branch must remain independent"
+    assert not consumed
+    assert len(upd) == 3, "no existing run should be dropped"

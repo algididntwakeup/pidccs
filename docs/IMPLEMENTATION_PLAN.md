@@ -1457,3 +1457,63 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet (tugas user).
 2. **E2E Tambahan**: integrasi CI; skenario edit lain (split trace, tag duplikat).
 3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.
+
+---
+
+## Sprint Handover: Line Continuity, Table Suppression, Vessel Curve & Box-Trace Stitching
+
+**Status**: Implemented, tested (48 passed), and deployed locally on 2026-09-23.
+
+### 1. Ringkasan Perubahan
+
+- **T-JUNCTION ORTHOGONAL SNAP** — fungsi baru `snap_t_junctions` di `pidcorr/lines.py`.
+  Endpoint dead-end yang berjarak ≤ `near_px` (16px raw, DPI-scaled) dari **badan** run lain dan
+  arah datangnya tegak lurus (75°–105°) diproyeksikan tepat ke badan garis utama. Butt-joint
+  kolinear tidak disentuh (guard sudut); tidak ada merge run, hanya koordinat endpoint yang
+  digeser. Dipanggil di `SkeletonLineTracer.trace` step 7b.
+- **RELAKSASI VALVE GAP BRIDGING** — `bridge_inline_valve_gaps` diperluas menjadi
+  `max_gap_px=115, tol_px=10, angle_tol_deg=20.0, containment_margin_px=12` dengan dua mode:
+  (1) **Containment** — kedua ujung pipa berada di dalam bbox valve yang *sama* → sambung tanpa
+  pandang sudut; (2) **Kolinear** — sudut tangent ≤20° dan gap s/d 115px. Heuristik midpoint
+  `has_valve_between` lama diganti uji containment.
+- **SUPPRESI BORDER FRAME / TABEL** — `suppress_drawing_margins` menambah pita pengaman absolut
+  `guard_px=15`: segmen yang seluruhnya berada ≤15px dari tepi citra terluar (bingkai biru/koordinat)
+  dibuang tanpa memandang rasio kertas. Blackout furniture (title block/tabel revisi) tetap jalan
+  sebelum skeletisasi.
+- **PRESERVASI KURVA BEJANA** — `_graph_segments` kini mengukur *bow* chord tiap edge; edge
+  melengkung memakai `epsilon=0.6`, edge lurus ortogonal tetap `1.5`. Titik kurva silinder/elips
+  tidak lagi dipangkas menjadi polyline patah-patah.
+- **BOX TRACE STITCHING** — fungsi baru `stitch_region_runs` + integrasi di `/trace-region`:
+  - **1-to-1**: jalur baru menyentuh tepat satu ujung run eksisting (≤18px dari bbox seleksi) →
+    run eksisting **diperpanjang**, tanpa run baru.
+  - **1-to-2**: jalur baru menjembatani dua ujung pipa secara linear → `M+S+F` digabung, run `F`
+    dihapus (id-nya dilaporkan `consumed`), mencegah duplikasi di DB/sidebar.
+  - **Ambigu** (>2 ujung, T-junction, tak kolinear) → jalur baru tetap run independen, ujungnya
+    di-snap ke titik terdekat run eksisting.
+  - Respons endpoint bertambah field `stitched: <n>`.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py) | CV Core | `snap_t_junctions` (baru); `bridge_inline_valve_gaps` (containment + 20° + 115px); `suppress_drawing_margins` guard band 15px; `stitch_region_runs` + helper (baru). |
+| [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py) | CV Core | Wire T-junction snap (step 7b); relax valve gap ke 115px; adaptive `approxPolyDP` epsilon (0.6 curve / 1.5 straight). |
+| [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py) | API | `/trace-region` memanggil `stitch_region_runs`; respons + `stitched`. |
+| [`backend/tests/test_masking_and_runs.py`](file:///c:/Werk/pidccs/backend/tests/test_masking_and_runs.py) | Test | +7 tes: T-junction snap, guard kolinear, valve containment, margin guard band, 3 mode stitching. |
+
+### 3. Verifikasi
+
+- `pytest tests/ -q` (host) → **48 passed** (naik dari 41; +7 tes baru).
+- Regresi LULUS: `test_snap_equipment.py`, `test_split_and_color.py`, `test_masking_and_runs.py`.
+- A/B citra nyata `BCD3-605-42-PID-1-005-01` (3309×2339): 135 runs, **0 kebocoran border-frame**
+  di pita 15px, 18 run mempertahankan ≥4 vertex (kurva/elbow terjaga).
+- Smoke `/trace-region` live (proyek `9f4e4a36…`): `status: success`, respons menyertakan
+  `stitched`; kotak tumpang-tindih kedua menyambung normal.
+- Docker: `restart api worker` (perubahan backend + pidcorr; tidak ada perubahan perintah Celery).
+
+### 4. Handover Roadmap: Task Berikutnya yang Belum Dieksekusi
+
+1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet (tugas user).
+2. **E2E Tambahan**: integrasi CI; skenario edit lain (split trace, tag duplikat); validasi visual
+   kurva bejana & T-junction di Playwright.
+3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.

@@ -464,6 +464,285 @@ def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
     return out
 
 
+def snap_t_junctions(runs, near_px=16, min_angle_deg=75.0, max_angle_deg=105.0):
+    """T-JUNCTION ORTHOGONAL SNAP (pre-merge continuity fix).
+
+    Skeleton graph segmentation often leaves a branch pipe ending a few pixels SHORT of the
+    main run it feeds into (a T-junction), because the junction node cluster is dilated and
+    the branch edge is cropped at the cluster boundary. The result is a visible 5-15px gap at
+    every T-junction.
+
+    This pass walks every polyline endpoint (dead-end, i.e. an endpoint that is not shared with
+    another run) and, when it lies within `near_px` of the BODY of another run AND the axis of
+    approach is roughly perpendicular (default 75-105 degrees), projects the endpoint exactly
+    onto the nearest point of that run's body. Endpoints whose approach is nearly collinear
+    (a straight continuation / butt joint) are left untouched so we never fold a line onto
+    itself.
+
+    Conservative by design:
+      * only dead-end endpoints are considered (no touching an endpoint that already meets a run),
+      * the projected foot must fall strictly INSIDE the target segment (not at a vertex), so a
+        simple extension along the branch axis is preferred and no spurious diagonal is created,
+      * runs are never merged here - only the endpoint coordinate is moved.
+    """
+    if not runs or len(runs) < 2:
+        return runs
+
+    def _pts(r):
+        return r.points if hasattr(r, "points") else r.get("points", [])
+
+    def _endpoints():
+        """Map rounded endpoint coordinate -> count, to detect shared (non-dead-end) vertices."""
+        cnt = {}
+        for r in runs:
+            pts = _pts(r)
+            if len(pts) < 2:
+                continue
+            for p in (pts[0], pts[-1]):
+                key = (int(round(p[0])), int(round(p[1])))
+                cnt[key] = cnt.get(key, 0) + 1
+        return cnt
+
+    counts = _endpoints()
+    lo, hi = math.cos(math.radians(max_angle_deg)), math.cos(math.radians(min_angle_deg))
+
+    if hasattr(runs[0], "points"):
+        new_runs = [PipeRun(points=[(int(p[0]), int(p[1])) for p in _pts(r)],
+                            axis=getattr(r, "axis", "poly"), pid=getattr(r, "pid", ""),
+                            fluid=getattr(r, "fluid", ""), underline=getattr(r, "underline", False),
+                            color=getattr(r, "color", "#2563EB")) for r in runs]
+    else:
+        new_runs = [dict(r) for r in runs]
+
+    for i, r in enumerate(new_runs):
+        pts = [list(p) for p in _pts(r)]
+        if len(pts) < 2:
+            continue
+        for end_idx in (0, -1):
+            px, py = float(pts[end_idx][0]), float(pts[end_idx][1])
+            key = (int(round(px)), int(round(py)))
+            if counts.get(key, 0) > 1:
+                continue  # shared vertex -> already connected
+            nb = pts[1] if end_idx == 0 else pts[-2]
+            vx, vy = px - float(nb[0]), py - float(nb[1])
+            vlen = math.hypot(vx, vy)
+            if vlen < 1e-6:
+                continue
+            vx, vy = vx / vlen, vy / vlen
+
+            best = None
+            best_d = float("inf")
+            for j, other in enumerate(new_runs):
+                if j == i:
+                    continue
+                opts = _pts(other)
+                for k in range(len(opts) - 1):
+                    ax, ay = float(opts[k][0]), float(opts[k][1])
+                    bx, by = float(opts[k + 1][0]), float(opts[k + 1][1])
+                    dx, dy = bx - ax, by - ay
+                    seg_len_sq = dx * dx + dy * dy
+                    if seg_len_sq < 1e-6:
+                        continue
+                    t = ((px - ax) * dx + (py - ay) * dy) / seg_len_sq
+                    if t <= 0.02 or t >= 0.98:
+                        continue  # foot at a vertex -> an endpoint joint, not a T
+                    fx, fy = ax + t * dx, ay + t * dy
+                    d = math.hypot(px - fx, py - fy)
+                    if d < 1e-6 or d > near_px or d >= best_d:
+                        continue
+                    # approach must be roughly perpendicular to the target segment
+                    slen = math.sqrt(seg_len_sq)
+                    cos_ang = abs(vx * (dx / slen) + vy * (dy / slen))
+                    if lo <= cos_ang <= hi:
+                        best_d = d
+                        best = (fx, fy)
+            if best is not None:
+                pts[end_idx] = [int(round(best[0])), int(round(best[1]))]
+
+        clean = [(int(p[0]), int(p[1])) for p in pts]
+        if hasattr(r, "points"):
+            new_runs[i] = PipeRun(points=clean, axis=getattr(r, "axis", "poly"),
+                                  pid=getattr(r, "pid", ""), fluid=getattr(r, "fluid", ""),
+                                  underline=getattr(r, "underline", False),
+                                  color=getattr(r, "color", "#2563EB"))
+        else:
+            nr = dict(r)
+            nr["points"] = clean
+            nr["x1"] = min(p[0] for p in clean)
+            nr["y1"] = min(p[1] for p in clean)
+            nr["x2"] = max(p[0] for p in clean)
+            nr["y2"] = max(p[1] for p in clean)
+            nr["color"] = r.get("color", "#2563EB")
+            new_runs[i] = nr
+
+    return new_runs
+
+def stitch_region_runs(new_runs, existing_runs, bbox, snap_px=18):
+    """BOX TRACE STITCHING (merge jalur ROI baru ke run eksisting).
+
+    Dipanggil setelah `/trace-region` men-trace isi kotak seleksi. Alih-alih selalu menambah
+    run independen (yang membuat pipa terduplikasi di DB/sidebar), coba sambungkan jalur baru
+    ke pipa yang sudah ada:
+
+      * Cari endpoint run eksisting yang berada DI DALAM atau <= `snap_px` dari bbox seleksi.
+      * 1-to-1 (baru menyentuh TEPAT satu ujung run eksisting) -> PANJANGKAN run itu
+        (prefix/suffix titik baru), tanpa run baru.
+      * 1-to-2 (jalur baru menjembatani ujung Pipa M dan ujung Pipa F secara linear) ->
+        GABUNG M + S + F jadi satu polyline, hapus F (hindari duplikasi).
+      * AMBIGU (>2 kandidat, percabangan T-junction, arah tak kolinear) -> simpan jalur baru
+        sebagai run independen, TAPI snap ujungnya ke titik terdekat run eksisting.
+
+    `bbox` = (x1, y1, x2, y2) koordinat global seleksi (SEBELUM padding) untuk mencari kandidat.
+    `new_runs`/`existing_runs` = list of dict (koordinat global) dengan key 'points'.
+
+    Mengembalikan `(updated_existing, remaining_new, consumed_ids)`: existing_runs yang mungkin
+    sudah diperpanjang, new_runs yang belum terserap, dan id run baru yang sudah di-merge
+    (untuk dibuang dari daftar yang akan disimpan).
+    """
+    if not new_runs:
+        return existing_runs, [], []
+
+    bx1, by1, bx2, by2 = [float(v) for v in bbox]
+
+    def _pts(r):
+        return [tuple(map(float, p)) for p in r.get("points", [])]
+
+    def _in_or_near(pt):
+        px, py = pt
+        return (bx1 - snap_px <= px <= bx2 + snap_px) and (by1 - snap_px <= py <= by2 + snap_px)
+
+    def _dir(a, b):
+        vx, vy = b[0] - a[0], b[1] - a[1]
+        l = math.hypot(vx, vy)
+        return (vx / l, vy / l) if l > 1e-6 else (0.0, 0.0)
+
+    def _cos(u, v):
+        return max(-1.0, min(1.0, u[0] * v[0] + u[1] * v[1]))
+
+    existing = [dict(r) for r in existing_runs]
+    remaining_new = []
+    consumed_ids = []
+
+    for nr in new_runs:
+        npts = [list(map(int, p)) for p in nr.get("points", [])]
+        if len(npts) < 2:
+            continue
+        n_a, n_b = npts[0], npts[-1]
+
+        # Candidate existing endpoints touching the selection bbox.
+        cands = []  # (run_index, which_end('a'|'b'), dist_to_box_mid, tangent_dir)
+        for ri, er in enumerate(existing):
+            epts = _pts(er)
+            if len(epts) < 2:
+                continue
+            for which, end, nb in (("a", epts[0], epts[1]), ("b", epts[-1], epts[-2])):
+                if _in_or_near(end):
+                    # Determine which NEW endpoint is nearest to this existing end.
+                    d_new_a = math.hypot(end[0] - n_a[0], end[1] - n_a[1])
+                    d_new_b = math.hypot(end[0] - n_b[0], end[1] - n_b[1])
+                    cands.append({
+                        "ri": ri, "which": which,
+                        "end": (int(round(end[0])), int(round(end[1]))),
+                        "d": min(d_new_a, d_new_b),
+                        "new_end": "a" if d_new_a <= d_new_b else "b",
+                        "inward": _dir(end, nb),  # tangent pointing INTO the existing run
+                    })
+
+        # Prefer the closest existing ends; de-duplicate by run index (keep nearest end).
+        by_run = {}
+        for c in cands:
+            k = c["ri"]
+            if k not in by_run or c["d"] < by_run[k]["d"]:
+                by_run[k] = c
+        matching = sorted(by_run.values(), key=lambda c: c["d"])
+
+        if len(matching) == 1:
+            # --- 1-to-1: extend the single existing run. ---
+            m = matching[0]
+            ext = [tuple(p) for p in npts]
+            # Orient the new path so ext[0] is the point that coincides with the matched
+            # existing end (m["end"]); the path then leaves the joint outward.
+            if m["new_end"] == "b":
+                ext = ext[::-1]
+            base = list(_pts(existing[m["ri"]]))
+            if m["which"] == "a":
+                merged_pts = [[int(p[0]), int(p[1])] for p in (ext[::-1] + base)]
+            else:
+                merged_pts = [[int(p[0]), int(p[1])] for p in (base + ext)]
+            _apply_points(existing[m["ri"]], merged_pts)
+            consumed_ids.append(nr.get("id"))
+        elif len(matching) == 2:
+            # --- 1-to-2: bridge M (a) and F (b). Check collinearity sanity. ---
+            m, f = matching[0], matching[1]
+            if m["ri"] == f["ri"]:
+                remaining_new.append(nr)
+                continue
+            # Orient new path so its start meets M and its end meets F.
+            ext = [tuple(p) for p in npts]
+            if m["new_end"] == "b" and f["new_end"] == "a":
+                pass
+            elif m["new_end"] == "a" and f["new_end"] == "b":
+                ext = ext[::-1]
+            else:
+                # Both existing ends nearest to the SAME new endpoint -> not a clean 1-to-1 bridge.
+                remaining_new.append(_snap_new_endpoints(nr, matching))
+                continue
+
+            base_m = list(_pts(existing[m["ri"]]))
+            base_f = list(_pts(existing[f["ri"]]))
+            mid = [[int(p[0]), int(p[1])] for p in ext]
+            if m["which"] == "a":
+                base_m = base_m[::-1]
+            if f["which"] == "b":
+                base_f = base_f[::-1]
+            merged_pts = [[int(p[0]), int(p[1])] for p in base_m] + mid + [[int(p[0]), int(p[1])] for p in base_f]
+            _apply_points(existing[m["ri"]], merged_pts)
+            consumed_ids.append(nr.get("id"))
+            consumed_ids.append(existing[f["ri"]].get("id"))
+            existing[f["ri"]]["_drop"] = True
+        else:
+            # --- Ambiguous (T-junction / many ways): keep independent, snap endpoints. ---
+            remaining_new.append(_snap_new_endpoints(nr, matching))
+
+    existing = [r for r in existing if not r.get("_drop")]
+    consumed = [cid for cid in consumed_ids if cid]
+    return existing, remaining_new, consumed
+
+
+def _apply_points(run, clean_pts):
+    run["points"] = clean_pts
+    run["x1"] = min(p[0] for p in clean_pts)
+    run["y1"] = min(p[1] for p in clean_pts)
+    run["x2"] = max(p[0] for p in clean_pts)
+    run["y2"] = max(p[1] for p in clean_pts)
+
+
+def _snap_new_endpoints(nr, matching):
+    """Paksa ujung run baru snap menempel ke titik terdekat run eksisting (mode ambigu)."""
+    out = dict(nr)
+    pts = [list(map(int, p)) for p in nr.get("points", [])]
+    if len(pts) < 2 or not matching:
+        return out
+    for end_idx in (0, -1):
+        px, py = pts[end_idx]
+        best = None
+        best_d = float("inf")
+        for m in matching:
+            ex, ey = m["end"]
+            d = math.hypot(px - ex, py - ey)
+            if d < best_d:
+                best_d = d
+                best = (ex, ey)
+        if best is not None:
+            pts[end_idx] = [int(best[0]), int(best[1])]
+    out["points"] = pts
+    out["x1"] = min(p[0] for p in pts)
+    out["y1"] = min(p[1] for p in pts)
+    out["x2"] = max(p[0] for p in pts)
+    out["y2"] = max(p[1] for p in pts)
+    return out
+
+
 def split_poly_run(
     runs: list,
     run_idx: int,
@@ -799,21 +1078,30 @@ def suppress_box_outlines(segs, boxes, dpi=350, band_pt=7):
     return out
 
 
-def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038):
+def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038, guard_px=15):
     """Buang segmen yang berada di atau sangat dekat dengan margin perimeter kertas luar.
     Garis tepi bingkai gambar (drawing frame border), tick koordinat tepi, dan garis batas
-    kertas terluar adalah artifak drafting lembar gambar, BUKAN pipa proses."""
+    kertas terluar adalah artifak drafting lembar gambar, BUKAN pipa proses.
+
+    `guard_px` = pita pengaman ABSOLUT (default 15px) di tepi terluar citra: apa pun yang
+    seluruhnya berada di dalam pita ini (garis bingkai biru/grid tepi/tick) dibuang tanpa
+    memandang rasio, sehingga frame border tak pernah ikut ter-trace walau kertas sangat besar.
+    """
     if not segs:
         return []
     W, H = page_wh
-    mx = int(W * margin_ratio)
-    my = int(H * margin_ratio)
+    mx = max(int(W * margin_ratio), int(guard_px))
+    my = max(int(H * margin_ratio), int(guard_px))
     out = []
     for s in segs:
         xs = [p[0] for p in s.points]
         ys = [p[1] for p in s.points]
         x_min, x_max = min(xs), max(xs)
         y_min, y_max = min(ys), max(ys)
+
+        # 0. Guard band absolut: segmen SELURUHNYA di dalam pita 15px tepi citra -> frame border.
+        if y_max <= guard_px or y_min >= H - guard_px or x_max <= guard_px or x_min >= W - guard_px:
+            continue
 
         # 1. Terletak seluruhnya di dalam pita margin tepi kertas
         if y_max <= my or y_min >= H - my or x_max <= mx or x_min >= W - mx:
@@ -966,9 +1254,18 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
     return out
 
 
-def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
+def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
+                            angle_tol_deg=20.0, containment_margin_px=12):
     """Sambungkan pipa lurus yang terpotong oleh katup inline (valve) atau celah kecil.
-    Menghubungkan dua PipeRun terpisah melewati gap katup menjadi satu polyline bersambung."""
+    Menghubungkan dua PipeRun terpisah melewati gap katup menjadi satu polyline bersambung.
+
+    Dua mode sambung:
+      1. CONTAINMENT (paling andal): bila kedua ujung pipa yang berhadapan sama-sama menyentuh /
+         berada di dalam bounding box valve yang SAMA, sambungkan tanpa memandang deviasi sudut
+         (valve besar/bulbous sering memutus pipa dengan gap diagonal).
+      2. KOLINEAR: bila kedua segmen searah H/V dan deviasi sudut <= `angle_tol_deg`, toleransi
+         posisi diperlonggar (`tol_px`) dan gap maksimum dinaikkan (`max_gap_px`).
+    """
     if not runs or len(runs) < 2:
         return runs
 
@@ -984,6 +1281,17 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
             (vx1 - max_gap_px <= px <= vx2 + max_gap_px) and (vy1 - max_gap_px <= py <= vy2 + max_gap_px)
             for vx1, vy1, vx2, vy2 in valve_boxes
         )
+
+    def valve_containing(pt):
+        """Kembalikan index bbox valve yang memuat `pt` (dengan margin), atau None."""
+        px, py = pt
+        for idx, (vx1, vy1, vx2, vy2) in enumerate(valve_boxes):
+            if (vx1 - containment_margin_px <= px <= vx2 + containment_margin_px) and \
+               (vy1 - containment_margin_px <= py <= vy2 + containment_margin_px):
+                return idx
+        return None
+
+    cos_tol = math.cos(math.radians(angle_tol_deg))
 
     out = list(runs)
     merged = True
@@ -1024,6 +1332,8 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
                     # Tangent check: both incoming segment (prevA -> pA) and outgoing (pB -> nextB) must be collinear
                     vA = (pA[0] - prevA[0], pA[1] - prevA[1])
                     vB = (nextB[0] - pB[0], nextB[1] - pB[1])
+                    lenA = math.hypot(*vA)
+                    lenB = math.hypot(*vB)
 
                     is_hA = abs(vA[0]) >= 1.5 * abs(vA[1])
                     is_hB = abs(vB[0]) >= 1.5 * abs(vB[1])
@@ -1033,16 +1343,19 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
                     is_h = is_hA and is_hB and dy <= tol_px and dx > 0
                     is_v = is_vA and is_vB and dx <= tol_px and dy > 0
 
-                    has_valve_between = False
-                    if valve_boxes and (is_hA == is_hB and is_vA == is_vB):
-                        mid_x = (pA[0] + pB[0]) / 2.0
-                        mid_y = (pA[1] + pB[1]) / 2.0
-                        for vx1, vy1, vx2, vy2 in valve_boxes:
-                            if (vx1 - 15 <= mid_x <= vx2 + 15) and (vy1 - 15 <= mid_y <= vy2 + 15):
-                                has_valve_between = True
-                                break
+                    # Loosened collinearity: angle between the two tangents <= angle_tol_deg
+                    collinear = False
+                    if lenA > 1e-6 and lenB > 1e-6 and (is_hA == is_hB and is_vA == is_vB):
+                        cos_ang = abs((vA[0] * vB[0] + vA[1] * vB[1]) / (lenA * lenB))
+                        collinear = cos_ang >= cos_tol
 
-                    if is_h or is_v or has_valve_between:
+                    # Containment: both facing endpoints sit inside the SAME valve bbox
+                    contained = False
+                    va, vb = valve_containing(pA), valve_containing(pB)
+                    if va is not None and va == vb:
+                        contained = True
+
+                    if is_h or is_v or collinear or contained:
                         first_pts = list(pts2 if swap else pts1)
                         second_pts = list(pts1 if swap else pts2)
 

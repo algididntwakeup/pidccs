@@ -110,6 +110,7 @@ async def trace_region(
     from ..config import settings
     from ..services.export_service import ExportService
     from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
+    from pidcorr.lines import stitch_region_runs
 
     project = await ProjectService.get_project(db, project_id)
     if not project:
@@ -198,12 +199,21 @@ async def trace_region(
             retained_runs.append(r)
         current_runs = retained_runs
 
+    # --- Box Trace stitching (Bagian 3) -----------------------------------------------
+    # Try to absorb the freshly traced region path into existing runs instead of always
+    # appending a duplicate: extend a touched pipe (1-to-1) or bridge two pipes (1-to-2,
+    # dropping the merged target). Ambiguous branches stay independent but snap endpoints.
+    current_runs, new_runs, consumed_ids = stitch_region_runs(
+        new_runs, current_runs, bbox=(x1, y1, x2, y2), snap_px=18,
+    )
+
     result["runs"] = current_runs + new_runs
     sheet.result_json = result
     await db.commit()
     return {
         "status": "success",
         "new_runs": new_runs,
+        "stitched": len(consumed_ids),
         "total_runs": len(result["runs"]),
         "result": result,
     }

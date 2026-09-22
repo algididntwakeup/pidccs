@@ -11,6 +11,7 @@ from ..lines import (
     suppress_equipment_interior,
     snap_endpoints_to_equipment,
     suppress_furniture,
+    snap_t_junctions,
     suppress_box_outlines,
     detect_boxes,
     suppress_drawing_margins,
@@ -210,9 +211,25 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
             pts.sort(key=lambda pt: (pt[0] - p0[0]) * nx + (pt[1] - p0[1]) * ny)
         ordered_points = [p0] + [(int(x), int(y)) for x, y in pts[::max(1, len(pts)//15)]] + [p1]
 
-        # Simplify collinear points along edge
+        # Simplify collinear points along edge. For STRAIGHT edges a coarse epsilon (1.5) is
+        # ideal: the skeleton is a 1px staircase and we want clean orthogonal runs. But
+        # vessel/equipment cylinder outlines (ellipse/arc boundaries) live in the SAME skeleton:
+        # a coarse epsilon turns their smooth curve into a stiff zig-zag. So we branch: if the
+        # edge is a genuine curve (its ordered pixels bow away from the p0->p1 chord), simplify
+        # with a much finer epsilon (0.5-0.8) to keep the arc smooth and vertex-dense.
+        pts_all = [(int(x), int(y)) for x, y in pts]
+        chord_len = max(1.0, math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        curve_bow = 0.0
+        if len(pts_all) >= 3:
+            ux, uy = (p1[0] - p0[0]) / chord_len, (p1[1] - p0[1]) / chord_len
+            for qx, qy in pts_all[:: max(1, len(pts_all) // 24)]:
+                # perpendicular distance from the p0->p1 chord
+                perp = abs((qx - p0[0]) * (-uy) + (qy - p0[1]) * ux)
+                curve_bow = max(curve_bow, perp)
+        is_curved = curve_bow > max(1.5, 0.035 * chord_len)
+        eps = 0.6 if is_curved else 1.5
         pts_arr = np.array(ordered_points, dtype=np.int32).reshape((-1, 1, 2))
-        approx = cv2.approxPolyDP(pts_arr, epsilon=1.5, closed=False)
+        approx = cv2.approxPolyDP(pts_arr, epsilon=eps, closed=False)
         clean_pts = [(int(pt[0][0]), int(pt[0][1])) for pt in approx]
         if len(clean_pts) < 2:
             clean_pts = [p0, p1]
@@ -523,8 +540,12 @@ class SkeletonLineTracer(BaseLineTracer):
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
         filtered = bridge_collinear_headers(filtered, max_gap_px=55)
 
-        # 7. Bridge pipe runs cut by inline valves
-        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=90)
+        # 7. Bridge pipe runs cut by inline valves (relaxed: containment + 20deg collinearity, 115px gap)
+        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115)
+
+        # 7b. T-junction orthogonal snap: pull dead-end endpoints onto the body of a
+        #     perpendicular run so branches meet their header without a 5-15px gap.
+        filtered = snap_t_junctions(filtered, near_px=max(12, int(16 * (dpi / 350.0))))
 
         # 8. Post-filter: drop isolated short diagonal strokes (surviving text/hand scratches)
         #    that do not attach to any detected symbol. No-op when detections is empty.
