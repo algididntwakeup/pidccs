@@ -1,5 +1,39 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Canvas Pan Hotkey, Arrow Nudge, Popover Backspace Fix, Halo Leak & Piping Tag Continuity
+
+**Status**: Implemented, tested, and deployed locally on 2026-09-24.
+
+### Bagian 1 — Hotkey Pan sementara (Ctrl/Space hold)
+- `frontend/src/components/InteractivePipeCanvas.tsx`: menambah state `tempPan` + listener `keydown`/`keyup` untuk `Control`/`Meta`/`Space` (dengan guard saat fokus di input/textarea/select/contentEditable). Selama ditahan: layer SVG di-set `pointer-events:none`, `viewer.setMouseNavEnabled(true)`, kursor `grab`. Saat dilepas interaksi tool aktif dipulihkan. `blur` window juga mematikan pan agar tidak nyangkut.
+
+### Bagian 2 — Micro-nudge tombol panah 1px / 5px
+- `InteractivePipeCanvas.tsx`: listener global `ArrowUp/Down/Left/Right` dengan guard input. `step = Shift ? 5 : 1`. Offset kumulatif per run (`nudgeOffsets`) di-apply di render untuk feedback instan; commit ke backend via `onUpdateRunPoints` di-debounce 260ms.
+
+### Bagian 3 — Perbaikan bug Backspace/Delete di popover tag
+- `frontend/src/app/project/[id]/page.tsx`: guard ketat `e.target.tagName` (INPUT/TEXTAREA/SELECT/contentEditable) di baris paling atas handler shortcut global — tombol Delete/Backspace tidak lagi menghapus pipa saat user sedang rename tag.
+- `InteractivePipeCanvas.tsx`: guard yang sama di `handleKeyDown` kanvas + `onKeyDown={e => { e.stopPropagation(); ... }}` pada input tag popover.
+
+### Bagian 4 — Halo oranye nyangkut & klik split
+- **Seleksi berbasis ID**: `page.tsx` kini menyimpan `selectedRunIds: Set<string>` sebagai sumber kebenaran; `selectedRunIndices` di-derive terhadap `result.runs` saat render. ID stabil melintasi reindex backend (split/delete/re-scan) sehingga halo oranye tak bisa tertinggal di pipa yang sudah hilang. Setter kompatibel `setSelectedRunIndices` menerjemahkan indeks→ID; `selectRunIds` dipakai untuk split/manual-add (array baru sudah diketahui).
+- **Klik split**: SVG diberi `pointer-events:all` saat `splitMode && selection==1` (sebelumnya `none` di tool pan → mousemove/handler klik tak menerima event). `handleLineClick` juga fallback menghitung titik potong langsung dari koordinat klik bila hover-preview belum ada.
+
+### Bagian 5 — Kontinuitas jalur pipa & propagasi tag
+- `pidcorr/lines.py`: fungsi baru `chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12, branch_tol_px=10)` — menyatukan run segaris yang berjarak ≤15px berdasarkan tangent ujung, menolak merge bila ada run ketiga bercabang di titik sambung (guard T-junction). Helper `_merge_chain`, `_has_branch`. Menjaga axis `h/v/d/poly` dengan benar (diagonal tak dimutilasi).
+- `pidcorr/implementations/skeleton_tracer.py`: `chain_collinear_segments` dipanggil pada step 7a (setelah bridging valve, sebelum snap-T), DPI-scaled.
+- `pidcorr/propagate.py`: fungsi baru `propagate_run_labels(result, dpi)` — merambatkan **tag pipa penuh** (`run['label']`) via graf konektivitas `build_adjacency` (menghormati boundary equipment/spec-break). Seed = run berlabel; BFS multi-sumber deterministik; label asli tak pernah ditimpa; run terputus tetap kosong. Menulis `result['label_propagation'] = {n_inferred, n_seeded}`.
+- `pidcorr/orchestrator.py`: `propagate_run_labels` dipanggil di Stage 4b setelah semua run punya `id`/`label`, mencegah jalur transmisi terpecah menjadi garis anonim.
+
+### Verifikasi
+- `pytest backend/tests/ -q` → **58 passed** di host maupun di dalam container (`docker compose exec api pytest` → 58 passed in ~274s). +10 test baru (5 chaining di `test_masking_and_runs.py`, 4 label-propagation, 1 lone-diagonal axis).
+- Real P&ID A/B (`BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png`, 3309×2339): 135 → **129 runs**, `runs_with_ge4_vertices` 18 → 21 (crack kecil tergabung jadi polyline, bentuk belokan utuh). Axis dist: h63/v54/poly6/d6.
+- Live `/trace-region` di project `9f4e4a36-…`, sheet `e9a4d33e-…` → `status: success`.
+- Smoke test `propagate_run_labels` di dalam container api → label menular ke run tersambung, `n_inferred:1`.
+- `npm run build` sukses; `npx tsc --noEmit` bersih.
+
+### Deploy
+- `docker compose build frontend` + `up -d frontend`; `docker compose restart api worker` (backend bind-mounted). 5 container up/healthy.
+
 ## Sprint Handover: Line Continuity, Table Suppression, Vessel Curve & Box-Trace Stitching
 
 **Status**: Implemented, tested, and deployed locally on 2026-09-23.

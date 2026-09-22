@@ -481,6 +481,81 @@ def apply_conn_point_classes(result, lab, dpi=350, tol_pt=TOL_PT):
     return n
 
 
+def propagate_run_labels(result, dpi=350, max_dist_pt=None):
+    """Rambatkan TAG pipa (run['label'], mis. '605-2-GR-CSA-211') dari segmen berlabel
+    ke segmen-segmen lanjutan yang tersambung di sepanjang JALUR yang sama, sampai jalur
+    berakhir di simbol peralatan / boundary valve / mata panah (arrowhead).
+
+    Ini MELENGKAPI propagate_labels (yang hanya menurunkan fluid+pclass) dengan menempelkan
+    LINE NUMBER utuh supaya tidak terbentuk garis panjang "tanpa nama" yang sebenarnya satu
+    jalur transmisi pipa.
+
+    Cara kerja:
+      * Bangun graf konektivitas pipa (build_adjacency) + titik-titik pemisah (blocked)
+        dari connection point / equipment, sehingga jalur TIDAK menyebar melewati boundary
+        yang memang memutus kelompok pipa.
+      * Seed = run yang sudah punya `label` non-kosong.
+      * BFS multi-sumber terurut (jarak, hops, idx) yang deterministik; tiap run kosong
+        mewarisi label dari seed terdekat. Label TIDAK menimpa run yang sudah berlabel
+        berbeda (label asli selalu menang).
+      * Propagasi berhenti di ujung alami: run yang ujungnya menyentuh symbol equipment
+        atau tidak punya tetangga lanjutan.
+
+    Return list sepanjang runs: {label, src_idx, hops, dist, inferred} atau {} bila run
+    tetap tanpa label. Mengubah run['label'] di tempat untuk run hasil propagasi.
+    """
+    runs = result.get("runs") or []
+    if not runs:
+        return []
+
+    blocked = split_at_connection_points(result, dpi=dpi)
+    runs = result["runs"]                                   # bisa berubah akibat split
+    symbols = result.get("symbols") or []
+    adj = build_adjacency(runs, dpi=dpi, blocked=blocked, symbols=symbols)
+    maxd = (max_dist_pt * dpi / 72.0) if max_dist_pt else float("inf")
+
+    lab = [dict() for _ in runs]
+    pq = []
+    n_seeded = 0
+    for i, r in enumerate(runs):
+        if r.get("underline"):
+            continue
+        tag = (r.get("label") or "").strip()
+        if not tag:
+            continue
+        lab[i] = {"label": tag, "src_idx": i, "dist": 0.0, "hops": 0, "inferred": False}
+        heapq.heappush(pq, (0.0, 0, i))
+        n_seeded += 1
+
+    while pq:
+        d, h, i = heapq.heappop(pq)
+        if not lab[i] or d > lab[i].get("dist", float("inf")) + 1e-6:
+            continue
+        for j in sorted(adj.get(i, ())):
+            if runs[j].get("underline"):
+                continue
+            nd = d + _length(runs[j])
+            if nd > maxd:
+                continue
+            cur = lab[j].get("dist", float("inf")) if lab[j] else float("inf")
+            if not lab[j] or nd < cur - 1e-6:
+                if lab[j] and not lab[j].get("inferred"):
+                    continue                                # label asli tak boleh ditimpa
+                lab[j] = {"label": lab[i]["label"], "src_idx": lab[i]["src_idx"],
+                          "dist": nd, "hops": h + 1, "inferred": True}
+                heapq.heappush(pq, (nd, h + 1, j))
+
+    # Apply inferred labels back onto the run dicts so the canvas + API show them.
+    n_inferred = 0
+    for i, info in enumerate(lab):
+        if info and info.get("inferred"):
+            if not (runs[i].get("label") or "").strip():
+                runs[i]["label"] = info["label"]
+                n_inferred += 1
+    result["label_propagation"] = {"n_inferred": n_inferred, "n_seeded": n_seeded}
+    return lab
+
+
 def coverage(result, dpi=350):
     """(n_berlabel_langsung, n_hasil_propagasi, n_total_run_pipa) untuk pelaporan."""
     lab = propagate_labels(result, dpi=dpi)

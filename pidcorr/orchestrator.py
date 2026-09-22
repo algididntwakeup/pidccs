@@ -17,7 +17,7 @@ from .implementations.yolo_classifier import YOLOValveClassifier
 from .layout import detect_furniture
 from .lines import associate
 from .connpoint import find_connection_points, class_vocab
-from .propagate import split_at_connection_points, propagate_labels
+from .propagate import split_at_connection_points, propagate_labels, propagate_run_labels
 
 
 def _dedup_pid_recs(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -219,6 +219,15 @@ class PipelineOrchestrator:
                 run_item["label"] = ""
             if "manual" not in run_item:
                 run_item["manual"] = False
+
+        # Stage 4b: Spread the full piping TAG (line number) along the connected path
+        # so a single transmission line does not shatter into anonymous fragments.
+        # Seeds = runs the associator already matched to a line number; propagation
+        # walks the pipe-adjacency graph until equipment / spec-break boundaries.
+        try:
+            propagate_run_labels(result, dpi=dpi)
+        except Exception:
+            pass
 
         # Detect Off-Page Connectors (OPC)
         opcs = []

@@ -178,6 +178,7 @@ from pidcorr.lines import (
     snap_t_junctions,
     suppress_drawing_margins,
     stitch_region_runs,
+    chain_collinear_segments,
 )
 
 def test_snap_t_junctions_pulls_dead_end_onto_perpendicular_body():
@@ -251,3 +252,128 @@ def test_stitch_region_runs_ambiguous_keeps_independent_but_snaps():
     assert len(remaining) == 1, "ambiguous branch must remain independent"
     assert not consumed
     assert len(upd) == 3, "no existing run should be dropped"
+
+
+def test_chain_collinear_segments_merges_tiny_gap():
+    """Two collinear H runs split by a <=15px residual crack fuse into one polyline."""
+    a = PipeRun(points=[(0, 100), (200, 100)], axis="h")
+    b = PipeRun(points=[(210, 100), (400, 100)], axis="h")
+    out = chain_collinear_segments([a, b], max_gap_px=15)
+    assert len(out) == 1, "collinear runs inside the gap budget must merge"
+    pts = [(int(p[0]), int(p[1])) for p in out[0].points]
+    assert pts[0] == (0, 100) and pts[-1] == (400, 100), "merged span covers both runs"
+
+
+def test_chain_collinear_segments_respects_gap_budget():
+    """A gap larger than max_gap_px must NOT be merged."""
+    a = PipeRun(points=[(0, 100), (200, 100)], axis="h")
+    b = PipeRun(points=[(260, 100), (400, 100)], axis="h")  # 60px gap
+    out = chain_collinear_segments([a, b], max_gap_px=15)
+    assert len(out) == 2, "gap beyond budget must stay split"
+
+
+def test_chain_collinear_segments_skips_branch_point():
+    """If a third run branches at the junction, the two collinear runs stay separate."""
+    a = PipeRun(points=[(0, 100), (200, 100)], axis="h")
+    b = PipeRun(points=[(210, 100), (400, 100)], axis="h")
+    branch = PipeRun(points=[(205, 100), (205, 40)], axis="v")
+    out = chain_collinear_segments([a, b, branch], max_gap_px=15, branch_tol_px=12)
+    assert len(out) == 3, "a T-branch at the joint must block the merge"
+
+
+def test_chain_collinear_segments_never_merges_perpendicular_or_diagonal():
+    """A perpendicular or diagonal neighbour is never chained into an H run."""
+    a = PipeRun(points=[(0, 100), (200, 100)], axis="h")
+    perp = PipeRun(points=[(210, 100), (210, 300)], axis="v")
+    diag = PipeRun(points=[(210, 100), (260, 150)], axis="d")
+    assert len(chain_collinear_segments([a, perp], max_gap_px=15)) == 2
+    assert len(chain_collinear_segments([a, diag], max_gap_px=15)) == 2
+
+
+def test_chain_collinear_segments_preserves_lone_diagonal_axis():
+    """A single diagonal run passes through untouched (axis stays 'd')."""
+    d = PipeRun(points=[(0, 0), (60, 60)], axis="d")
+    out = chain_collinear_segments([d], max_gap_px=15)
+    assert len(out) == 1 and out[0].axis == "d"
+
+
+def test_chain_collinear_segments_chains_three_in_a_row():
+    """Three collinear runs separated by small cracks collapse into one polyline."""
+    runs = [
+        PipeRun(points=[(0, 50), (100, 50)], axis="h"),
+        PipeRun(points=[(110, 50), (200, 50)], axis="h"),
+        PipeRun(points=[(210, 50), (300, 50)], axis="h"),
+    ]
+    out = chain_collinear_segments(runs, max_gap_px=15)
+    assert len(out) == 1
+    pts = [(int(p[0]), int(p[1])) for p in out[0].points]
+    assert pts[0] == (0, 50) and pts[-1] == (300, 50)
+
+
+# ---------------------------------------------------------------------------
+# Bagian 5.2 — Piping tag continuity (propagate_run_labels)
+# ---------------------------------------------------------------------------
+from pidcorr.propagate import propagate_run_labels
+
+
+def _mk_run(pts, label="", underline=False):
+    return {
+        "points": [[int(x), int(y)] for x, y in pts],
+        "x1": int(pts[0][0]), "y1": int(pts[0][1]),
+        "x2": int(pts[-1][0]), "y2": int(pts[-1][1]),
+        "axis": "h" if abs(pts[0][1] - pts[-1][1]) <= abs(pts[0][0] - pts[-1][0]) else "v",
+        "label": label, "underline": underline, "color": "#2563EB",
+    }
+
+
+def _mk_result(runs):
+    return {"runs": runs, "piping_ids": [], "symbols": [], "conn_points": []}
+
+
+def test_propagate_run_labels_spreads_tag_along_connected_path():
+    """A tagged run propagates its label to connected untagged continuations."""
+    runs = [
+        _mk_run([(0, 100), (200, 100)], label="605-2-GR-CSA-211"),
+        _mk_run([(200, 100), (400, 100)]),
+        _mk_run([(400, 100), (600, 100)]),
+    ]
+    res = _mk_result(runs)
+    propagate_run_labels(res, dpi=350)
+    assert runs[1]["label"] == "605-2-GR-CSA-211"
+    assert runs[2]["label"] == "605-2-GR-CSA-211"
+    assert res["label_propagation"]["n_inferred"] == 2
+
+
+def test_propagate_run_labels_never_overwrites_direct_label():
+    """A run with its own distinct tag keeps it; propagation must not clobber it."""
+    runs = [
+        _mk_run([(0, 100), (200, 100)], label="AAA-1"),
+        _mk_run([(200, 100), (400, 100)], label="BBB-2"),
+    ]
+    res = _mk_result(runs)
+    propagate_run_labels(res, dpi=350)
+    assert runs[0]["label"] == "AAA-1"
+    assert runs[1]["label"] == "BBB-2"
+
+
+def test_propagate_run_labels_leaves_disconnected_run_untagged():
+    """An unconnected, unlabelled run must stay empty (no spurious tag)."""
+    runs = [
+        _mk_run([(0, 100), (200, 100)], label="AAA-1"),
+        _mk_run([(0, 600), (200, 600)]),
+    ]
+    res = _mk_result(runs)
+    propagate_run_labels(res, dpi=350)
+    assert runs[1]["label"] == ""
+    assert res["label_propagation"]["n_inferred"] == 0
+
+
+def test_propagate_run_labels_counts_seeds():
+    runs = [
+        _mk_run([(0, 100), (200, 100)], label="AAA-1"),
+        _mk_run([(0, 600), (200, 600)], label="BBB-2"),
+        _mk_run([(500, 100), (700, 100)]),
+    ]
+    res = _mk_result(runs)
+    propagate_run_labels(res, dpi=350)
+    assert res["label_propagation"]["n_seeded"] == 2

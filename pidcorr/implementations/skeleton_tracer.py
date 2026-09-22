@@ -21,6 +21,7 @@ from ..lines import (
     suppress_floating_stubs,
     bridge_collinear_headers,
     bridge_inline_valve_gaps,
+    chain_collinear_segments,
 )
 
 
@@ -542,6 +543,13 @@ class SkeletonLineTracer(BaseLineTracer):
 
         # 7. Bridge pipe runs cut by inline valves (relaxed: containment + 20deg collinearity, 115px gap)
         filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115)
+
+        # 7a. Chain collinear segments whose ends sit within a tiny residual crack
+        #     (<= 15px) and are NOT a T-branch point, fusing one physical pipe that the
+        #     skeletonizer fractured into several runs along a single transmission path.
+        filtered = chain_collinear_segments(
+            filtered, max_gap_px=max(12, int(15 * (dpi / 350.0))), tol_px=6
+        )
 
         # 7b. T-junction orthogonal snap: pull dead-end endpoints onto the body of a
         #     perpendicular run so branches meet their header without a 5-15px gap.

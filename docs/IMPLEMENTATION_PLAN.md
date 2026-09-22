@@ -1517,3 +1517,33 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 2. **E2E Tambahan**: integrasi CI; skenario edit lain (split trace, tag duplikat); validasi visual
    kurva bejana & T-junction di Playwright.
 3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.
+
+---
+
+## Sprint Handover: Canvas Pan Hotkey, Arrow Nudge, Popover Backspace Fix, Halo Leak & Piping Tag Continuity
+
+**Status**: Implemented, tested, deployed locally — 2026-09-24.
+
+### Scope
+| # | Bagian | File | Ringkasan |
+|---|--------|------|-----------|
+| 1 | Hotkey pan sementara | `frontend/src/components/InteractivePipeCanvas.tsx` | Hold `Ctrl`/`Meta`/`Space` → pointer-events off + `setMouseNavEnabled(true)` + cursor `grab`; dilepas → tool aktif dipulihkan. Guard input + `blur`. |
+| 2 | Micro-nudge panah | `frontend/src/components/InteractivePipeCanvas.tsx` | `ArrowUp/Down/Left/Right` geser vertex terpilih `1px` (`Shift`=`5px`), offset live di kanvas, debounce 260ms ke `onUpdateRunPoints`. Guard input. |
+| 3 | Backspace/Delete popover | `page.tsx` + `InteractivePipeCanvas.tsx` | Guard `e.target.tagName` (INPUT/TEXTAREA/SELECT/contentEditable) di handler shortcut global & kanvas; `stopPropagation` di input tag. |
+| 4 | Halo oranye & klik split | `page.tsx` + `InteractivePipeCanvas.tsx` | Seleksi berbasis ID (`selectedRunIds: Set<string>`, derive index saat render) — halo tak nyangkut setelah reindex. SVG `pointer-events:all` saat split mode; fallback hitung titik potong dari koordinat klik. |
+| 5 | Kontinuitas pipa & propagasi tag | `pidcorr/lines.py`, `pidcorr/implementations/skeleton_tracer.py`, `pidcorr/propagate.py`, `pidcorr/orchestrator.py` | `chain_collinear_segments` (gap ≤15px, guard percabangan T); `propagate_run_labels` merambatkan tag pipa penuh via graf konektivitas (hormati boundary equipment/spec-break). |
+
+### Detail kunci
+- **Seleksi berbasis ID**: sumber kebenaran `Set<string>` id run; setter kompatibel `setSelectedRunIndices` (indeks→ID) supaya semua call-site lama tetap jalan; `selectRunIds` untuk split/manual-add. Efek sanitasi lama (drop index out-of-range) diganti efek ringan yang hanya menyinkronkan `splitMode`.
+- **`chain_collinear_segments`**: `_tangent_at` arah keluar ujung; ujung dianggap sepasang bila anti-paralel (dot ≤ −cos(12°)), gap ≤15px, offset lateral ≤6px, dan tidak ada run ketiga dalam radius `branch_tol_px=10` (guard T-junction). `_merge_chain` orient asi geometris, menyimpan titik tengah (belokan utuh); axis tunggal diagonal dipertahankan.
+- **`propagate_run_labels`**: memakai `build_adjacency` + `split_at_connection_points` yang sudah ada; Dijkstra multi-sumber (jarak, hops, idx) deterministik; label langsung tak boleh ditimpa; underline & run terputus dilewati. Menulis `result["label_propagation"]`.
+
+### Verifikasi
+- **`pytest backend/tests/ -q` → 58 passed** (host & container). +10 test baru: 5 chaining, 4 label-propagation, 1 lone-diagonal axis.
+- Regresi `test_phase_b_perception.py` (axis diagonal) diperbaiki lewat jalur single-run verbatim di `_merge_chain`.
+- Real P&ID A/B: 135 → 129 runs, multi-vertex 18 → 21.
+- Live `/trace-region` smoke → `status: success`; smoke `propagate_run_labels` di container api OK.
+- `npm run build` OK, `npx tsc --noEmit` bersih.
+
+### Deploy
+`docker compose build frontend && up -d frontend`; `docker compose restart api worker`. 5 container healthy.

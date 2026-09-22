@@ -92,6 +92,12 @@ export default function ProjectWorkspace() {
   const [mode, setMode] = useState<ViewMode>('digitize');
 
   const [result, setResult] = useState<DigitizationResult | null>(null);
+  // Always-current mirror of result.runs. Declared immediately after the result
+  // state (and BEFORE the selection state below) so that the ID<->index translation
+  // in setSelectedRunIndices sees the freshest runs even when it is called in the
+  // same tick as setResult (e.g. right after a split).
+  const runsRef = useRef<PipeRun[]>([]);
+  runsRef.current = result?.runs || [];
   const [systems, setSystems] = useState<CorrosionSystem[]>([]);
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [topology, setTopology] = useState<ProjectTopologyResponse | null>(null);
@@ -122,7 +128,13 @@ export default function ProjectWorkspace() {
   const [deletingSheet, setDeletingSheet] = useState(false);
 
   // Interactive Pipe Canvas & Tooling state (Phase B.5)
-  const [selectedRunIndices, setSelectedRunIndices] = useState<Set<number>>(new Set());
+  //
+  // Selection is tracked BY RUN ID (string) as the source of truth, not by array
+  // index. The backend REINDEXES runs on split/delete/re-scan, so an index-based
+  // selection can silently start pointing at a DIFFERENT run after the array shifts
+  // — leaving a stuck orange halo + control points on a pipe the user never selected.
+  // IDs are stable across reindexing, so we resolve IDs -> current indices at render.
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
   const [splitMode, setSplitMode] = useState<boolean>(false);
   const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen' | 'multiselect'>('pan');
   const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
@@ -140,6 +152,50 @@ export default function ProjectWorkspace() {
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
+
+  // Derived index selection (what the canvas + sidebar consume). Resolved from the
+  // stable ID set against the CURRENT runs array, dropping any id that no longer
+  // exists — this is what guarantees the orange halo can never outlive its pipe.
+  const selectedRunIndices = useMemo<Set<number>>(() => {
+    if (selectedRunIds.size === 0) return new Set<number>();
+    const runs = result?.runs || [];
+    const next = new Set<number>();
+    runs.forEach((r, i) => {
+      if (r && r.id && selectedRunIds.has(r.id)) next.add(i);
+    });
+    return next;
+  }, [selectedRunIds, result?.runs]);
+
+  // Compatibility setter: existing call sites pass a Set<number> of indices. We
+  // translate those indices to stable run IDs so the selection survives reindexing.
+  // It resolves against `runsRef` (always latest) rather than the render closure so
+  // that a call made in the same tick as `setResult` sees the NEW runs array.
+  const setSelectedRunIndices = useCallback(
+    (value: Set<number> | ((prev: Set<number>) => Set<number>)) => {
+      setSelectedRunIds((prevIds) => {
+        const runs = runsRef.current;
+        const prevIdx = new Set<number>();
+        runs.forEach((r, i) => {
+          if (r && r.id && prevIds.has(r.id)) prevIdx.add(i);
+        });
+        const resolved = typeof value === 'function' ? value(prevIdx) : value;
+        const ids = new Set<string>();
+        for (const i of resolved) {
+          const run = runs[i];
+          if (run && run.id) ids.add(run.id);
+        }
+        return ids;
+      });
+    },
+    []
+  );
+
+  // Direct ID-based selector for call sites that already hold the FRESH runs array
+  // (e.g. right after split / manual-add) so selection is exact and never races the
+  // batched setResult. `runIds` are stable PipeRun.id values.
+  const selectRunIds = useCallback((ids: string[]) => {
+    setSelectedRunIds(new Set(ids.filter(Boolean)));
+  }, []);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
@@ -275,7 +331,10 @@ export default function ProjectWorkspace() {
         const nextPids = res.result.piping_ids || result.piping_ids;
         pushHistory(`Split pipa #${runIdx}`, prevRuns, nextRuns, prevPids, nextPids);
         setResult({ ...result, runs: nextRuns, piping_ids: nextPids });
-        setSelectedRunIndices(new Set([res.new_run_idx]));
+        // Select the freshly created segment BY ID (index-based selection would break
+        // because the backend reindexed the runs array across the split).
+        const newRun = nextRuns[res.new_run_idx];
+        selectRunIds(newRun && newRun.id ? [newRun.id] : []);
         showToast(`Pipa #${runIdx} berhasil dipecah menjadi 2 segmen!`, 3000);
       }
     } catch (err: any) {
@@ -462,28 +521,17 @@ export default function ProjectWorkspace() {
     }
   }, [selectedRunIndices, result?.runs, digitizeSubTab]);
 
-  // Sanitize stale selection whenever the runs array mutates (split / delete /
-  // re-scan / undo-redo). The backend REINDEXES runs on split (inserts run_b at
-  // run_idx+1) and shifts indices on delete, so a selection remembered from an
-  // earlier state can point past the end of the array or at a different run —
-  // leaving a stuck orange "selected" halo on a line the user already removed.
-  // Drop any out-of-range index (and bail out of split mode if the selection
-  // became empty) so the highlight can never outlive its run.
+  // With ID-based selection the derived index set can never point at a stale /
+  // re-indexed run (a missing id simply drops out). The only thing left to keep in
+  // sync is split mode: it must turn itself off when the selection empties.
   useEffect(() => {
-    const total = result?.runs?.length ?? 0;
-    setSelectedRunIndices((prev) => {
-      if (prev.size === 0) return prev;
-      let changed = false;
-      const next = new Set<number>();
-      for (const idx of prev) {
-        if (Number.isInteger(idx) && idx >= 0 && idx < total) next.add(idx);
-        else changed = true;
-      }
-      if (!changed) return prev;
-      if (next.size === 0) setSplitMode(false);
-      return next;
-    });
-  }, [result?.runs]);
+    if (selectedRunIds.size > 0 && selectedRunIndices.size === 0) {
+      setSelectedRunIds(new Set());
+      setSplitMode(false);
+    } else if (selectedRunIndices.size === 0 && splitMode) {
+      setSplitMode(false);
+    }
+  }, [selectedRunIds, selectedRunIndices, splitMode]);
 
   // The line selection / split mode only makes sense in DIGITIZE mode. When the
   // user switches to Corrosion System / Circuit / Topology / Report (or re-opens
@@ -492,7 +540,7 @@ export default function ProjectWorkspace() {
   useEffect(() => {
     setSelectedRunIndices(new Set());
     setSplitMode(false);
-  }, [mode, activeSheet?.id]);
+  }, [mode, activeSheet?.id, setSelectedRunIndices]);
 
   // Persist all manual changes to database
   const handleSaveAllChanges = useCallback(async () => {
@@ -526,9 +574,10 @@ export default function ProjectWorkspace() {
     pushHistory('Tambah pipa manual', prevRuns, nextRuns, result.piping_ids, result.piping_ids);
     const updated = await patchResult(projectId, activeSheet.id, { ...result, runs: nextRuns });
     setResult(updated);
-    setSelectedRunIndices(new Set([updated.runs.length - 1]));
+    const added = updated.runs[updated.runs.length - 1];
+    selectRunIds(added && added.id ? [added.id] : []);
     setTraceTool('pan');
-  }, [result, projectId, activeSheet, pushHistory]);
+  }, [result, projectId, activeSheet, pushHistory, selectRunIds]);
 
   // Update vertex points of a pipe run (after draggable control points adjusted)
   const handleUpdateRunPoints = useCallback(
@@ -588,6 +637,19 @@ export default function ProjectWorkspace() {
   // Keyboard shortcuts listener: Ctrl+Z (Undo), Ctrl+Y (Redo), Ctrl+S (Save), Esc (Cancel)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // GUARD: never hijack keys while the user is typing inside a form field.
+      // Without this, pressing Backspace/Delete while renaming a pipe tag in the
+      // action popover would delete the whole pipe instead of a character.
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         if (e.shiftKey) {
           e.preventDefault();
@@ -613,7 +675,7 @@ export default function ProjectWorkspace() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleUndo, handleRedo, handleSaveAllChanges, selectedRunIndices, handleDeleteRuns]);
+  }, [handleUndo, handleRedo, handleSaveAllChanges, selectedRunIndices, handleDeleteRuns, setSelectedRunIndices]);
 
   // Load project & sheets
   useEffect(() => {

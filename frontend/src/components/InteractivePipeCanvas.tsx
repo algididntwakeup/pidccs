@@ -163,6 +163,15 @@ export default function InteractivePipeCanvas({
   const marqueeRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
   const [toolBusy, setToolBusy] = useState(false);
+  // Temporary hand-pan: true while Ctrl/Cmd or Space is held down. Lets the user
+  // pan the canvas with the mouse without switching the active tool.
+  const [tempPan, setTempPan] = useState(false);
+
+  // Arrow-key micro-nudge: accumulated [dx, dy] offset per selected run index. Applied
+  // at render-time for instant feedback; committed to the backend (debounced) on idle.
+  const [nudgeOffsets, setNudgeOffsets] = useState<Map<number, [number, number]>>(new Map());
+  const nudgeCommitRef = useRef<Map<number, [number, number]>>(new Map());
+  const nudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const pointerDownRecordRef = useRef<{ x: number; y: number; time: number } | null>(null);
@@ -250,6 +259,140 @@ export default function InteractivePipeCanvas({
       }
     }
   }, [viewer, traceTool, container]);
+
+  // --- Temporary hand-pan (hold Ctrl/Cmd or Space) ----------------------------
+  // While the modifier is held we force the SVG tracing layer transparent to
+  // pointer events and re-enable OpenSeadragon navigation, so the user can grab
+  // and pan even in rescan/pen/multiselect mode. On release the active tool's
+  // interaction model is restored exactly as before.
+  useEffect(() => {
+    if (!viewer) return;
+    const isTyping = (el: EventTarget | null) => {
+      const t = el as HTMLElement | null;
+      return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isTyping(e.target)) return;
+      // Ctrl (Windows/Linux), Meta (macOS) or Space engage the temp pan.
+      if (e.key === 'Control' || e.key === 'Meta' || e.key === ' ') {
+        // Space would otherwise scroll the page — suppress it while holding.
+        if (e.key === ' ') e.preventDefault();
+        setTempPan((prev) => (prev ? prev : true));
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control' || e.key === 'Meta' || e.key === ' ') {
+        setTempPan(false);
+      }
+    };
+    // Safety: releasing focus (tab switch / alt-tab) must clear the temp pan,
+    // otherwise the canvas can get stuck in grab mode.
+    const onBlur = () => setTempPan(false);
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [viewer]);
+
+  // Apply the temporary pan state to the viewer + overlay layer.
+  useEffect(() => {
+    if (!viewer || !container) return;
+    if (tempPan) {
+      try {
+        viewer.setMouseNavEnabled(true);
+      } catch (e) {}
+      container.style.pointerEvents = 'none';
+      container.style.cursor = 'grab';
+    } else {
+      // Restore interaction for the currently active tool.
+      if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect') {
+        try {
+          viewer.setMouseNavEnabled(false);
+        } catch (e) {}
+        container.style.pointerEvents = 'auto';
+      } else {
+        try {
+          viewer.setMouseNavEnabled(true);
+        } catch (e) {}
+        container.style.pointerEvents = 'none';
+      }
+      container.style.cursor = '';
+    }
+  }, [viewer, container, tempPan, traceTool]);
+
+  // Commit accumulated nudge offset for one run via onUpdateRunPoints.
+  const commitNudge = useCallback(
+    (runIdx: number, dx: number, dy: number) => {
+      if (!onUpdateRunPoints) return;
+      const run = runs[runIdx];
+      if (!run || !run.points) return;
+      const pts = run.points.map(
+        (p) => [Math.round(p[0] + dx), Math.round(p[1] + dy)] as [number, number]
+      );
+      void onUpdateRunPoints(runIdx, pts);
+    },
+    [onUpdateRunPoints, runs]
+  );
+
+  // Arrow-key micro-nudge: move every vertex of the selected run(s) by 1px
+  // (5px with Shift). Instant on-canvas feedback + debounced persistence.
+  useEffect(() => {
+    const handleNudge = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)
+      ) {
+        return;
+      }
+      const isArrow =
+        e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+      if (!isArrow || selectedRunIndices.size === 0) return;
+      e.preventDefault();
+      const step = e.shiftKey ? 5 : 1;
+      const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+      const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+
+      const next = new Map(nudgeOffsets);
+      const commits = nudgeCommitRef.current;
+      for (const idx of selectedRunIndices) {
+        const prevOff = next.get(idx) || [0, 0];
+        const newOff: [number, number] = [prevOff[0] + dx, prevOff[1] + dy];
+        next.set(idx, newOff);
+        commits.set(idx, newOff);
+      }
+      setNudgeOffsets(next);
+
+      // Debounced commit: flush once the user stops tapping for 260ms.
+      if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
+      nudgeTimerRef.current = setTimeout(() => {
+        const pending = nudgeCommitRef.current;
+        pending.forEach((off, idx) => {
+          if (off[0] !== 0 || off[1] !== 0) commitNudge(idx, off[0], off[1]);
+        });
+        nudgeCommitRef.current = new Map();
+        setNudgeOffsets(new Map());
+      }, 260);
+    };
+    window.addEventListener('keydown', handleNudge);
+    return () => {
+      window.removeEventListener('keydown', handleNudge);
+      if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
+    };
+  }, [selectedRunIndices, nudgeOffsets, commitNudge]);
+
+  // Clear pending nudges whenever the runs array or selection changes identity
+  // (after commit/split/delete) so stale offsets never misalign a re-indexed run.
+  useEffect(() => {
+    setNudgeOffsets(new Map());
+    nudgeCommitRef.current = new Map();
+  }, [runs]);
 
   // Listen to OpenSeadragon canvas-click to deselect when clicking empty space in pan mode
   useEffect(() => {
@@ -372,10 +515,24 @@ export default function InteractivePipeCanvas({
   const handleLineClick = (idx: number, e: React.MouseEvent | React.PointerEvent) => {
     e.stopPropagation();
 
-    // If split mode is active and this is the selected line, execute split
-    if (splitMode && selectedRunIndices.has(idx) && splitPreview) {
-      handleExecuteSplit(idx, splitPreview.x, splitPreview.y);
-      return;
+    // If split mode is active and this is the selected line, execute split.
+    // Prefer the live hover preview point; if the cursor hadn't produced one yet
+    // (e.g. the pointer events only just started reaching the SVG), fall back to
+    // projecting the click coordinates directly onto the line.
+    if (splitMode && selectedRunIndices.has(idx)) {
+      let cut = splitPreview;
+      if (!cut) {
+        const coords = getImageCoordinates(e);
+        const run = runs[idx];
+        if (coords && run) {
+          const proj = findClosestPointOnRun(run, coords.x, coords.y);
+          cut = { x: Math.round(proj.x), y: Math.round(proj.y) };
+        }
+      }
+      if (cut) {
+        handleExecuteSplit(idx, cut.x, cut.y);
+        return;
+      }
     }
 
     // Multi-select tool: click a line to toggle it in the selection set.
@@ -861,6 +1018,18 @@ export default function InteractivePipeCanvas({
   // Keyboard shortcuts listener for tool actions
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // GUARD: ignore keys typed inside form fields (tag rename input, textarea, etc.)
+      // so Backspace/Enter/Space/Arrow keys never leak into canvas shortcuts.
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
       if (e.key === 'Enter' && traceTool === 'pen') {
         e.preventDefault();
         void finishManual();
@@ -899,17 +1068,28 @@ export default function InteractivePipeCanvas({
               position: 'absolute',
               top: 0,
               left: 0,
-              pointerEvents: traceTool === 'pan' ? 'none' : 'all',
-              cursor:
-                traceTool === 'rescan'
-                  ? 'crosshair'
-                  : traceTool === 'pen'
-                  ? 'crosshair'
-                  : traceTool === 'multiselect'
-                  ? 'crosshair'
-                  : splitMode
-                  ? 'crosshair'
-                  : 'default',
+              // In split mode we must intercept pointer events on the traced lines
+              // even though the active tool is 'pan', otherwise the OSD base canvas
+              // swallows the mousemove that computes the cut preview and the click
+              // that executes the split.
+              pointerEvents: tempPan
+                ? 'none'
+                : splitMode && selectedRunIndices.size === 1
+                ? 'all'
+                : traceTool === 'pan'
+                ? 'none'
+                : 'all',
+              cursor: tempPan
+                ? 'grab'
+                : traceTool === 'rescan'
+                ? 'crosshair'
+                : traceTool === 'pen'
+                ? 'crosshair'
+                : traceTool === 'multiselect'
+                ? 'crosshair'
+                : splitMode
+                ? 'crosshair'
+                : 'default',
               overflow: 'visible',
               display: showOverlay ? 'block' : 'none',
               opacity: opacity,
@@ -944,8 +1124,14 @@ export default function InteractivePipeCanvas({
               const isDimmed = Boolean(dimUncolored && colorOverrideMap && !overrideColor);
 
               // If dragging vertices of this run, use the live drag points
-              const activePoints =
+              const basePoints =
                 draggingVertex?.runIdx === idx && liveDragPoints ? liveDragPoints : run.points;
+              // Apply any in-flight arrow-key nudge offset for instant feedback.
+              const nudge = nudgeOffsets.get(idx);
+              const activePoints =
+                nudge && (nudge[0] !== 0 || nudge[1] !== 0)
+                  ? basePoints.map((p) => [p[0] + nudge[0], p[1] + nudge[1]] as [number, number])
+                  : basePoints;
               const ptsStr = activePoints.map((p) => `${p[0]},${p[1]}`).join(' ');
 
               return (
@@ -1282,7 +1468,12 @@ export default function InteractivePipeCanvas({
                       type="text"
                       value={tagInput}
                       onChange={(e) => setTagInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTag()}
+                      onKeyDown={(e) => {
+                        // Contain every keystroke inside the field: Backspace/Delete/Space/
+                        // Arrow keys must edit text, never trigger canvas pipe shortcuts.
+                        e.stopPropagation();
+                        if (e.key === 'Enter') handleSaveTag();
+                      }}
                       placeholder="e.g. 605-6-GR-029"
                       className="w-full pl-6 pr-2 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-1 focus:ring-indigo-500"
                     />

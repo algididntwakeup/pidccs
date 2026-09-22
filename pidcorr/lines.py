@@ -1253,6 +1253,224 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
 
     return out
 
+def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
+                             branch_tol_px=10):
+    """Rantai segmen pipa yang SEGARIS (collinear) dan berjarak sangat dekat
+    (gap <= max_gap_px, default 15px) menjadi SATU PipeRun utuh — TAPI hanya bila
+    tidak ada percabangan pipa lain di antara keduanya.
+
+    Berbeda dari bridge_collinear_headers (yang hanya menyatukan segmen H/V 2-titik
+    dengan celah lebar), fungsi ini:
+      * bekerja pada polyline (run H/V/belokan) via TANGENT UJUNG, bukan axis kaku;
+      * celah sengaja kecil (<= 15px) -> hanya menambal retakan sisa skeletonisasi;
+      * menolak merge bila ada run KETIGA yang menyentuh titik pertemuan (cabang T)
+        supaya header bercabang tidak dilipat jadi satu garis.
+
+    Guard anti-cabang: titik tengah celah (junction) diperiksa; bila ujung run lain
+    berada dalam radius branch_tol_px dari junction itu, merge dibatalkan.
+
+    Parameters
+    ----------
+    runs : list[PipeRun]
+    max_gap_px : float  celah maksimum antar ujung kolinear yang boleh disatukan.
+    tol_px : float      offset lateral maksimum agar dua ujung dianggap segaris.
+    angle_tol_deg : float  deviasi arah tangent maksimum (derajat).
+    branch_tol_px : float  radius deteksi percabangan di titik sambung.
+
+    Returns
+    -------
+    list[PipeRun]  daftar run (sebagian sudah digabung), terurut stabil.
+    """
+    if not runs or len(runs) < 2:
+        return runs
+
+    import math as _math
+
+    def _pts(r):
+        return r.points if hasattr(r, "points") else r.get("points", [])
+
+    def _ends(r):
+        p = _pts(r)
+        return (tuple(p[0]), tuple(p[-1])) if p else (None, None)
+
+    def _tangent_at(r, which):
+        """Arah KELUAR dari ujung `which` (0 = titik pertama, -1 = titik terakhir).
+        Vektor menunjuk KELUAR dari badan run (dari tetangga dalam -> ujung)."""
+        p = _pts(r)
+        if len(p) < 2:
+            return None
+        if which == 0:
+            # outward at the FIRST vertex points from p[1] towards p[0]
+            ax, ay = p[0][0] - p[1][0], p[0][1] - p[1][1]
+            ux, uy = p[0][0], p[0][1]
+        else:
+            # outward at the LAST vertex points from p[-2] towards p[-1]
+            ax, ay = p[-1][0] - p[-2][0], p[-1][1] - p[-2][1]
+            ux, uy = p[-1][0], p[-1][1]
+        L = _math.hypot(ax, ay)
+        if L < 1e-6:
+            return None
+        return (ax / L, ay / L, ux, uy)
+
+    cos_min = _math.cos(_math.radians(angle_tol_deg))
+
+    # Work on a mutable copy; merged results are appended and originals marked consumed.
+    work = list(runs)
+    consumed = set()
+    chains = []  # list of (list_of_run_idx) built in discovery order
+
+    n = len(work)
+    for i in range(n):
+        if i in consumed:
+            continue
+        # Try to grow a chain from run i by repeatedly attaching a collinear neighbour
+        # at either end.
+        chain = [i]
+        consumed.add(i)
+        changed = True
+        while changed:
+            changed = False
+            # endpoints of the current chain (first and last run's outward ends)
+            head_idx, tail_idx = chain[0], chain[-1]
+            head_end = _tangent_at(work[head_idx], 0)
+            tail_end = _tangent_at(work[tail_idx], -1)
+            for j in range(n):
+                if j in consumed:
+                    continue
+                rj = work[j]
+                pj = _pts(rj)
+                if len(pj) < 2:
+                    continue
+
+                def _fits(chain_end, rj_which):
+                    """Can rj end `rj_which` attach to the chain end `chain_end`?
+                    Returns the junction midpoint if the two outward tangents are
+                    anti-parallel, the gap is small, they are laterally collinear,
+                    and no third run branches at the junction."""
+                    if chain_end is None:
+                        return None
+                    rj_t = _tangent_at(rj, rj_which)
+                    if rj_t is None:
+                        return None
+                    cx_, cy_ = chain_end[2], chain_end[3]
+                    ex_, ey_ = rj_t[2], rj_t[3]
+                    if _math.hypot(cx_ - ex_, cy_ - ey_) > max_gap_px:
+                        return None
+                    # outward tangents must point toward each other (anti-parallel)
+                    if chain_end[0] * rj_t[0] + chain_end[1] * rj_t[1] > -cos_min:
+                        return None
+                    # lateral offset from the chain's end line
+                    px, py = ex_ - cx_, ey_ - cy_
+                    perp = abs(px * chain_end[1] - py * chain_end[0])
+                    if perp > tol_px:
+                        return None
+                    mx, my = (cx_ + ex_) / 2.0, (cy_ + ey_) / 2.0
+                    if _has_branch(work, consumed, j, mx, my, branch_tol_px):
+                        return None
+                    return (mx, my)
+
+                # --- attach rj before the chain HEAD ---
+                attached = False
+                for rj_which in (0, -1):
+                    if _fits(head_end, rj_which) is not None:
+                        chain.insert(0, j)
+                        consumed.add(j)
+                        attached = True
+                        break
+                if attached:
+                    changed = True
+                    break
+                # --- attach rj after the chain TAIL ---
+                for rj_which in (0, -1):
+                    if _fits(tail_end, rj_which) is not None:
+                        chain.append(j)
+                        consumed.add(j)
+                        attached = True
+                        break
+                if attached:
+                    changed = True
+                    break
+        chains.append(chain)
+
+    # Build output: keep un-chained runs as-is; merge chains of length >= 2.
+    chain_of = {}
+    for ci, chain in enumerate(chains):
+        for idx in chain:
+            chain_of[idx] = ci
+    out = []
+    emitted = set()
+    for idx, r in enumerate(work):
+        if idx in emitted:
+            continue
+        ci = chain_of.get(idx)
+        if ci is None:
+            out.append(r)
+            continue
+        chain = chains[ci]
+        for c in chain:
+            emitted.add(c)
+        out.append(_merge_chain(work, chain))
+    return out
+
+
+def _merge_chain(work, chain):
+    """Satukan run dalam `chain` (indeks) menjadi satu PipeRun dengan urutan geometris.
+    Ujung-ujung yang berhadapan dibiarkan apa adanya (celah dihilangkan dengan menyambung
+    titik ujung), titik tengah dipertahankan sehingga belokan tetap utuh."""
+    def _pts(r):
+        return r.points if hasattr(r, "points") else r.get("points", [])
+
+    # A single-run chain is not a merge at all — return it verbatim (preserving its
+    # original axis, e.g. diagonal 'd') so downstream axis checks stay valid.
+    if len(chain) == 1:
+        return work[chain[0]]
+
+    base = work[chain[0]]
+    pts = [tuple(p) for p in _pts(base)]
+    for j in chain[1:]:
+        q = [tuple(p) for p in _pts(work[j])]
+        if not q:
+            continue
+        # orient q so its first point is nearest to the current tail
+        tail = pts[-1]
+        d_fwd = (q[0][0] - tail[0]) ** 2 + (q[0][1] - tail[1]) ** 2
+        d_rev = (q[-1][0] - tail[0]) ** 2 + (q[-1][1] - tail[1]) ** 2
+        if d_rev < d_fwd:
+            q = q[::-1]
+        # skip the duplicate/overlapping join point, if any
+        if abs(q[0][0] - pts[-1][0]) <= 2 and abs(q[0][1] - pts[-1][1]) <= 2:
+            q = q[1:]
+        pts.extend(q)
+
+    r = base
+    color = getattr(r, "color", "#2563EB")
+    label = getattr(r, "label", "")
+    # The merged result is a real polyline; only keep a simple H/V label when it is
+    # exactly straight, otherwise promote to 'poly' (never mislabel a diagonal as H/V).
+    if len(pts) == 2:
+        dx, dy = abs(pts[0][0] - pts[1][0]), abs(pts[0][1] - pts[1][1])
+        axis = "h" if dy <= max(1, dx * 0.2) else "v" if dx <= max(1, dy * 0.2) else "d"
+    else:
+        axis = "poly"
+    return PipeRun(pts, axis=axis, color=color, label=label)
+
+
+def _has_branch(work, consumed, exclude_j, mx, my, tol_px):
+    """True bila ada ujung run lain (selain yang sedang disambung) yang berada dalam
+    radius tol_px dari titik sambung (mx,my) -> menandakan percabangan T. Merge dibatalkan
+    supaya header bercabang tidak dilipat jadi satu garis lurus."""
+    r2 = tol_px * tol_px
+    for k, rk in enumerate(work):
+        if k in consumed or k == exclude_j:
+            continue
+        p = rk.points if hasattr(rk, "points") else rk.get("points", [])
+        if len(p) < 2:
+            continue
+        for ex, ey in (p[0], p[-1]):
+            if (ex - mx) ** 2 + (ey - my) ** 2 <= r2:
+                return True
+    return False
+
 
 def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
                             angle_tol_deg=20.0, containment_margin_px=12):
