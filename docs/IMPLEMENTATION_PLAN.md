@@ -1409,3 +1409,51 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet (tugas user).
 2. **E2E Tambahan**: skenario edit (split trace, tag duplikat) + integrasi CI (setelah big revamp).
 3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.
+
+## Sprint Handover: Right-Edge Tool Rack, Multi-Select Marquee & Non-Blocking Popover
+
+**Status**: Selesai (Implemented, Tested, Deployed) — 2026-09-22.
+
+### 1. Ringkasan Perubahan
+
+- **Popover tidak lagi menutupi garis yang diklik (100% Selesai)**: popover kini diposisikan agar
+  tepi kiri-atasnya berada ~28px di **bawah-kanan** titik klik (garis tetap terlihat & bisa digrab),
+  membalik ke kiri/atas bila akan keluar kanvas, lalu di-clamp ke viewport. Sebelumnya popover duduk
+  di atas polyline yang diklik (`cursor - 150/-130`).
+- **Toolbar jadi rack vertikal di tepi kanan (Photoshop-style) (100% Selesai)**: *Pan & Select*,
+  *Multi-Select*, *Box Trace*, *Manual Pen* dipindah dari dock horizontal bawah-tengah ke kolom
+  vertikal `absolute right-3 top-1/2 -translate-y-1/2`. Karena di tepi kanan, ia tak akan pernah
+  bertabrakan dengan bar kontrol bawah-kiri (Pipa ON/OFF + opacity) → hack band-splitting lama
+  (`bottom-24 2xl:bottom-6`) dihapus. Label disembunyikan di bawah `xl` (icon-only rail).
+- **Tool Multi-Select baru / marquee (100% Selesai)**: tarik kotak biru untuk memilih semua run
+  yang beririsan, lalu recolor / hapus massal sekali klik (terverifikasi memilih 97 run dalam satu
+  drag). Seleksi memakai vertex-inside **plus** interseksi segmen-rectangle (Liang-Barsky) sehingga
+  pipa panjang yang melewati kotak kecil tetap tertangkap. Klik tanpa drag = clear selection.
+  - Akar bug penting: efek sinkronisasi pointer-events overlay OSD hanya mengaktifkan interaksi
+    untuk `rescan`/`pen`; `multiselect` jatuh ke cabang Pan → `pointerEvents='none'` sehingga semua
+    event mouse tertelan sebelum sampai ke SVG. Diperbaiki dengan memperlakukan `multiselect` seperti
+    tool gambar lainnya; hit-stroke garis juga menyerahkan pointer event saat multiselect.
+  - `useRef` mirror (`marqueeStartRef`/`marqueeRectRef`) mencegah handler mouseup membaca closure
+    state React yang usang.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`frontend/src/components/InteractivePipeCanvas.tsx`](file:///c:/Werk/pidccs/frontend/src/components/InteractivePipeCanvas.tsx) | Frontend Canvas | Popover anti-block; rack vertikal kanan + tombol Multi-Select; state & handler marquee (`segmentIntersectsRect`, ref mirror); pointer-events multiselect. |
+| [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx) | Frontend Page | Tipe `traceTool` ditambah `'multiselect'`. |
+| [`frontend/e2e/canvas-overlay.spec.ts`](file:///c:/Werk/pidccs/frontend/e2e/canvas-overlay.spec.ts) | E2E | Tes rack kanan + tes marquee multi-select (rect biru mid-drag + tombol batch delete). |
+| [`.gitignore`](file:///c:/Werk/pidccs/.gitignore) | Repo | Abaikan `frontend/test-results/`, `playwright-report/`, `blob-report/`. |
+
+### 3. Verifikasi
+
+- `npx tsc --noEmit` → 0 error.
+- `npx playwright test` → **6 passed** (3 tes × desktop-1080p & laptop-14in).
+- Probe fungsional live: satu drag memilih **97 Pipa**; tombol "Hapus N Pipa Terpilih" muncul;
+  rect marquee biru tampil saat drag.
+
+### 4. Handover Roadmap: Task Berikutnya yang Belum Dieksekusi
+
+1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet (tugas user).
+2. **E2E Tambahan**: integrasi CI; skenario edit lain (split trace, tag duplikat).
+3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.

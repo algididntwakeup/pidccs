@@ -1,5 +1,46 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Right-Edge Tool Rack, Multi-Select Marquee & Non-Blocking Popover
+
+**Status**: Implemented, tested, and deployed locally on 2026-09-22.
+
+### Scope
+
+- **The action popover no longer covers the line you clicked.** Previously it was placed at
+  `(cursor - 150, cursor - 130)`, i.e. its body sat on top of the clicked polyline, and small lines
+  underneath became impossible to grab. The popover now anchors so its **top-left sits ~28px
+  below-right of the click point** (keeping the line fully visible), flipping to the left/above when it
+  would run off the canvas, then clamped to the viewport.
+- **Tool bar is now a vertical rack on the right edge (Photoshop-style).** The four tools
+  (*Pan & Select*, *Multi-Select*, *Box Trace*, *Manual Pen*) moved from a bottom-center horizontal
+  dock to a `absolute right-3 top-1/2 -translate-y-1/2` vertical column. Because it lives on the right
+  edge it can never collide with the bottom-left page-controls bar (Pipa ON/OFF + opacity), so the
+  old band-splitting hack (`bottom-24 2xl:bottom-6`) and its overlap rationale were removed. Labels
+  hide below `xl`, leaving an icon-only rail on narrow laptops.
+- **New Multi-Select tool (marquee).** Drag a blue rubber-band rectangle to select every pipe run
+  that intersects it, then recolor or batch-delete in one click (verified selecting 97 runs in one
+  drag). Selection uses vertex-inside **plus** Liang-Barsky segment/rectangle intersection, so long
+  pipes crossing a small box are still captured. A tiny click (no real drag) clears the selection.
+  - Wiring detail that mattered: the OpenSeadragon overlay pointer-events sync effect only enabled
+    interaction for `rescan`/`pen`; `multiselect` fell into the Pan branch and set
+    `pointerEvents = 'none'`, swallowing every mouse event before it reached the SVG. Fixed by
+    treating `multiselect` like the other drawing tools. Line hit-strokes also yield their pointer
+    events in multiselect so a drag anywhere paints the marquee.
+  - A `useRef` mirror (`marqueeStartRef`/`marqueeRectRef`) keeps the mouseup handler from reading a
+    stale React state closure.
+
+### Verification
+
+- `npx tsc --noEmit` → 0 errors.
+- `npx playwright test` → **6 passed** (3 tests × desktop-1080p + laptop-14in): the vertical rack
+  clears the page bar and sits on the right half; the overlay survives mode switches + resize; and
+  the marquee selects many runs and exposes the batch-delete button (with the blue rect asserted
+  mid-drag).
+- Functional probe on the live stack: a single drag selected **97 Pipa**; batch-delete button
+  rendered; blue marquee rect present during drag.
+
+---
+
 ## Sprint Handover: Box Trace Stabilization, CPU Safety Guard & Smart Text Masking
 
 **Status**: Implemented, tested, and deployed locally on 2026-09-22.

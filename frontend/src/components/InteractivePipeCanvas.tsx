@@ -16,8 +16,42 @@ import {
   RotateCcw,
   Plus,
   GripVertical,
+  BoxSelect,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
+
+// Liang-Barsky/Cohen-Sutherland style test: does segment (x0,y0)-(x1,y1) intersect an
+// axis-aligned rectangle? Used by the Multi-Select marquee so long pipes crossing the
+// box are selected even when none of their vertices fall inside it.
+function segmentIntersectsRect(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  rect: { x1: number; y1: number; x2: number; y2: number },
+): boolean {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const p = [-dx, dx, -dy, dy];
+  const q = [x0 - rect.x1, rect.x2 - x0, y0 - rect.y1, rect.y2 - y0];
+  for (let i = 0; i < 4; i++) {
+    if (p[i] === 0) {
+      if (q[i] < 0) return false; // parallel and outside
+    } else {
+      const r = q[i] / p[i];
+      if (p[i] < 0) {
+        if (r > t1) return false;
+        if (r > t0) t0 = r;
+      } else {
+        if (r < t0) return false;
+        if (r < t1) t1 = r;
+      }
+    }
+  }
+  return true;
+}
 
 // 5 Quick Colors: Biru #2563EB, Hijau #10B981, Merah #EF4444, Kuning #F59E0B, Ungu #8B5CF6
 export const QUICK_COLORS = [
@@ -50,8 +84,8 @@ interface InteractivePipeCanvasProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
-  traceTool: 'pan' | 'rescan' | 'pen';
-  onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen') => void;
+  traceTool: 'pan' | 'rescan' | 'pen' | 'multiselect';
+  onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen' | 'multiselect') => void;
   onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }, replaceExisting?: boolean) => Promise<void>;
   onManualRun: (points: [number, number][]) => Promise<void>;
   // Optional mode-driven color override: maps run index -> CSS color.
@@ -120,6 +154,13 @@ export default function InteractivePipeCanvas({
   } | null>(null);
   const [liveDragPoints, setLiveDragPoints] = useState<[number, number][] | null>(null);
   const [snapGuide, setSnapGuide] = useState<{ axis: 'h' | 'v'; val: number } | null>(null);
+
+  // Multi-select marquee state (drag a blue rectangle to select many runs)
+  const [marqueeStart, setMarqueeStart] = useState<{ x: number; y: number } | null>(null);
+  const [marqueeRect, setMarqueeRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  // Refs mirror the marquee state so the mouseup handler never reads a stale closure.
+  const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const marqueeRectRef = useRef<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
   const [toolBusy, setToolBusy] = useState(false);
 
@@ -196,7 +237,7 @@ export default function InteractivePipeCanvas({
   useEffect(() => {
     if (!viewer) return;
 
-    if (traceTool === 'rescan' || traceTool === 'pen') {
+    if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect') {
       viewer.setMouseNavEnabled(false);
       if (container) {
         container.style.pointerEvents = 'auto';
@@ -337,6 +378,15 @@ export default function InteractivePipeCanvas({
       return;
     }
 
+    // Multi-select tool: click a line to toggle it in the selection set.
+    if (traceTool === 'multiselect') {
+      const next = new Set(selectedRunIndices);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      onSelectRunIndices(next);
+      return;
+    }
+
     if (traceTool !== 'pan') return;
 
     const rect = viewer?.element?.getBoundingClientRect();
@@ -344,9 +394,20 @@ export default function InteractivePipeCanvas({
     if (rect) {
       const px = e.clientX - rect.left;
       const py = e.clientY - rect.top;
-      const clampedX = Math.max(16, Math.min(rect.width - 340, px - 150));
-      const clampedY = Math.max(16, Math.min(rect.height - 240, py - 130));
-      setPopoverPos({ x: clampedX, y: clampedY, imgX: imgCoords?.x ?? 0, imgY: imgCoords?.y ?? 0 });
+      // Keep the popover OFF the clicked line: place it just below-right of the cursor
+      // (its top edge ~28px under the pointer). Flip above/left when the panel would
+      // run off the canvas. This guarantees the line you clicked stays visible and grabbable.
+      const PANEL_W = 320;
+      const PANEL_H = 240;
+      const GAP = 28;
+      let x = px + GAP;
+      let y = py + GAP;
+      if (x + PANEL_W > rect.width - 12) x = px - GAP - PANEL_W; // flip to the left
+      if (y + PANEL_H > rect.height - 12) y = py - GAP - PANEL_H; // flip above
+      // Final clamp so the panel never leaves the viewport.
+      x = Math.max(12, Math.min(rect.width - PANEL_W - 12, x));
+      y = Math.max(12, Math.min(rect.height - 120, y));
+      setPopoverPos({ x, y, imgX: imgCoords?.x ?? 0, imgY: imgCoords?.y ?? 0 });
     }
 
     if (e.shiftKey) {
@@ -514,6 +575,19 @@ export default function InteractivePipeCanvas({
   // BOX TRACE (RESCAN) HANDLER
   // -------------------------------------------------------------
   const handleSvgMouseDown = (e: React.MouseEvent) => {
+    if (traceTool === 'multiselect') {
+      e.stopPropagation();
+      const point = getImageCoordinates(e);
+      if (point) {
+        const start = { x: point.x, y: point.y };
+        const rect = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
+        marqueeStartRef.current = start;
+        marqueeRectRef.current = rect;
+        setMarqueeStart(start);
+        setMarqueeRect(rect);
+      }
+      return;
+    }
     if (traceTool === 'rescan') {
       e.stopPropagation();
       const point = getImageCoordinates(e);
@@ -585,6 +659,23 @@ export default function InteractivePipeCanvas({
       return;
     }
 
+    // Multi-select marquee drag
+    if (traceTool === 'multiselect' && marqueeStartRef.current) {
+      const point = getImageCoordinates(e);
+      const start = marqueeStartRef.current;
+      if (point) {
+        const rect = {
+          x1: Math.min(start.x, point.x),
+          y1: Math.min(start.y, point.y),
+          x2: Math.max(start.x, point.x),
+          y2: Math.max(start.y, point.y),
+        };
+        marqueeRectRef.current = rect;
+        setMarqueeRect(rect);
+      }
+      return;
+    }
+
     // Box trace drag
     if (traceTool === 'rescan' && roiStart) {
       const point = getImageCoordinates(e);
@@ -642,6 +733,69 @@ export default function InteractivePipeCanvas({
   };
 
   const handleSvgMouseUp = async (e: React.MouseEvent) => {
+    if (traceTool === 'multiselect' && marqueeStartRef.current) {
+      e.stopPropagation();
+      const point = getImageCoordinates(e);
+      const start = marqueeStartRef.current;
+      marqueeStartRef.current = null;
+      setMarqueeStart(null);
+
+      const bounds = point
+        ? {
+            x1: Math.min(start.x, point.x),
+            y1: Math.min(start.y, point.y),
+            x2: Math.max(start.x, point.x),
+            y2: Math.max(start.y, point.y),
+          }
+        : marqueeRectRef.current;
+      marqueeRectRef.current = null;
+      setMarqueeRect(null);
+
+      // A tiny drag (click-like) clears the current selection instead of selecting nothing.
+      if (!bounds || bounds.x2 - bounds.x1 < 6 || bounds.y2 - bounds.y1 < 6) {
+        onSelectRunIndices(new Set());
+        setPopoverPos(null);
+        return;
+      }
+
+      // Select every run whose polyline intersects the marquee:
+      // a run is picked when ANY vertex lies inside, OR a segment crosses the box
+      // (so long lines passing through a small box are still captured), OR the
+      // segment midpoint is inside.
+      const inside = (x: number, y: number) =>
+        x >= bounds.x1 && x <= bounds.x2 && y >= bounds.y1 && y <= bounds.y2;
+      const next = new Set<number>(e.shiftKey ? selectedRunIndices : []);
+      runs.forEach((run, idx) => {
+        if (!run.points || run.points.length < 2) return;
+        let hit = run.points.some((p) => inside(p[0], p[1]));
+        if (!hit) {
+          for (let i = 0; i < run.points.length - 1 && !hit; i++) {
+            const a = run.points[i];
+            const b = run.points[i + 1];
+            const mx = (a[0] + b[0]) / 2;
+            const my = (a[1] + b[1]) / 2;
+            if (inside(mx, my)) hit = true;
+            else if (segmentIntersectsRect(a[0], a[1], b[0], b[1], bounds)) hit = true;
+          }
+        }
+        if (hit) next.add(idx);
+      });
+
+      onSelectRunIndices(next);
+      if (next.size > 0) {
+        // Anchor the action popover near the marquee so the user can delete in one click.
+        const rect = viewer?.element?.getBoundingClientRect();
+        if (rect) {
+          const clampedX = Math.max(16, Math.min(rect.width - 340, (bounds.x2 + bounds.x1) / 2 - 150));
+          const clampedY = Math.max(16, Math.min(rect.height - 240, bounds.y2 + 12));
+          setPopoverPos({ x: clampedX, y: clampedY, imgX: 0, imgY: 0 });
+        }
+      } else {
+        setPopoverPos(null);
+      }
+      return;
+    }
+
     if (traceTool !== 'rescan' || !roiStart) return;
     e.stopPropagation();
 
@@ -719,6 +873,8 @@ export default function InteractivePipeCanvas({
           setRoiPendingModal(null);
           setManualPoints([]);
           setPenHoverPt(null);
+          setMarqueeStart(null);
+          setMarqueeRect(null);
           onSetTraceTool('pan');
         }
       }
@@ -748,6 +904,8 @@ export default function InteractivePipeCanvas({
                 traceTool === 'rescan'
                   ? 'crosshair'
                   : traceTool === 'pen'
+                  ? 'crosshair'
+                  : traceTool === 'multiselect'
                   ? 'crosshair'
                   : splitMode
                   ? 'crosshair'
@@ -792,7 +950,9 @@ export default function InteractivePipeCanvas({
 
               return (
                 <g key={run.id || `run-${idx}`} className="group">
-                  {/* Invisible wide stroke for easy clicking & hovering (pointerEvents: stroke) */}
+                  {/* Invisible wide stroke for easy clicking & hovering (pointerEvents: stroke).
+                      In Multi-Select mode the lines yield pointer events to the SVG surface so a
+                      drag anywhere (even over a line) paints the selection marquee instead. */}
                   <polyline
                     points={ptsStr}
                     fill="none"
@@ -801,7 +961,7 @@ export default function InteractivePipeCanvas({
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     style={{
-                      pointerEvents: 'stroke',
+                      pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
                       cursor: splitMode ? 'crosshair' : 'pointer',
                     }}
                     onPointerDown={(e) => {
@@ -900,6 +1060,22 @@ export default function InteractivePipeCanvas({
                 stroke="#10B981"
                 strokeWidth={1.5}
                 strokeDasharray="4 4"
+                pointerEvents="none"
+              />
+            )}
+
+            {/* Multi-Select Marquee (Photoshop-style blue rubber band) */}
+            {marqueeRect && traceTool === 'multiselect' && (
+              <rect
+                x={Math.min(marqueeRect.x1, marqueeRect.x2)}
+                y={Math.min(marqueeRect.y1, marqueeRect.y2)}
+                width={Math.abs(marqueeRect.x2 - marqueeRect.x1)}
+                height={Math.abs(marqueeRect.y2 - marqueeRect.y1)}
+                fill="#3B82F6"
+                fillOpacity="0.12"
+                stroke="#2563EB"
+                strokeWidth="3"
+                strokeDasharray="8 5"
                 pointerEvents="none"
               />
             )}
@@ -1261,44 +1437,65 @@ export default function InteractivePipeCanvas({
       )}
 
       {/* 6. Active Tool Dock / Pill Toolbar at Bottom-Center */}
-      {/* z-50 + max-width + flex-wrap: keeps this dock above the floating page-controls bar (z-40).
-          The two bars collide on viewports narrower than ~1470px (14" Full-HD laptops, 125-150%
-          OS scaling). To guarantee separation they live in different vertical bands on anything
-          below 2xl (1536px): the dock is lifted to `bottom-24` and only drops back to `bottom-6`
-          (same band as the page bar) on wide desktop screens where there is room to spare. */}
-      <div className="absolute bottom-24 2xl:bottom-6 left-1/2 -translate-x-1/2 z-50 flex flex-wrap items-center justify-center gap-1 rounded-2xl bg-white/95 backdrop-blur-md p-1.5 shadow-2xl border border-slate-200 max-w-[calc(100%-1.5rem)]">
+      {/* Vertical tool rack (Photoshop-style), anchored to the RIGHT edge and vertically
+          centered. Living on the right edge keeps it clear of the bottom-center
+          page-controls bar (Pipa ON/OFF + opacity) at every viewport width, so no
+          overlap logic / band-splitting is needed anymore. */}
+      <div className="absolute right-3 top-1/2 -translate-y-1/2 z-50 flex flex-col items-stretch gap-1 rounded-2xl bg-white/95 backdrop-blur-md p-1.5 shadow-2xl border border-slate-200">
         <button
           onClick={() => {
             onSetTraceTool('pan');
             setManualPoints([]);
             setRoiRect(null);
             setRoiPendingModal(null);
+            setMarqueeRect(null);
+            setMarqueeStart(null);
           }}
-          className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition ${
+          className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'pan'
               ? 'bg-indigo-600 text-white shadow-md'
               : 'hover:bg-slate-100 text-slate-700'
           }`}
           title="Pan & Select Tool: Geser kanvas atau klik garis pipa untuk edit"
         >
-          <Hand className="w-3.5 h-3.5" />
-          <span>Pan & Select</span>
+          <Hand className="w-4 h-4 shrink-0" />
+          <span className="hidden xl:inline">Pan &amp; Select</span>
+        </button>
+
+        <button
+          onClick={() => {
+            onSetTraceTool('multiselect');
+            setManualPoints([]);
+            setRoiRect(null);
+            setRoiPendingModal(null);
+          }}
+          className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
+            traceTool === 'multiselect'
+              ? 'bg-violet-600 text-white shadow-md'
+              : 'hover:bg-slate-100 text-slate-700'
+          }`}
+          title="Multi-Select: Tarik kotak biru untuk memilih banyak garis sekaligus, lalu hapus/ganti warna"
+        >
+          <BoxSelect className="w-4 h-4 shrink-0" />
+          <span className="hidden xl:inline">Multi-Select</span>
         </button>
 
         <button
           onClick={() => {
             onSetTraceTool('rescan');
             setManualPoints([]);
+            setMarqueeRect(null);
+            setMarqueeStart(null);
           }}
-          className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition ${
+          className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'rescan'
               ? 'bg-cyan-600 text-white shadow-md'
               : 'hover:bg-slate-100 text-slate-700'
           }`}
           title="Box Trace (ROI): Tarik kotak untuk deteksi ulang area tertentu"
         >
-          <Crop className="w-3.5 h-3.5" />
-          <span>Box Trace</span>
+          <Crop className="w-4 h-4 shrink-0" />
+          <span className="hidden xl:inline">Box Trace</span>
         </button>
 
         <button
@@ -1306,31 +1503,33 @@ export default function InteractivePipeCanvas({
             onSetTraceTool('pen');
             setRoiRect(null);
             setRoiPendingModal(null);
+            setMarqueeRect(null);
+            setMarqueeStart(null);
           }}
-          className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition ${
+          className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'pen'
               ? 'bg-blue-600 text-white shadow-md'
               : 'hover:bg-slate-100 text-slate-700'
           }`}
           title="Manual Pen: Gambar garis pipa baru secara manual"
         >
-          <Pencil className="w-3.5 h-3.5" />
-          <span>Manual Pen</span>
+          <Pencil className="w-4 h-4 shrink-0" />
+          <span className="hidden xl:inline">Manual Pen</span>
         </button>
 
         {traceTool === 'pen' && manualPoints.length >= 2 && (
           <button
             disabled={toolBusy}
             onClick={finishManual}
-            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition flex items-center space-x-1 shadow"
+            className="px-2.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition flex items-center space-x-2 shadow"
           >
-            <Check className="w-3.5 h-3.5" />
-            <span>Selesai (Enter)</span>
+            <Check className="w-4 h-4 shrink-0" />
+            <span className="hidden xl:inline">Selesai (Enter)</span>
           </button>
         )}
 
         {toolBusy && (
-          <span className="px-2.5 text-[11px] font-medium text-indigo-600 animate-pulse">
+          <span className="px-1 text-[10px] font-medium text-indigo-600 animate-pulse text-center">
             Memproses...
           </span>
         )}

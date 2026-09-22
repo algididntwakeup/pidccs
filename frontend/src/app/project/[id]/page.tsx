@@ -124,7 +124,7 @@ export default function ProjectWorkspace() {
   // Interactive Pipe Canvas & Tooling state (Phase B.5)
   const [selectedRunIndices, setSelectedRunIndices] = useState<Set<number>>(new Set());
   const [splitMode, setSplitMode] = useState<boolean>(false);
-  const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen'>('pan');
+  const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen' | 'multiselect'>('pan');
   const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
   const [history, setHistory] = useState<
     Array<{
