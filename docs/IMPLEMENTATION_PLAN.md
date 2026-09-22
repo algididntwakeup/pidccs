@@ -1345,3 +1345,67 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 2. **E2E Tambahan**: skenario edit (split trace, tag duplikat) + integrasi CI. Jalankan Playwright
    secara berkala (setelah *big revamp*), bukan setiap edit kecil.
 3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.
+
+
+## Sprint Handover: Box Trace Stabilization, CPU Safety Guard & Smart Text Masking
+
+**Status**: Selesai (Implemented, Tested, Deployed) — 2026-09-22.
+
+### 1. Ringkasan Perubahan
+
+- **Box Trace / ROI Re-scan diperbaiki total (100% Selesai)** — akar masalah "hasil kosong /
+  cuma seuprit": endpoint `POST /trace-region` memanggil `tracer.trace(crop)` yang
+  **menjalankan adaptive threshold ulang pada sub-image crop**. Pada crop yang didominasi
+  background putih, `blockSize=21` tidak punya statistik lokal → stroke pipa tipis hilang.
+  - **Binarisasi sekali di resolusi penuh**: `full_binary` dihitung dari citra global, lalu
+    crop diambil langsung dari `full_binary` (bukan di-threshold ulang).
+  - **Padding anti-clipping 20px**: `px1=max(0,x1-20)` dst; tracing pada padded crop dan
+    offset global dikembalikan `(px1, py1)`.
+  - **MORPH_CLOSE 3x3 khusus ROI** (`roi=True`) menyambung pipa yang berlubang karena
+    masking teks OCR di dekat kotak.
+  - **`min_length_px` adaptif**: `min(8, min_length_px)`, dan `suppress_floating_stubs=False`
+    di ROI agar fragmen pendek yang sah di dalam kotak tidak ikut dibuang.
+  - **A/B proof** (3 ROI pada P&ID nyata): total panjang garis naik **349→598, 1467→1646,
+    1593→2652 px** (~70% lebih banyak garis ter-trace).
+- **CPU Safety Guard & Worker Serialization (100% Selesai)**:
+  - `docker-compose.yml`: worker dikunci `--concurrency=1 --prefetch-multiplier=1 -O fair`
+    (dari `--concurrency=2`). Terverifikasi di log: `concurrency: 1 (prefork)`.
+  - **FP16 guard**: `predict_tiled` (`pidcorr/detect.py`) & `detect_fullpage`
+    (`pidcorr/layout.py`) kini mengunci `half=torch.cuda.is_available()` → FP32 di CPU,
+    FP16 hanya di CUDA (menghindari overhead emulasi half-precision di CPU Intel).
+  - **Model singleton**: `get_orchestrator()` di `detection_service.py` (lazy, proses-level).
+    Sebelumnya `get_configured_orchestrator()` dipanggil **di dalam** task per sheet → YOLO +
+    OCR reload dari disk tiap sheet (sumber "webapp makin berat tiap buka PID").
+- **Smart Text-Artifact Filter dirapatkan (100% Selesai)** — `suppress_text_artifacts`
+  (`pidcorr/lines.py`) sekarang `max_side_pt=9.3` (≤45px @350dpi), `max_area_pt2=25.5`
+  (≤~600px²), `max_aspect=3.5` (dari 4.0), `min_area_px=15` (DPI-scaled). Glyph yang lolos
+  OCR ("3/4", "BY INSTR", coretan) lebih agresif dibuang, sementara stub pipa tipis
+  (AR ≥ 3.5, mis. w=2×h=14 → AR 7) tetap hidup.
+
+### 2. Daftar File yang Dimodifikasi
+
+| File | Layer | Fungsi Utama |
+|---|---|---|
+| [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py) | CV Tracer | `trace()` terima `binary_img` (bypass adaptive threshold) + `roi` (MORPH_CLOSE + min-length adaptif); default ambang artefak baru. |
+| [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py) | Backend REST API | `/trace-region`: binarisasi full-image sekali, padded crop 20px, offset `(px1,py1)`, `roi=True`. |
+| [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py) | CV Filter | `suppress_text_artifacts` ambang diperketat (side 45px, area 600px², AR 3.5) + `min_area` DPI-scaled. |
+| [`pidcorr/detect.py`](file:///c:/Werk/pidccs/pidcorr/detect.py) | CV Detection | `predict_tiled` kunci `half` (FP32 di CPU). |
+| [`pidcorr/layout.py`](file:///c:/Werk/pidccs/pidcorr/layout.py) | CV Detection | `detect_fullpage` kunci `half` (FP32 di CPU). |
+| [`backend/app/services/detection_service.py`](file:///c:/Werk/pidccs/backend/app/services/detection_service.py) | Backend Service | `get_orchestrator()` singleton proses-level. |
+| [`docker-compose.yml`](file:///c:/Werk/pidccs/docker-compose.yml) | Infra | Worker `--concurrency=1 --prefetch-multiplier=1 -O fair`. |
+| [`backend/tests/test_masking_and_runs.py`](file:///c:/Werk/pidccs/backend/tests/test_masking_and_runs.py) | Tests | 3 tes baru: ambang diperketat, `binary_img` bypass, MORPH_CLOSE bridging di ROI. |
+
+### 3. Verifikasi
+
+- `pytest tests/ -q` (container) → **41 passed, 0 failed** (38 lama + 3 baru).
+- `test_masking_and_runs.py` → 10 passed; `test_split_and_color.py` / `test_snap_equipment.py` lulus.
+- **A/B ROI** pada P&ID nyata (`BCD3-605-42-PID-1-011-02 Rev.7-CCD2.pdf`, 2339×3309px):
+  panjang garis ter-trace naik ~70% di 3 ROI.
+- `POST /trace-region` HTTP 200, polyline berkoordinat global utuh.
+- Worker log: `concurrency: 1 (prefork)`; `GET /healthz` → `{"status":"ok"}`.
+
+### 4. Handover Roadmap: Task Berikutnya yang Belum Dieksekusi
+
+1. **Pengujian Beban Banyak Sheet**: benchmark ingestion 20+ sheet (tugas user).
+2. **E2E Tambahan**: skenario edit (split trace, tag duplikat) + integrasi CI (setelah big revamp).
+3. **Deferred**: AI-assisted anomaly suggestion, training data dari koreksi user, multi-user real-time.

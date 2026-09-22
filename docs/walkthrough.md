@@ -1,5 +1,51 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Box Trace Stabilization, CPU Safety Guard & Smart Text Masking
+
+**Status**: Implemented, tested, and deployed locally on 2026-09-22.
+
+### Scope
+
+- **Box Trace / ROI re-scan fixed at the root.** The complaint was that dragging a box over a long,
+  clear black pipe returned nothing or just a stub ("seuprit"). Root cause: `POST /trace-region` called
+  `tracer.trace(crop)`, which **re-ran adaptive thresholding on the cropped sub-image**. A crop dominated
+  by white background starves `blockSize=21` of local statistics, so thin pipe strokes vanish.
+  - The full-resolution binary is now computed **once** from the global image and the crop is taken
+    **directly from `full_binary`** — no re-thresholding of the crop.
+  - The selection is **expanded by 20px on every side** (`px1=max(0,x1-20)`, …) so lines touching the box
+    edge are not severed by skeletonization; the crop is traced and coordinates are offset back globally.
+  - A **3×3 MORPH_CLOSE (`roi=True`)** reconnects pipe pixels punched through by OCR text masking next to
+    the box.
+  - `min_length_px` is made adaptive inside the box (`min(8, min_length_px)`) and `suppress_floating_stubs`
+    is disabled for ROI so genuine short fragments inside the box survive.
+  - **A/B proof** on a real P&ID (2339×3309px), three ROIs: traced line length rose **349→598,
+    1467→1646, 1593→2652 px** (~70% more line recovered).
+- **CPU safety guard & worker serialization.**
+  - `docker-compose.yml`: the Celery worker is locked to
+    `--concurrency=1 --prefetch-multiplier=1 -O fair` (was `--concurrency=2`). Confirmed in logs:
+    `concurrency: 1 (prefork)`.
+  - **FP16 guard**: `predict_tiled` (`pidcorr/detect.py`) and `detect_fullpage` (`pidcorr/layout.py`) now
+    pass `half=torch.cuda.is_available()`, so CPU runs stay FP32 (no software half-precision emulation
+    overhead on Intel CPUs) and only CUDA uses FP16.
+  - **Model singleton**: `get_orchestrator()` in `detection_service.py` (lazy, process-level). Previously
+    `get_configured_orchestrator()` was built **inside** the task, reloading YOLO + OCR weights from disk
+    for every sheet — a major cause of the "web app gets heavier with each P&ID opened" degradation.
+- **Smart text-artifact filter tightened.** `suppress_text_artifacts` (`pidcorr/lines.py`) now uses
+  `max_side_pt=9.3` (≤45px @350dpi), `max_area_pt2=25.5` (≤~600px²), `max_aspect=3.5` (was 4.0), and a
+  DPI-scaled `min_area_px=15`. Glyphs OCR misses ("3/4", "BY INSTR", hand scratches) are removed more
+  aggressively, while thin elongated pipe stubs (AR ≥ 3.5, e.g. w=2×h=14 → AR 7) are preserved.
+
+### Verification
+
+- `pytest tests/ -q` (container) → **41 passed, 0 failed** (38 prior + 3 new).
+- `test_masking_and_runs.py` → 10 passed; `test_split_and_color.py` and `test_snap_equipment.py` pass
+  (no regression in snapping / splitting).
+- **A/B ROI** on the real P&ID: ~70% more traced line length across 3 regions.
+- `POST /trace-region` → HTTP 200 with full-length polylines in global coordinates.
+- Worker log shows `concurrency: 1 (prefork)`; `GET /healthz` → `{"status":"ok"}`.
+
+---
+
 ## Sprint Handover: Detection-Progress Resume, Root Cleanup & README Refresh
 
 **Status**: Implemented, built, and deployed locally on 2026-09-21.

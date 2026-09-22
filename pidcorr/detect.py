@@ -77,14 +77,21 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
 
 def predict_tiled(model, img_bgr: np.ndarray, tile: int = 640, overlap: float = 0.2,
                   conf: float = 0.25, iou_merge: float = 0.5, device="cpu") -> tuple[list[Det], int]:
-    """Inferensi YOLO ber-tile pada gambar penuh. return (deteksi, jumlah_tile)."""
+    """Inferensi YOLO ber-tile pada gambar penuh. return (deteksi, jumlah tile)."""
+    # FP16 (half=True) hanya aman di CUDA. Di CPU, software half-precision emulation
+    # menyebabkan overhead besar pada CPU Intel tanpa gain apa pun -> kunci FP32.
+    try:
+        import torch as _torch
+        use_half = bool(_torch.cuda.is_available())
+    except Exception:
+        use_half = False
     H, W = img_bgr.shape[:2]
     xs, ys = tile_offsets(W, tile, overlap), tile_offsets(H, tile, overlap)
     boxes, scores, names = [], [], []
     for oy in ys:
         for ox in xs:
             crop = img_bgr[oy:oy + tile, ox:ox + tile]
-            res = model.predict(crop, conf=conf, imgsz=tile, device=device, verbose=False)[0]
+            res = model.predict(crop, conf=conf, imgsz=tile, device=device, half=use_half, verbose=False)[0]
             for b in res.boxes:
                 x1, y1, x2, y2 = b.xyxy[0].tolist()
                 boxes.append([x1 + ox, y1 + oy, x2 + ox, y2 + oy])

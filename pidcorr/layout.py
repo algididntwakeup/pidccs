@@ -33,7 +33,8 @@ def detect_fullpage(img_bgr, weights, conf=0.4, imgsz=1024, with_conf=False):
         if weights not in _MODELS:
             _MODELS[weights] = YOLO(weights)
         dev = 0 if torch.cuda.is_available() else "cpu"
-        r = _MODELS[weights].predict(img_bgr, imgsz=imgsz, conf=conf, device=dev, verbose=False)[0]
+        r = _MODELS[weights].predict(img_bgr, imgsz=imgsz, conf=conf, device=dev,
+                                     half=bool(torch.cuda.is_available()), verbose=False)[0]
         out = []
         for b in r.boxes:
             x0, y0, x1, y1 = (int(v) for v in b.xyxy[0].tolist())

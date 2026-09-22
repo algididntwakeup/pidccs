@@ -15,6 +15,20 @@ from ..config import settings
 
 storage = LocalStorageAdapter(settings.STORAGE_DIR)
 
+# Process-level singleton: the orchestrator holds the heavy YOLO / OCR models in memory.
+# Building it once per task (as before) reloaded weights from disk for every sheet, which
+# is a major source of the "web app gets heavier with each P&ID opened" degradation.
+_ORCHESTRATOR = None
+
+
+def get_orchestrator():
+    """Return the process-wide PipelineOrchestrator singleton (lazy, built once)."""
+    global _ORCHESTRATOR
+    if _ORCHESTRATOR is None:
+        from pidcorr.factory import get_configured_orchestrator
+        _ORCHESTRATOR = get_configured_orchestrator()
+    return _ORCHESTRATOR
+
 
 def execute_sheet_detection(
     file_rel_path: str,
@@ -74,8 +88,8 @@ def execute_sheet_detection(
     if rot != 0:
         img = pipeline.rotate_bgr(img, rot)
 
-    from pidcorr.factory import get_configured_orchestrator
-    orchestrator = get_configured_orchestrator()
+    # Reuse the process-wide singleton so YOLO/OCR weights are loaded only once.
+    orchestrator = get_orchestrator()
 
     result = orchestrator.run(
         img_bgr=img,

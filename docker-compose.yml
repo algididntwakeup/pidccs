@@ -77,7 +77,7 @@ services:
     image: pidccs-backend:latest
     container_name: pidstudio-worker
     restart: unless-stopped
-    command: celery -A worker.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 -O fair
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pidstudio
       - DATABASE_SYNC_URL=postgresql://postgres:postgres@postgres:5432/pidstudio

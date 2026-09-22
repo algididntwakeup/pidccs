@@ -355,9 +355,9 @@ class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
     def __init__(self, min_length_px: int = 12, suppress_text_artifacts: bool = True,
-                 text_artifact_max_side_pt: float = 10.0,
-                 text_artifact_max_area_pt2: float = 40.0,
-                 text_artifact_max_aspect: float = 4.0,
+                 text_artifact_max_side_pt: float = 9.3,
+                 text_artifact_max_area_pt2: float = 25.5,
+                 text_artifact_max_aspect: float = 3.5,
                  suppress_floating_stubs: bool = True,
                  floating_stub_max_len_px: float = 28.0):
         self.min_length_px = min_length_px
@@ -376,24 +376,55 @@ class SkeletonLineTracer(BaseLineTracer):
         furniture: Optional[List[List[int]]] = None,
         tokens: Optional[List[Dict[str, Any]]] = None,
         progress: Optional[Callable[[str], None]] = None,
+        binary_img: Optional[np.ndarray] = None,
+        roi: bool = False,
         **kwargs,
     ) -> List[PipeRun]:
-        """Extract pipe runs via skeletonization, junction analysis, and suppression."""
+        """Extract pipe runs via skeletonization, junction analysis, and suppression.
+
+        Parameters
+        ----------
+        binary_img : np.ndarray, optional
+            Pra-binarisasi (BINARY_INV, ink=255) yang SUDAH dihitung pada resolusi penuh.
+            Jika diberikan, adaptive threshold TIDAK dijalankan ulang. Ini penting untuk
+            ROI re-scan: crop sub-image yang didominasi background putih tidak memiliki
+            statistik lokal yang cukup sehingga adaptive threshold lokal rusak dan stroke
+            pipa tipis hilang.
+        roi : bool
+            Mode ROI re-scan. Menyambungkan kembali piksel pipa yang berlubang karena
+            masking teks OCR di sekitar kotak (MORPH_CLOSE kernel 3x3) dan memakai
+            min_length_px adaptif.
+        """
         if progress:
             progress("Skeletonizing P&ID pipe network...")
 
         H, W = img_bgr.shape[:2]
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
 
-        # Adaptive thresholding to capture clean pipe strokes (tuned to blockSize=21, C=6 for faint CAD lines)
-        binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
-        )
+        if binary_img is not None:
+            # Region/whole-image path: reuse the already-computed full-resolution binary.
+            # Never re-run adaptive thresholding on a cropped sub-image (local statistics
+            # collapse under white-background domination -> thin pipe strokes vanish).
+            binary = binary_img
+            if binary.shape[:2] != (H, W):
+                binary = cv2.resize(binary, (W, H), interpolation=cv2.INTER_NEAREST)
+        else:
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
+            # Adaptive thresholding to capture clean pipe strokes (tuned to blockSize=21, C=6 for faint CAD lines)
+            binary = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
+            )
 
         # Remove very small noise dots
         clean_binary = cv2.morphologyEx(
             binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         )
+
+        # ROI bridge: reconnect pipe pixels that OCR masking punched through near the box
+        # so a line crossing a masked label does not shatter into disconnected fragments.
+        if roi:
+            clean_binary = cv2.morphologyEx(
+                clean_binary, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            )
 
         # 1. Dilated Text Masking: Scaled with DPI (5px at 350 DPI)
         # to blackout notes/underlines while avoiding false gap creation in dense areas
@@ -461,7 +492,13 @@ class SkeletonLineTracer(BaseLineTracer):
         skel = _morphological_skeleton(clean_binary)
 
         # 5. Extract graph segments and resolve junctions (crossovers vs T-junctions)
-        min_len = int(self.min_length_px * (dpi / 350.0))
+        # In ROI mode the selection box is small; shrink the minimum run length so short but
+        # genuine pipe fragments inside the box are kept, while never exceeding the configured
+        # page-level minimum (min(8, min_length_px) per task spec).
+        effective_min = self.min_length_px
+        if roi:
+            effective_min = min(8, self.min_length_px)
+        min_len = max(2, int(effective_min * (dpi / 350.0)))
         raw_runs = _graph_segments(skel, min_len)
 
         # 6. Apply standard suppressions (symbol edges, equipment interiors, furniture)

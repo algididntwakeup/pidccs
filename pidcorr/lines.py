@@ -605,8 +605,8 @@ def split_poly_run(
 
 
 def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
-                           max_side_pt=10.0, max_area_pt2=40.0, max_aspect=4.0,
-                           min_area_px=8, protect_boxes=None):
+                           max_side_pt=9.3, max_area_pt2=25.5, max_aspect=3.5,
+                           min_area_px=15, protect_boxes=None):
     """Pra-skeletisasi: hitamkan (blackout) pulau piksel yang secara geometri menyerupai
     GLYPH TEKS / coretan kecil yang lolos dari masking OCR.
 
@@ -617,13 +617,13 @@ def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
     memakai analisis komponen terhubung (`connectedComponentsWithStats`) dan melenyapkan
     pulau dengan profil geometri karakter tipikal P&ID:
 
-      * ukuran sisi pendek (<= 10pt @ 350dpi, i.e. ~48-50px pada 200dpi) -> bukan pipa,
-      * area piksel kecil (8..40pt^2) -> bukan header/perimeter equipment,
-      * aspect ratio tidak memanjang ekstrem (max_side/min_side < 4.0) -> pipa lurus selalu
+      * sisi terpanjang <= 9.3pt (<= 45px @ 350dpi) -> bukan pipa/header equipment,
+      * area 15..25.5pt^2 (<= ~600px @ 350dpi) -> pulau glyph kecil, bukan pejalan panjang,
+      * aspect ratio tidak memanjang ekstrem (max_side/min_side < 3.5) -> pipa lurus selalu
         JAUH lebih memanjang (ratusan px panjang vs 2-3px tebal => AR > 10).
 
     Pengaman pipa cabang nyata (nipel pendek, vent, drain, stub tegak lurus):
-      * ambang aspect ratio 4.0 MENJAGA stub tipis (w=2,h=12 -> AR 6) tetap hidup,
+      * ambang aspect ratio 3.5 MENJAGA stub tipis (w=2,h=14 -> AR 7) tetap hidup,
       * komponen yang LEBIH BESAR dari ambang tidak disentuh (pipa ber-elbow/bercabang
         menyatu dengan jaringan panjang, jadi bagian dari komponen besar),
       * `protect_boxes` (mis. bbox equipment/nozzle) menjaga isi area sensitif,
@@ -636,6 +636,7 @@ def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
     S = dpi / 350.0
     max_side = max(6, int((max_side_pt / 72.0) * dpi))
     max_area = max(12, int((max_area_pt2 / (72.0 ** 2)) * (dpi ** 2)))
+    min_area = max(2, int(min_area_px * S * S))
 
     out = binary.copy()
     ink = (out > 0).astype(np.uint8)
@@ -650,7 +651,7 @@ def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
         x, y, w, h, area = (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
                             int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT]),
                             int(stats[i, cv2.CC_STAT_AREA]))
-        if area < min_area_px:
+        if area < min_area:
             drop_ids.append(i)          # bintik noise mikro
             continue
         if area > max_area or max(w, h) > max_side:

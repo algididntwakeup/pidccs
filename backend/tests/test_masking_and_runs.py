@@ -117,3 +117,54 @@ def test_suppress_floating_stubs_noop_without_detections():
     g = PipeRun(points=[(10, 10), (30, 32)], axis="d")
     out = suppress_floating_stubs([g], detections=None, dpi=350)
     assert g in out, "must be a no-op when detections is empty/None"
+
+
+def test_suppress_text_artifacts_tighter_thresholds():
+    """New defaults (side<=45px, area<=600px, AR<3.5 @350dpi) drop more glyph garbage
+    while still preserving thin, elongated pipe stubs."""
+    binary = np.zeros((400, 400), dtype=np.uint8)
+    # Long horizontal pipe -> kept
+    binary[50:53, 20:380] = 255
+    # Thin vertical stub (w=3, h=40 -> AR 13) -> kept (elongated)
+    binary[120:160, 100:103] = 255
+    # A wider compact glyph "8" 30x30 (area 900 minus hole ~ 700) at 350dpi...
+    binary[250:280, 60:90] = 255
+    # small fraction glyph 20x24 (AR 1.2, area 480) -> removed
+    binary[250:274, 150:170] = 255
+
+    out = suppress_text_artifacts(binary, dpi=350)
+    assert out[50:53, 20:380].sum() > 0, "long pipe must survive"
+    assert out[120:160, 100:103].sum() > 0, "thin elongated stub must survive"
+    assert out[250:274, 150:170].sum() == 0, "compact glyph must be removed"
+
+
+def test_skeleton_tracer_accepts_precomputed_binary():
+    """trace(binary_img=...) must bypass adaptive thresholding and trace the supplied ink."""
+    img = np.full((300, 500, 3), 255, dtype=np.uint8)
+    # Draw a black pipe on a WHITE background (so adaptive threshold would be the only
+    # source of ink). Provide the pre-computed binary explicitly.
+    img[150:153, 40:460] = 0
+    binary = np.zeros((300, 500), dtype=np.uint8)
+    binary[150:153, 40:460] = 255  # BINARY_INV: ink = 255
+
+    tracer = SkeletonLineTracer(min_length_px=6)
+    runs = tracer.trace(img, dpi=350, detections=[], binary_img=binary, roi=True)
+    assert runs, "pre-computed binary path must still produce a pipe run"
+    found = any(abs(r.points[0][1] - 151) <= 4 for r in runs)
+    assert found, "the horizontal pipe at y=151 should be traced"
+
+
+def test_roi_mode_bridges_ocr_masking_holes():
+    """In ROI mode a small MORPH_CLOSE reconnects a pipe broken by a 2px gap."""
+    img = np.full((200, 400, 3), 255, dtype=np.uint8)
+    img[100:103, 40:200] = 0
+    img[100:103, 202:360] = 0  # 2px gap (as if OCR masking punched through)
+    binary = np.zeros((200, 400), dtype=np.uint8)
+    binary[100:103, 40:200] = 255
+    binary[100:103, 202:360] = 255
+
+    tracer = SkeletonLineTracer(min_length_px=4)
+    runs = tracer.trace(img, dpi=350, detections=[], binary_img=binary, roi=True)
+    # The bridged result should contain a run that spans most of the width.
+    wide = [r for r in runs if (max(p[0] for p in r.points) - min(p[0] for p in r.points)) > 200]
+    assert wide, "MORPH_CLOSE in ROI mode should bridge the small gap"

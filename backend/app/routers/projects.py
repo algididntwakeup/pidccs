@@ -1,6 +1,7 @@
 import os
 import uuid
 from typing import List, Optional
+import cv2
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,9 +133,31 @@ async def trace_region(
     height, width = img.shape[:2]
     x1, y1 = max(0, min(int(payload.x1), width - 1)), max(0, min(int(payload.y1), height - 1))
     x2, y2 = max(x1 + 1, min(int(payload.x2), width)), max(y1 + 1, min(int(payload.y2), height))
-    crop = img[y1:y2, x1:x2]
-    tracer = SkeletonLineTracer(min_length_px=6)
-    local_runs = tracer.trace(crop, dpi=sheet.dpi or 350, detections=[], furniture=[])
+
+    # --- Box Trace / ROI re-scan stabilization ---------------------------------------
+    # 1. Binarize the FULL image ONCE (same adaptive params as the page-level tracer).
+    #    We must NOT re-threshold the crop: a sub-image dominated by white background
+    #    starves adaptive thresholding of local statistics, dropping thin pipe strokes.
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    full_binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
+    )
+
+    # 2. Expand the selection by 20px on every side (anti-clipping). Lines touching the box
+    #    edge would otherwise be severed by skeletonization; the padded crop keeps them whole.
+    pad = 20
+    px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
+    px2, py2 = min(width, x2 + pad), min(height, y2 + pad)
+    binary_crop = full_binary[py1:py2, px1:px2]
+    bgr_crop = img[py1:py2, px1:px2]
+
+    # 3. Trace on the padded crop using the pre-computed binary (roi=True adds a small
+    #    MORPH_CLOSE to bridge OCR-masking holes) and adaptive min length.
+    tracer = SkeletonLineTracer(min_length_px=6, suppress_floating_stubs=False)
+    local_runs = tracer.trace(
+        bgr_crop, dpi=sheet.dpi or 350, detections=[], furniture=[],
+        binary_img=binary_crop, roi=True,
+    )
 
     new_runs = []
     for run in local_runs:
@@ -143,7 +166,8 @@ async def trace_region(
             "axis": run.axis,
             "underline": getattr(run, "underline", False),
         }
-        points = [[int(p[0]) + x1, int(p[1]) + y1] for p in record.get("points", [])]
+        # Offset local (padded-crop) coordinates back to global image space.
+        points = [[int(p[0]) + px1, int(p[1]) + py1] for p in record.get("points", [])]
         if len(points) < 2:
             continue
         new_runs.append({
