@@ -1119,8 +1119,9 @@ export default function InteractivePipeCanvas({
               if (!run.points || run.points.length < 2) return null;
               const isSelected = selectedRunIndices.has(idx);
               const isHovered = hoveredRunIdx === idx;
+              const isEquipOutline = Boolean(run.equipment_outline);
               const overrideColor = colorOverrideMap?.get(idx);
-              const strokeColor = overrideColor || run.color || '#2563EB';
+              const strokeColor = overrideColor || run.color || (isEquipOutline ? '#F97316' : '#2563EB');
               const isDimmed = Boolean(dimUncolored && colorOverrideMap && !overrideColor);
 
               // If dragging vertices of this run, use the live drag points
@@ -1190,12 +1191,12 @@ export default function InteractivePipeCanvas({
                     points={ptsStr}
                     fill="none"
                     stroke={isSelected ? '#F59E0B' : strokeColor}
-                    strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : 3.5}
+                    strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : isEquipOutline ? 2.5 : 3.5}
                     strokeLinecap="round"
                     strokeLinejoin="round"
-                    strokeDasharray={isSelected ? '10 5' : undefined}
+                    strokeDasharray={isSelected ? '10 5' : isEquipOutline ? '7 4' : undefined}
                     filter={isHovered && !isSelected ? 'url(#hover-glow)' : undefined}
-                    opacity={isDimmed ? 0.18 : 1}
+                    opacity={isDimmed ? 0.18 : isEquipOutline ? 0.95 : 1}
                     style={{
                       pointerEvents: 'none',
                       transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',

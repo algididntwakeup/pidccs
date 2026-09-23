@@ -14,3 +14,4 @@ class PipeRun(BaseModel):
     color: str = Field(default="#2563EB", description="Display and export stroke color hex")
     label: str = Field(default="", description="Piping line label or tag (e.g. 605-6\"-GR-BDA-029-H50)")
     manual: bool = Field(default=False, description="True if manually edited or created by engineer")
+    equipment_outline: bool = Field(default=False, description="True if run is an equipment (vessel/tank) outline contour, not a process pipe")

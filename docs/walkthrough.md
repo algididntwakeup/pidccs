@@ -1,5 +1,65 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Vessel Outline Trace, Instrument Gaps, Piecemeal Bridging & Right-Nozzle Rescue
+
+**Status**: Implemented, tested (71 backend tests), full pipeline verified on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (3309×2339, vessel `605-V-221-B`).
+
+### Problem (user-reported)
+1. Vessel `605-V-221-B` (vertical cylinder, rounded domes) **not traced at all** — no outline, no right-side nozzles N6A/N6B/N4, U-pipe to LT447 missing.
+2. Many pipes arrived as **piecemeal 1–2px fragments** instead of clean runs; long headers (N1/N7A/N6A/N6B/N4) were missing entirely.
+3. **Instruments were traced** (bubbles LG/LZT) — user wanted a GAP at the instrument and the pipe to resume after it ("dikasih gap").
+4. Red chaos near the vessel: zig-zag polylines connecting vessel wall ↔ X-panel ↔ parallel nozzle rows.
+5. `equipment_outline` flag needed to be **visually distinct** and user-splittable (Plan B accepted: outline may consist of several fragments as long as all ink is covered).
+
+### Root causes found
+- **YOLO equipment box for the vessel is badly offset/oversized**: `(1362,846,1921,1657)` vs real vessel x≈1393–1663, dome top y≈916, bottom y≈1525. The raw box was used for interior blackout + endpoint snapping → real nozzle pipes (outside the tool but inside the box) were clipped, and a fake x=1362 wall column was created by snapping.
+- **`suppress_box_edges` was too generous**: margin `m ≈ 34px`; its `inside_span` check accepted spans ending within `box ± m` → genuine pipe stubs exiting valve boxes (N6A/N6B at x≈1663, U-pipe verticals x≈1704–1724) were dropped as "box edges".
+- **Bridging passes mixed outline↔pipe runs** → zig-zag polylines; parallel pipes (vessel wall x=1394 vs X-panel x=1450; N8A/N8B/N7B rows 56px apart) were folded into one run by `bridge_inline_valve_gaps`.
+- **Piecemeal fragments** below `min_length` were dropped instead of being chained.
+- **`equipment_outline` was stripped by the API schema** (`PipeRun` in `backend/app/schemas/run.py` lacked the field), so the frontend could not render it distinctly.
+- **Pipe labels propagated onto outline runs** (vessel outline showed `605-2"-GR-CSA-176`) — equipment is not a pipe.
+
+### Fixes (all in this sprint)
+- `pidcorr/lines.py`
+  - `equipment_outline_protect_mask(..., return_tight=True)` → returns `(mask, tight_boxes)`; tight boxes = union bbox of protected outline components per detection. All downstream blackout/tagging/snapping uses **tight** boxes instead of the raw offset YOLO box.
+  - `snap_endpoints_to_equipment(..., snap_mask=None)`: ray-search along pipe axis to real wall ink; skips `equipment_outline` runs. Kills the fake x=1362 column.
+  - `suppress_box_edges`: **strict** `inside_span` (`box ± 2px`); edge-coincident lines still dropped, but pipe stubs exiting a box (≥1 endpoint outside) survive. This rescued N6A/N6B/N4 stubs + U-pipe.
+  - `bridge_piecemeal_gaps` (NEW): aggressive chaining of short fragments (gap ≤48px, angle ≤35°, anti-branch guard) so long pipes are never lost — accepted trade-off: occasional wrong connection is user-correctable, missing pipe wastes user time.
+  - `bridge_collinear_headers`, `chain_collinear_segments`, `bridge_piecemeal_gaps`, `bridge_inline_valve_gaps`: all gained `block_boxes=None` (instrument bubbles → gaps never re-bridged) and **outline↔pipe mix guards**.
+  - `bridge_inline_valve_gaps`: lateral-offset guard (collinear mode) + directional-continuity guard (containment mode, 40°) — stops parallel-row folding & wall/X-panel zig-zag.
+  - `bridge_equipment_outline_fragments`: fixed chain-drop regression (vessel outline disappearing) + inverted endpoint reversal.
+- `pidcorr/implementations/skeleton_tracer.py`
+  - Step 2 uses `return_tight=True`; interior blackout uses tight boxes; `tight_dets` used downstream.
+  - Step 2b: instrument bubble blackout (`inst_boxes` → `block_boxes` for all bridging passes). Valves NOT blacked out.
+- `pidcorr/propagate.py` + `pidcorr/orchestrator.py`: `equipment_outline` runs are never seeded, traversed, targeted, or label-assigned (no pipe labels on equipment).
+- `backend/app/schemas/run.py`: `PipeRun.equipment_outline: bool = False` added (was stripped by response_model).
+- Frontend: `types/schema.ts` + `InteractivePipeCanvas.tsx` (outline runs rendered **orange dashed, thinner**) + run list badge `outline` in `page.tsx`.
+- `pidcorr/export.py`: engineer-mode export renders outline runs orange and legend labels them "Equipment Outline".
+- Tests: +11 in `backend/tests/test_masking_and_runs.py` (protect mask keeps 2-axis component & drops thin baffle; tight box bounds; flag survives `bridge_collinear_headers`/`chain_collinear_segments`/single-run verbatim; piecemeal & valve passes never mix outline↔pipe; `block_boxes` prevents bridging across instrument bubble; valve lateral-offset guard; `suppress_box_edges` keeps nozzle stub & drops edge-coincident line; `snap_endpoints` ray-snap + outline skip; propagate never labels outline runs). Two pre-existing tests updated to the narrowed contracts (containment needs directional continuity; box-edge span strictness).
+
+### Verified results (full pipeline, 54 runs, 6 equipment_outline)
+- Vessel outline traced in 3 fragments (Plan B): `(1393,937,1660,1465)` 23pts, `(1405,1004,1642,1525)` 35pts, `(1510,916,1622,944)` 12pts — dome top, both walls, X-panel, bottom dome, all left nozzles.
+- Right side: N6A/N6B stubs → valves → U-pipe verticals x=1724 → LT447, with clean gaps at bubbles. N4 stub present.
+- Instruments (LG/LZT/SDV) not traced; pipe resumes after them.
+- Fake x=1362 column gone; CCP/LZT zig-zag chaos gone.
+- `equipment_outline` survives API serialization; 0 outline runs carry pipe labels.
+
+### Known remaining artifacts (accepted)
+- CCP funnel symbol (x1743–1785, y1544–1587) traced as 4 tiny runs — no YOLO detection covers it; coherent shape, not chaos.
+- 3 fragments at x=1664/1697 (13px verticals on pipe lines) are valve-symbol bowtie internals — correctly not merged.
+- Outline is 3 fragments instead of one closed polyline (Plan B); user can merge/split in the UI.
+
+### YOLO / ML notes (user-requested, for future model retraining)
+- **`equip_big` box for the vessel is offset & oversized**: `(1362,846,1921,1657)` vs real silhouette x≈1393–1663, dome top y≈916, bottom y≈1525 — ~95px left offset, ~260px too wide. Current workaround: tight boxes derived from outline component bboxes. A retrained/verified box would remove the workaround.
+- **Mislabeled text as equipment**: "Title Piping Instrumentation And" `(2712,2129,3233,2221)` and tag text `605-V-221-B` `(2369,92,3095,298)` detected as equipment — these produce spurious `equipment_outline` runs (e.g. `(3092,93,3094,296)`, `(2256,86,2256,284)`).
+- **`equip_big` also fires on the compressor at x≈94 and x≈2256** with low confidence (0.31) — acceptable for now (real outlines) but noisy.
+- CCP funnel / instrument-like funnels have no detection class → traced as symbol fragments. Consider adding a `funnel`/`funnel-symbol` class or masking via symbol vocabulary.
+- Valve boxes from `pid3_finetune` occasionally **oversized** (control valve `(1745,1631,1780,1697)` covers two symbols) → contained-mode bridging needs the directional guard; a tighter valve box would let us relax it.
+
+### Fast iteration workflow (added this sprint)
+`backend/_diag_trace_only.py` — caches OCR+YOLO+furniture per image hash (`_cache_<hash>.json`) and re-runs only the tracer (~3s vs ~10min full). Flags: `--rebuild` (force stages 1-3), `--crop x1 y1 x2 y2`, `--labels` (also run associate+propagate to verify labels). Container-only: `docker compose exec -T api python _diag_trace_only.py "<image>" [--labels]`. Cache invalidates automatically if the PNG changes.
+
+
 ## Sprint Handover: Canvas Pan Hotkey, Arrow Nudge, Popover Backspace Fix, Halo Leak & Piping Tag Continuity
 
 **Status**: Implemented, tested, and deployed locally on 2026-09-24.

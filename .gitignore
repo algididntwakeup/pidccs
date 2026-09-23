@@ -99,3 +99,6 @@ temp/
 frontend/test-results/
 frontend/playwright-report/
 frontend/blob-report/
+
+# Fast iteration diag (untracked tool + cache)
+backend/_cache_*.json

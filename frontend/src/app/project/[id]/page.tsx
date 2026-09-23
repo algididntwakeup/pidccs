@@ -2338,6 +2338,11 @@ export default function ProjectWorkspace() {
                                             manual
                                           </span>
                                         )}
+                                        {r.equipment_outline && (
+                                          <span className="text-[9px] bg-orange-100 text-orange-700 font-bold px-1 rounded">
+                                            outline
+                                          </span>
+                                        )}
                                       </div>
                                       <p className="text-[11px] text-slate-500 truncate">
                                         {r.label || r.pid ? (

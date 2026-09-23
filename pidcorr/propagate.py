@@ -62,7 +62,10 @@ def _mk_run(points, template):
     return {"points": [[int(x), int(y)] for x, y in points], "axis": axis,
             "x1": int(points[0][0]), "y1": int(points[0][1]),
             "x2": int(points[-1][0]), "y2": int(points[-1][1]),
-            "underline": bool(template.get("underline", False))}
+            "underline": bool(template.get("underline", False)),
+            "color": template.get("color", "#2563EB"),
+            "manual": bool(template.get("manual", False)),
+            "equipment_outline": bool(template.get("equipment_outline", False))}
 
 
 # ------------------------------------------------ 1) pecah di connection point ----
@@ -520,6 +523,10 @@ def propagate_run_labels(result, dpi=350, max_dist_pt=None):
     for i, r in enumerate(runs):
         if r.get("underline"):
             continue
+        # Kontur alat (equipment_outline) BUKAN pipa: tidak boleh jadi sumber label
+        # pipa, tidak boleh jadi tujuan, dan tidak boleh jadi jembatan propagasi.
+        if r.get("equipment_outline"):
+            continue
         tag = (r.get("label") or "").strip()
         if not tag:
             continue
@@ -533,6 +540,8 @@ def propagate_run_labels(result, dpi=350, max_dist_pt=None):
             continue
         for j in sorted(adj.get(i, ())):
             if runs[j].get("underline"):
+                continue
+            if runs[j].get("equipment_outline"):
                 continue
             nd = d + _length(runs[j])
             if nd > maxd:
@@ -549,6 +558,8 @@ def propagate_run_labels(result, dpi=350, max_dist_pt=None):
     n_inferred = 0
     for i, info in enumerate(lab):
         if info and info.get("inferred"):
+            if runs[i].get("equipment_outline"):
+                continue
             if not (runs[i].get("label") or "").strip():
                 runs[i]["label"] = info["label"]
                 n_inferred += 1

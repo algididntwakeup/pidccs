@@ -1547,3 +1547,66 @@ Sebagai acuan prioritas untuk sesi berikutnya:
 
 ### Deploy
 `docker compose build frontend && up -d frontend`; `docker compose restart api worker`. 5 container healthy.
+
+---
+
+## Phase B.7 — Line-Tracing Quality: Vessel Outline, Instrument Gaps & Piecemeal Bridging (Sprint 2026-09)
+
+### Context
+Live project on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (vessel `605-V-221-B`):
+vessel outline never traced, long right-side nozzles (N6A/N6B/N4 + U-pipe to LT447) missing,
+instruments wrongly traced, zig-zag chaos near vessel wall/X-panel, pipes shattered into
+1–2px piecemeal fragments. User decisions: (a) gap the pipe at instruments, resume after;
+(b) aggressive piecemeal bridging is acceptable — a wrong connection is user-correctable,
+a missing long pipe wastes user time; (c) Plan B — outline may be split into several
+`equipment_outline` runs as long as all ink is covered; (d) `equipment_outline` must be
+visually distinct and splittable; (e) document YOLO/ML detection problems.
+
+### Implementation
+1. **Tight equipment boxes** — `equipment_outline_protect_mask(..., return_tight=True)` returns
+   per-detection tight bboxes (union of protected outline components). The raw YOLO
+   `equip_big` box for the vessel is offset `(1362,846,1921,1657)` vs real x≈1393–1663;
+   all interior blackout / tagging / snapping now use tight boxes.
+2. **Ray-snap to real wall** — `snap_endpoints_to_equipment(..., snap_mask)`: endpoints near
+   an equipment box ray-search along the pipe axis for real wall ink (kills fake x=1362 column).
+   Outline runs are never snapped.
+3. **Strict box-edge suppression** — `suppress_box_edges` `inside_span` = box ± 2px, so
+   genuine nozzle stubs exiting valve boxes (N6A/N6B, U-pipe x=1704–1724) survive while
+   edge-coincident lines still drop.
+4. **Piecemeal bridging** — NEW `bridge_piecemeal_gaps` (gap ≤48px, angle ≤35°, anti-branch,
+   ≥1 side must be short fragment) chains shattered fragments so long pipes are never lost.
+5. **Instrument gaps** — `skeleton_tracer` step 2b blacks out instrument bubbles and passes
+   them as `block_boxes` to ALL bridging passes (`bridge_collinear_headers`,
+   `chain_collinear_segments`, `bridge_piecemeal_gaps`, `bridge_inline_valve_gaps`) — pipe
+   gaps at instruments are never re-bridged. Valves are NOT blacked out.
+6. **Chaos guards** — all four bridging passes refuse to mix `equipment_outline` ↔ pipe runs;
+   `bridge_inline_valve_gaps` gained lateral-offset (collinear) + directional-continuity
+   (containment, 40°) guards — stops parallel-row folding (N8A/N8B/N7B) and wall↔X-panel zig-zag.
+7. **Outline flag end-to-end** — `backend/app/schemas/run.py` `PipeRun.equipment_outline`;
+   orchestrator + propagate serialize/preserve it; propagate never seeds/traverses/labels
+   outline runs (equipment is not a pipe). FE: orange dashed thin stroke + `outline` badge;
+   engineer-mode export renders outline orange with "Equipment Outline" legend.
+8. **Tests** — +11 unit tests covering protect-mask component selection, flag survival across
+   every merge path, outline↔pipe mixing guards, `block_boxes`, lateral-offset guard, strict
+   box-edge span, ray-snap + outline skip, propagate exclusion.
+
+### Verification
+- `pytest backend/tests/ -q` → **71 passed**.
+- Full pipeline: 54 runs, 6 `equipment_outline` (3 vessel fragments cover dome top, walls,
+  X-panel, bottom dome, left nozzles; right nozzles + U-pipe traced; instruments gapped;
+  fake x=1362 column & CCP/LZT zig-zag gone; 0 outline runs with pipe labels).
+- FE rebuilt (`docker compose build frontend && up -d frontend`).
+
+### YOLO / ML findings (documented for retraining)
+- `equip_big` vessel box offset ~95px left, ~260px too wide → workaround = tight boxes.
+- Text misclassified as equipment: "Title Piping Instrumentation And" `(2712,2129,3233,2221)`,
+  tag `605-V-221-B` `(2369,92,3095,298)` → spurious outline runs at x≈2256/3092.
+- CCP funnel has no detection class → traced as symbol fragments (accepted).
+- Valve boxes occasionally oversized (cover two symbols) → contained-mode bridging needs the
+  directional guard; tighter valve boxes would allow relaxing it.
+- Low-conf (0.31) `equip_big` on compressor x≈94/x≈2256 acceptable but noisy.
+
+### Tooling
+`backend/_diag_trace_only.py`: caches OCR/YOLO/furniture per image hash and re-runs only the
+tracer (~3s vs ~10min). Flags `--rebuild`, `--crop`, `--labels`. Kept untracked for future
+sprint iterations.

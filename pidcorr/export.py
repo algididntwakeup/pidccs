@@ -113,12 +113,16 @@ def render_marked_png(img_bgr, result, mode="engineer"):
         from collections import defaultdict
         color_groups = defaultdict(list)
         for ri, r in enumerate(runs):
-            rgb = _hex_to_rgb(r.get("color", "#2563EB"))
+            if r.get("equipment_outline"):
+                rgb = (249, 115, 22)          # orange = kontur alat, bukan pipa
+            else:
+                rgb = _hex_to_rgb(r.get("color", "#2563EB"))
             _poly(vis, r, rgb)
             color_groups[rgb].append(ri)
         for rgb, r_idxs in color_groups.items():
             hex_label = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
-            entries.append((rgb, f"Piping Run {hex_label} ({len(r_idxs)} segmen)"))
+            kind = "Equipment Outline" if rgb == (249, 115, 22) else "Piping Run"
+            entries.append((rgb, f"{kind} {hex_label} ({len(r_idxs)} segmen)"))
         _legend(vis, entries, "PIPING RUN TRACE (Engineer Polyline Mode)")
     elif mode == "system":
         for s in systemize(result):

@@ -200,12 +200,22 @@ def test_snap_t_junctions_ignores_collinear_continuation():
     assert (110, 100) in [(int(p[0]), int(p[1])) for p in pts_b], "collinear gap must be left alone"
 
 def test_bridge_inline_valve_gaps_containment_without_angle():
-    """Two facing pipe ends inside the SAME valve bbox are bridged regardless of angle."""
+    """Two facing pipe ends inside the SAME valve bbox are bridged when direction is
+    continuous (small deviation), even if not perfectly collinear."""
     r1 = PipeRun(points=[(50, 100), (100, 100)], axis="h")
-    r2 = PipeRun(points=[(110, 88), (170, 88)], axis="h")  # offset vertically (diagonal-ish gap)
+    r2 = PipeRun(points=[(110, 95), (170, 95)], axis="h")  # slight vertical offset
     valves = [{"coarse": "valve", "x1": 95, "y1": 80, "x2": 115, "y2": 130}]
     bridged = bridge_inline_valve_gaps([r1, r2], detections=valves)
     assert len(bridged) == 1, "endpoints inside the same valve bbox must merge"
+
+def test_bridge_inline_valve_gaps_containment_rejects_folded_rows():
+    """Parallel offset rows both touching the same big valve bbox must NOT fold into
+    one zig-zag run (directional-continuity guard; N8A/N8B vessel case)."""
+    r1 = PipeRun(points=[(100, 100), (160, 100)], axis="h")
+    r2 = PipeRun(points=[(180, 156), (240, 156)], axis="h")
+    valves = [{"coarse": "valve", "x1": 90, "y1": 70, "x2": 250, "y2": 190}]
+    out = bridge_inline_valve_gaps([r1, r2], detections=valves, max_gap_px=115)
+    assert len(out) == 2, "parallel rows must stay separate"
 
 def test_suppress_drawing_margins_guard_band():
     """A border segment fully inside the 15px perimeter band is dropped."""
@@ -377,3 +387,158 @@ def test_propagate_run_labels_counts_seeds():
     res = _mk_result(runs)
     propagate_run_labels(res, dpi=350)
     assert res["label_propagation"]["n_seeded"] == 2
+
+# ---------------------------------------------------------------------------
+# Equipment-outline flag preservation + instrument-gap bridging guards
+# (sprint: vessel outline trace + N6A/N6B/N4 nozzles + no instrument tracing)
+# ---------------------------------------------------------------------------
+
+from pidcorr.lines import (
+    equipment_outline_protect_mask,
+    tag_equipment_outlines,
+    bridge_collinear_headers,
+    bridge_piecemeal_gaps,
+    bridge_inline_valve_gaps,
+    suppress_box_edges,
+    snap_endpoints_to_equipment,
+)
+
+def _mk_eo_run(pts, axis=None):
+    if axis is None:
+        axis = "h" if abs(pts[0][1] - pts[-1][1]) <= abs(pts[0][0] - pts[-1][0]) else "v"
+    return PipeRun(points=[(int(x), int(y)) for x, y in pts], axis=axis,
+                   color="#2563EB", equipment_outline=True)
+
+def test_pipe_run_equipment_outline_field_defaults_and_getitem():
+    r = PipeRun(points=[(0, 0), (10, 0)], axis="h")
+    assert r.equipment_outline is False
+    assert r["equipment_outline"] is False
+    r2 = PipeRun(points=[(0, 0), (10, 0)], axis="h", equipment_outline=True)
+    assert r2.equipment_outline is True
+    assert r2["equipment_outline"] is True
+
+def test_protect_mask_keeps_outline_component_drops_thin_baffle():
+    """Protect mask must keep the 2-axis spanning vessel outline component and NOT
+    protect a thin horizontal baffle line inside the equipment box."""
+    binary = np.zeros((400, 400), np.uint8)
+    # Vessel outline: left wall x=100 (y=80..320), right wall x=300, top dome arc,
+    # bottom line -> one big connected component spanning both axes.
+    binary[80:321, 100:103] = 255          # left wall
+    binary[80:321, 298:301] = 255          # right wall
+    binary[80:83, 100:301] = 255           # top
+    binary[318:321, 100:301] = 255         # bottom
+    # Thin baffle: horizontal line, wide but short (fails min span on the y axis)
+    binary[200:203, 150:250] = 255
+    dets = [{"coarse": "equipment", "x1": 60, "y1": 40, "x2": 340, "y2": 360}]
+    mask, tight = equipment_outline_protect_mask(binary, dets, dpi=350,
+                                                 eq_margin_px=4, return_tight=True)
+    assert mask[200, 100] == 255, "vessel wall must be protected"
+    assert mask[100, 200] == 0 or mask[200, 200] == 0, "baffle must not be protected"
+    # tight box must cover the outline component, not the raw (wider) detection box
+    assert len(tight) == 1
+    tx1, ty1, tx2, ty2 = tight[0]
+    assert tx1 >= 90 and tx2 <= 310 and ty1 >= 70 and ty2 <= 330
+
+def test_outline_flag_survives_bridge_collinear_headers():
+    a = _mk_eo_run([(100, 100), (200, 100)])
+    b = _mk_eo_run([(230, 100), (320, 100)])
+    out = bridge_collinear_headers([a, b], max_gap_px=45, tol_px=4)
+    assert len(out) == 1
+    assert getattr(out[0], "equipment_outline", False) is True
+
+def test_outline_flag_survives_chain_collinear_segments():
+    a = _mk_eo_run([(100, 100), (200, 100)])
+    b = _mk_eo_run([(208, 100), (300, 100)])
+    out = chain_collinear_segments([a, b], max_gap_px=15, tol_px=6)
+    assert len(out) == 1
+    assert getattr(out[0], "equipment_outline", False) is True
+
+def test_outline_flag_survives_single_run_chain_verbatim():
+    """A lone diagonal outline run must survive chain_collinear_segments verbatim
+    (axis 'd' preserved, flag preserved)."""
+    a = PipeRun(points=[(100, 100), (140, 140)], axis="d", equipment_outline=True)
+    out = chain_collinear_segments([a], max_gap_px=15, tol_px=6)
+    assert len(out) == 1
+    assert out[0] is a
+
+def test_bridge_piecemeal_never_mixes_outline_and_pipe():
+    """Outline fragment near a pipe fragment must NOT be chained into one run."""
+    pipe = PipeRun(points=[(100, 100), (140, 100)], axis="h")
+    outline = _mk_eo_run([(150, 100), (190, 100)])
+    out = bridge_piecemeal_gaps([pipe, outline], max_gap_px=48, tol_px=8)
+    assert len(out) == 2
+    flags = sorted(bool(getattr(r, "equipment_outline", False)) for r in out)
+    assert flags == [False, True]
+
+def test_bridge_inline_valve_gaps_never_mixes_outline_and_pipe():
+    pipe = PipeRun(points=[(100, 100), (140, 100)], axis="h")
+    outline = _mk_eo_run([(160, 100), (200, 100)])
+    valves = [{"coarse": "valve", "x1": 135, "y1": 85, "x2": 165, "y2": 115}]
+    out = bridge_inline_valve_gaps([pipe, outline], detections=valves, max_gap_px=115)
+    assert len(out) == 2
+
+def test_block_boxes_prevents_bridging_across_instrument_bubble():
+    """Two collinear pipe stubs facing an instrument bubble must NOT be bridged
+    when the bubble bbox is passed as block_boxes."""
+    a = PipeRun(points=[(100, 100), (140, 100)], axis="h")
+    b = PipeRun(points=[(200, 100), (240, 100)], axis="h")
+    bubble = [(150, 80, 190, 120)]
+    out_blocked = bridge_collinear_headers([a, b], max_gap_px=80, tol_px=4,
+                                           block_boxes=bubble)
+    assert len(out_blocked) == 2, "must NOT bridge across instrument bubble"
+    out_free = bridge_collinear_headers([a, b], max_gap_px=80, tol_px=4)
+    assert len(out_free) == 1, "without blocker the gap is bridged (control)"
+
+def test_valve_bridge_lateral_offset_guard_keeps_parallel_pipes_separate():
+    """Two parallel horizontal pipes 56px apart, both touching the same big valve
+    box: must NOT be merged into a zig-zag run."""
+    r1 = PipeRun(points=[(100, 100), (160, 100)], axis="h")
+    r2 = PipeRun(points=[(180, 156), (240, 156)], axis="h")
+    valve = [{"coarse": "valve", "x1": 90, "y1": 70, "x2": 250, "y2": 190}]
+    out = bridge_inline_valve_gaps([r1, r2], detections=valve, max_gap_px=115)
+    assert len(out) == 2, "parallel pipes must not be folded into one run"
+
+def test_suppress_box_edges_keeps_nozzle_stub_exiting_valve_box():
+    """A pipe stub that starts on the valve-box edge and exits (endpoint outside)
+    must survive; a line coincident with the box edge (both ends on the edge)
+    must be dropped."""
+    stub = PipeRun(points=[(140, 100), (200, 100)], axis="h")
+    edge_line = PipeRun(points=[(100, 85), (140, 85)], axis="h")  # exactly on box top edge
+    dets = [{"coarse": "valve", "x1": 100, "y1": 85, "x2": 140, "y2": 115}]
+    out = suppress_box_edges([stub, edge_line], dets, dpi=350)
+    kept = [r.points[0] for r in out]
+    assert (140, 100) in kept, "nozzle stub exiting the box must survive"
+    assert (100, 85) not in kept, "edge-coincident line must be dropped"
+
+def test_snap_endpoints_skips_outline_runs_and_ray_snaps_to_ink():
+    """With snap_mask: a pipe end near the equipment box snaps to real wall ink along
+    its axis; outline runs are never snapped."""
+    mask = np.zeros((300, 300), np.uint8)
+    mask[80:220, 150:153] = 255            # vessel wall ink at x=150..152
+    dets = [{"coarse": "equipment", "x1": 100, "y1": 60, "x2": 260, "y2": 240}]
+    pipe = PipeRun(points=[(60, 150), (144, 150)], axis="h")
+    outline = _mk_eo_run([(150, 90), (150, 210)], axis="v")
+    out = snap_endpoints_to_equipment([pipe, outline], dets, snap_radius_pt=14,
+                                      dpi=350, snap_mask=mask)
+    p_out = out[0]
+    assert p_out.points[-1][0] >= 150, "pipe end must snap onto the wall ink"
+    o_out = out[1]
+    assert tuple(o_out.points[0]) == (150, 90), "outline run must stay untouched"
+
+def test_propagate_labels_never_touches_equipment_outline_runs():
+    """Equipment-outline runs must not receive propagated pipe labels (equipment is
+    not a pipe), and must not act as bridges for propagation."""
+    runs = [
+        _mk_run([(0, 100), (200, 100)], label="605-2-GR-CSA-176"),
+        _mk_run([(200, 100), (400, 100)]),
+    ]
+    # chain an outline run touching the second pipe; it must stay unlabeled
+    eo = {"points": [[400, 100], [500, 100]], "x1": 400, "y1": 100, "x2": 500, "y2": 100,
+          "axis": "h", "label": "", "underline": False, "color": "#2563EB",
+          "equipment_outline": True}
+    runs.append(eo)
+    res = _mk_result(runs)
+    from pidcorr.propagate import propagate_run_labels
+    propagate_run_labels(res, dpi=350)
+    assert res["runs"][1]["label"] == "605-2-GR-CSA-176", "pipe continuation still labeled"
+    assert res["runs"][2]["label"] == "", "outline run must not receive pipe label"

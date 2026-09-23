@@ -34,6 +34,7 @@ class PipeRun:
     id: str = ""                              # Unique run identifier (e.g. run-0)
     label: str = ""                           # Custom tag or line label
     manual: bool = False                      # True if manually created/edited by engineer
+    equipment_outline: bool = False           # True = kontur alat (vessel/tangki), BUKAN pipa
 
     # kompat lama: x1,y1,x2,y2 = ujung-ujung polyline
     @property
@@ -63,6 +64,7 @@ class PipeRun:
         if key == "id": return getattr(self, "id", "")
         if key == "label": return getattr(self, "label", getattr(self, "pid", ""))
         if key == "manual": return getattr(self, "manual", False)
+        if key == "equipment_outline": return getattr(self, "equipment_outline", False)
         if key == "x1": return min(p[0] for p in self.points)
         if key == "y1": return min(p[1] for p in self.points)
         if key == "x2": return max(p[0] for p in self.points)
@@ -124,17 +126,24 @@ def suppress_box_edges(segs, detections, dpi=350, margin_pt=7):
     boxes = [(d["x1"], d["y1"], d["x2"], d["y2"]) for d in detections]
     out = []
     for s in segs:
+        # Kontur alat (equipment outline) bukan tepi kotak simbol -> jangan dibuang di sini.
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         (x0, y0), (x1, y1) = s.points[0], s.points[-1]
         drop = False
         for bx0, by0, bx1, by1 in boxes:
+            # inside_span HARUS ketat: garis tepi kotak yg sejajar tepi biasanya
+            # punya kedua ujung tepat di tepi (±2px). Stub pipa yg keluar dari
+            # dalam kotak (nozzle) punya min. satu ujung di luar -> jangan dibuang.
             if s.axis == "h":
                 lo, hi, yy = min(x0, x1), max(x0, x1), y0
                 near_edge = abs(yy - by0) <= m or abs(yy - by1) <= m
-                inside_span = lo >= bx0 - m and hi <= bx1 + m
+                inside_span = lo >= bx0 - 2 and hi <= bx1 + 2
             else:
                 lo, hi, xx = min(y0, y1), max(y0, y1), x0
                 near_edge = abs(xx - bx0) <= m or abs(xx - bx1) <= m
-                inside_span = lo >= by0 - m and hi <= by1 + m
+                inside_span = lo >= by0 - 2 and hi <= by1 + 2
             if near_edge and inside_span:
                 drop = True
                 break
@@ -277,6 +286,23 @@ def extract_diagonal_segments(img_bgr, dpi, connect_pts, detections=None,
     return out
 
 
+def _seg_crosses_boxes(p, q, boxes, step_px=4.0):
+    """True bila segmen p->q melewati interior salah satu kotak (mis. bbox instrumen).
+    Dipakai bridging: celah di instrumen TIDAK boleh dijembatani pipa."""
+    if not boxes:
+        return False
+    (px, py), (qx, qy) = p, q
+    d = math.hypot(qx - px, qy - py)
+    n = max(2, int(d / step_px) + 1)
+    for k in range(n + 1):
+        x = px + (qx - px) * k / n
+        y = py + (qy - py) * k / n
+        for bx1, by1, bx2, by2 in boxes:
+            if bx1 <= x <= bx2 and by1 <= y <= by2:
+                return True
+    return False
+
+
 def _subtract_intervals(lo, hi, ins, min_keep):
     """Kurangi interval 'ins' (bagian di dalam equipment) dari [lo,hi]; kembalikan potongan
     LUAR yg panjangnya >= min_keep."""
@@ -323,6 +349,11 @@ def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=
     keep = 12 * dpi / 72.0
     out = []
     for s in segs:
+        # Kontur alat (equipment outline) BUKAN pipa: jangan di-clip di batas bbox alat,
+        # justru ia MENELUSURI batas itu.
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         (x0, y0), (x1, y1) = s.points[0], s.points[-1]
         if abs(x1 - x0) >= abs(y1 - y0):                # horizontal
             y = (y0 + y1) / 2.0; lo, hi = sorted((x0, x1))
@@ -343,21 +374,54 @@ def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=
     return out
 
 
-def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
+def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350, snap_mask=None):
     """Proyeksikan ujung garis pipa (endpoints) yang berakhir dekat perimeter
     bounding box equipment agar menempel persis ke dinding alat (nozzle connection),
-    bukan mengambang di luar kotak. (Phase B.5)"""
+    bukan mengambang di luar kotak. (Phase B.5)
+
+    Guard penting (fix x=1362):
+      * Run `equipment_outline` TIDAK di-snap sama sekali — konturnya sudah benar.
+      * Bila `snap_mask` diberikan (mask ink outline alat): ujung pipa di-snap ke INK
+        DINDING SEBENARNYA via ray-search searah sumbu pipa — bukan ke tepi bbox
+        deteksi. Kotak YOLO sering lebih lebar dari alat (vessel 605-V-221-B:
+        kotak x1=1362, dinding asli x≈1393); menarik ujung ke tepi kotak membuat
+        kolom palsu x=1362 yang kemudian ter-bridge jadi garis zigzag.
+      * Tanpa mask (fallback lama): endpoint yang sudah BERADA di dalam kotak hanya
+        di-snap bila arah datangnya menuju tepi terdekat (tidak ditarik menyamping).
+    """
     if not runs or not detections:
         return runs
     eqs = [d for d in detections if d.get("coarse") == "equipment"]
     if not eqs:
         return runs
 
+    def _is_eq(r):
+        if hasattr(r, "equipment_outline"):
+            return bool(r.equipment_outline)
+        return bool(r.get("equipment_outline", False))
+
     snap_radius_px = snap_radius_pt * dpi / 72.0
     boxes = [(float(d["x1"]), float(d["y1"]), float(d["x2"]), float(d["y2"])) for d in eqs]
 
+    _mask_h, _mask_w = (snap_mask.shape[:2] if snap_mask is not None else (0, 0))
+
+    def _ray_to_mask(px, py, ux, uy, max_r, win=2):
+        """Titik pertama di sepanjang arah (ux,uy) yang menyentuh ink-mask (dinding alat)."""
+        for s in range(2, int(max_r) + 1):
+            x = px + ux * s
+            y = py + uy * s
+            for o in (-win, -1, 0, 1, win):
+                xx = int(round(x - uy * o))
+                yy = int(round(y + ux * o))
+                if 0 <= xx < _mask_w and 0 <= yy < _mask_h and snap_mask[yy, xx] > 0:
+                    return (int(round(x)), int(round(y)))
+        return None
+
     out = []
     for r in runs:
+        if _is_eq(r):
+            out.append(r)
+            continue
         if hasattr(r, "points"):
             pts = [[float(p[0]), float(p[1])] for p in r.points]
         else:
@@ -374,6 +438,34 @@ def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
             prev_idx = 1 if end_idx == 0 else -2
             vx = px - pts[prev_idx][0]
             vy = py - pts[prev_idx][1]
+            vlen = math.hypot(vx, vy)
+            if vlen < 1e-6:
+                continue
+
+            if snap_mask is not None:
+                # Ray-search ke ink dinding alat searah sumbu pipa (hanya bila dekat alat).
+                # Bila ujung sudah berada DI atas ink (menempel dinding), jangan digeser.
+                already = False
+                ex, ey = int(round(px)), int(round(py))
+                for oy in (-2, 0, 2):
+                    for ox in (-2, 0, 2):
+                        xx, yy = ex + ox, ey + oy
+                        if 0 <= xx < _mask_w and 0 <= yy < _mask_h and snap_mask[yy, xx] > 0:
+                            already = True
+                            break
+                    if already:
+                        break
+                if already:
+                    continue
+                near = any(bx1 - snap_radius_px <= px <= bx2 + snap_radius_px and
+                           by1 - snap_radius_px <= py <= by2 + snap_radius_px
+                           for bx1, by1, bx2, by2 in boxes)
+                if near:
+                    hit = _ray_to_mask(px, py, vx / vlen, vy / vlen, snap_radius_px)
+                    if hit is not None:
+                        pts[end_idx] = [hit[0], hit[1]]
+                        modified = True
+                continue
 
             best_snap = None
             min_d = float("inf")
@@ -382,12 +474,23 @@ def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
                 cx = max(bx1, min(px, bx2))
                 cy = max(by1, min(py, by2))
 
-                # If endpoint is slightly inside the box
+                # If endpoint is slightly inside the box: only snap when the approach
+                # direction points TOWARD that nearest edge (i.e. the line overshot the
+                # wall). Never pull an endpoint sideways/backwards to a box edge.
                 if bx1 <= px <= bx2 and by1 <= py <= by2:
                     dl, dr = px - bx1, bx2 - px
                     dt, db = py - by1, by2 - py
                     m = min(dl, dr, dt, db)
-                    if m < min_d:
+                    toward = False
+                    if m == dl:
+                        toward = vx < 0
+                    elif m == dr:
+                        toward = vx > 0
+                    elif m == dt:
+                        toward = vy < 0
+                    else:
+                        toward = vy > 0
+                    if toward and m < min_d:
                         min_d = m
                         if m == dl: best_snap = (bx1, py)
                         elif m == dr: best_snap = (bx2, py)
@@ -448,6 +551,7 @@ def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
                     fluid=getattr(r, "fluid", ""),
                     underline=getattr(r, "underline", False),
                     color=getattr(r, "color", "#2563EB"),
+                    equipment_outline=bool(getattr(r, "equipment_outline", False)),
                 ))
             else:
                 new_r = dict(r)
@@ -510,7 +614,8 @@ def snap_t_junctions(runs, near_px=16, min_angle_deg=75.0, max_angle_deg=105.0):
         new_runs = [PipeRun(points=[(int(p[0]), int(p[1])) for p in _pts(r)],
                             axis=getattr(r, "axis", "poly"), pid=getattr(r, "pid", ""),
                             fluid=getattr(r, "fluid", ""), underline=getattr(r, "underline", False),
-                            color=getattr(r, "color", "#2563EB")) for r in runs]
+                            color=getattr(r, "color", "#2563EB"),
+                            equipment_outline=bool(getattr(r, "equipment_outline", False))) for r in runs]
     else:
         new_runs = [dict(r) for r in runs]
 
@@ -564,7 +669,8 @@ def snap_t_junctions(runs, near_px=16, min_angle_deg=75.0, max_angle_deg=105.0):
             new_runs[i] = PipeRun(points=clean, axis=getattr(r, "axis", "poly"),
                                   pid=getattr(r, "pid", ""), fluid=getattr(r, "fluid", ""),
                                   underline=getattr(r, "underline", False),
-                                  color=getattr(r, "color", "#2563EB"))
+                                  color=getattr(r, "color", "#2563EB"),
+                                  equipment_outline=bool(getattr(r, "equipment_outline", False)))
         else:
             nr = dict(r)
             nr["points"] = clean
@@ -834,6 +940,7 @@ def split_poly_run(
                 fluid=getattr(base_run, "fluid", ""),
                 underline=getattr(base_run, "underline", False),
                 color=getattr(base_run, "color", "#2563EB"),
+                equipment_outline=bool(getattr(base_run, "equipment_outline", False)),
             )
         else:
             r = dict(base_run)
@@ -981,6 +1088,9 @@ def suppress_floating_stubs(segs, detections=None, page_wh=None, dpi=350,
 
     out = []
     for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         if getattr(s, "axis", "") != "d" or s.length > max_len:
             out.append(s)
             continue
@@ -1005,6 +1115,9 @@ def suppress_furniture(segs, furniture, dpi=350, margin_pt=6):
     m = margin_pt * dpi / 72.0
     out = []
     for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         cx = (s.points[0][0] + s.points[-1][0]) / 2
         cy = (s.points[0][1] + s.points[-1][1]) / 2
         inside = any(x0 - m <= cx <= x1 + m and y0 - m <= cy <= y1 + m
@@ -1058,6 +1171,9 @@ def suppress_box_outlines(segs, boxes, dpi=350, band_pt=7):
     b = band_pt * dpi / 72.0
     out = []
     for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         (x0, y0), (x1, y1) = s.points[0], s.points[-1]
         horiz = abs(y1 - y0) <= b
         vert = abs(x1 - x0) <= b
@@ -1078,6 +1194,96 @@ def suppress_box_outlines(segs, boxes, dpi=350, band_pt=7):
     return out
 
 
+def equipment_outline_protect_mask(binary, detections, dpi=350, eq_margin_px=None,
+                                   min_span_frac=0.40, dilate_px=2, return_tight=False):
+    """Bangun mask guratan TEPI alat (outline tabung/vessel) di dalam kotak deteksi
+    `equipment`, supaya langkah 'blackout interior equipment' TIDAK menghapus kontur alat.
+
+    Masalah: masking interior kotak equipment men-nolkan SELURUH isi kotak. Bila kotak
+    deteksi meleset (offset) atau vessel digambar sebagai tabung berdinding tipis
+    (dome elips + dua dinding), kontur alat itu ikut lenyap -> vessel tak pernah ter-trace.
+
+    Pendekatan (validated pada 605-V-221-B):
+      Vessel outline (dome + dinding kiri/kanan + bottom) adalah SATU komponen ink yang
+      membentang di KEDUA sumbu box (bbox >= min_span_frac dari lebar & tinggi box).
+      Komponen lain di dalam box (panel X, tabel level, teks) bbox-nya kecil di salah
+      satu sumbu -> TIDAK dilindungi (tetap dihitamkan). Lindungi FULL STROKE komponen
+      outline itu (dilasi tipis), bukan contour-band, karena contour-band bisa terpeleset
+      ke perimeter blob gabungan (mis. tabel yang menyatu).
+
+    Return: uint8 mask (255 = lindungi). No-op (semua nol) bila detections kosong.
+
+    Bila `return_tight=True`: kembalikan tuple (mask, tight_boxes) di mana `tight_boxes`
+    adalah daftar bbox (x1,y1,x2,y2) yang di-TIGHTEN ke bbox komponen kontur yang
+    dilindungi (union per kotak deteksi). Box YOLO sering lebih besar dari alat
+    (vessel 605-V-221-B: kotak (1362,846,1921,1657) vs alat asli x≈1393..1663) —
+    memakai tight box untuk blackout interior & suppress_equipment_interior
+    menghindari clipping pipa nozzle asli yang berada DI LUAR alat tapi DI DALAM
+    kotak deteksi (N6A/N6B/N4).
+    """
+    h, w = binary.shape[:2]
+    protect = np.zeros((h, w), dtype=np.uint8)
+    eqs = [d for d in (detections or []) if d.get("coarse") == "equipment"]
+    if not eqs:
+        return (protect, []) if return_tight else protect
+
+    tight_boxes = []
+    dil_k = np.ones((2 * max(1, dilate_px) + 1, 2 * max(1, dilate_px) + 1), np.uint8)
+    ink = (binary > 0).astype(np.uint8) * 255
+    for d in eqs:
+        # Kotak deteksi bisa meleset (offset): vessel 605-V-221-B keluar ~95px di kiri
+        # dari box equip_big. Perluas area pencarian komponen kontur ke luar kotak
+        # (12% tiap sisi) supaya dinding/dome yang tergeser tetap tercakup mask.
+        bx1 = int(d.get("x1", 0)); by1 = int(d.get("y1", 0))
+        bx2 = int(d.get("x2", 0)); by2 = int(d.get("y2", 0))
+        pw = max(1, bx2 - bx1); ph = max(1, by2 - by1)
+        mx = int(0.12 * pw); my = int(0.12 * ph)
+        ex1 = max(0, bx1 - mx)
+        ey1 = max(0, by1 - my)
+        ex2 = min(w, bx2 + mx)
+        ey2 = min(h, by2 + my)
+        if ex2 <= ex1 or ey2 <= ey1:
+            continue
+        roi = ink[ey1:ey2, ex1:ex2]
+        if roi.size == 0:
+            continue
+        box_w, box_h = ex2 - ex1, ey2 - ey1
+
+        n_lbl, lbl, stats, _ = cv2.connectedComponentsWithStats(roi, 8)
+        keep = np.zeros_like(roi)
+        ux1, uy1, ux2, uy2 = None, None, None, None
+        for ci in range(1, n_lbl):
+            cw = stats[ci, cv2.CC_STAT_WIDTH]
+            ch = stats[ci, cv2.CC_STAT_HEIGHT]
+            # Kontur alat = komponen besar yang membentang di KEDUA sumbu area.
+            if cw >= min_span_frac * box_w and ch >= min_span_frac * box_h:
+                keep[lbl == ci] = 255
+                cx1 = stats[ci, cv2.CC_STAT_LEFT]
+                cy1 = stats[ci, cv2.CC_STAT_TOP]
+                cx2 = cx1 + cw
+                cy2 = cy1 + ch
+                ux1 = cx1 if ux1 is None else min(ux1, cx1)
+                uy1 = cy1 if uy1 is None else min(uy1, cy1)
+                ux2 = cx2 if ux2 is None else max(ux2, cx2)
+                uy2 = cy2 if uy2 is None else max(uy2, cy2)
+        if ux1 is not None:
+            # Union bbox komponen outline, dibatasi agar tidak keluar kotak deteksi
+            # secara berlebihan (komponen bisa tersambung ke pipa nozzle di luar alat).
+            tx1 = max(bx1 - int(0.12 * pw), ex1 + ux1)
+            ty1 = max(by1 - int(0.12 * ph), ey1 + uy1)
+            tx2 = min(bx2 + int(0.12 * pw), ex1 + ux2)
+            ty2 = min(by2 + int(0.12 * ph), ey1 + uy2)
+            tight_boxes.append((int(tx1), int(ty1), int(tx2), int(ty2)))
+        else:
+            tight_boxes.append((bx1, by1, bx2, by2))
+        if not keep.any():
+            continue
+        keep = cv2.dilate(keep, dil_k)
+        # Hanya piksel ink nyata yang dilindungi (dilasi tidak menambah piksel hantu).
+        keep = cv2.bitwise_and(keep, cv2.dilate(roi, np.ones((3, 3), np.uint8)))
+        protect[ey1:ey2, ex1:ex2] = cv2.bitwise_or(protect[ey1:ey2, ex1:ex2], keep)
+    return (protect, tight_boxes) if return_tight else protect
+
 def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038, guard_px=15):
     """Buang segmen yang berada di atau sangat dekat dengan margin perimeter kertas luar.
     Garis tepi bingkai gambar (drawing frame border), tick koordinat tepi, dan garis batas
@@ -1094,6 +1300,9 @@ def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038, guard_px=15):
     my = max(int(H * margin_ratio), int(guard_px))
     out = []
     for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         xs = [p[0] for p in s.points]
         ys = [p[1] for p in s.points]
         x_min, x_max = min(xs), max(xs)
@@ -1117,6 +1326,59 @@ def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038, guard_px=15):
     return out
 
 
+def suppress_page_frame(segs, page_wh, band_ratio=0.06, span_ratio=0.70, min_perimeter_frac=0.9):
+    """Buang BINGKAI GAMBAR (drawing frame) yang ke-trace sebagai satu polyline panjang.
+
+    `suppress_drawing_margins` hanya membuang segmen yang SELURUHNYA berada di dalam pita
+    tepi. Tapi bingkai gambar khas ter-{chain} menjadi satu polyline yang menelusuri TIGA
+    atau EMPAT sisi kertas (kanan->atas->kiri): vertexnya menyentuh dua dimensi (x_max besar,
+    y_max besar) sehingga lolos filter margin. Ciri pembeda dari pipa proses sejati:
+
+      * Rentang bbox-nya besar (>= span_ratio dari lebar ATAU tinggi halaman), DAN
+      * HAMPIR SEMUA vertex-nya menempel perimeter (tiap titik berada dalam `band_ratio`
+        dari salah satu dari 4 tepi halaman). Toleransi `min_perimeter_frac` (default 0.9)
+        diberikan karena bingkai kadang menyerap satu-dua spur kecil (artefak tepi) yang
+        menyelipkan vertex interior — itu TIDAK boleh menggagalkan deteksi., DAN
+      * jumlah vertex >= 3 (pipa lurus panjang hanya 2 titik: ujung-ujungnya 'menempel'
+        tepi kiri/kanan halaman namun TIDAK keduanya; frame minimal punya 3 titik sudut).
+
+    Pipa proses yang panjang horizontal punya vertex Tengah di interior halaman -> fraksi
+    perimeter kecil -> tetap aman.
+    """
+    if not segs:
+        return []
+    W, H = page_wh
+    bx = max(8.0, band_ratio * W)
+    by = max(8.0, band_ratio * H)
+    span_w = span_ratio * W
+    span_h = span_ratio * H
+    out = []
+    for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
+        pts = s.points
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        if (x_max - x_min) < span_w and (y_max - y_min) < span_h:
+            out.append(s)                       # terlalu kecil untuk jadi frame
+            continue
+        if len(pts) < 3:
+            out.append(s)                       # pipa lurus 2 titik -> bukan frame
+            continue
+        # Fraksi vertex yang menempel salah satu tepi halaman (dalam pita bx/by).
+        on_perimeter = 0
+        for x, y in pts:
+            if (x <= bx) or (x >= W - bx) or (y <= by) or (y >= H - by):
+                on_perimeter += 1
+        if (on_perimeter / len(pts)) >= min_perimeter_frac:
+            continue                            # bingkai gambar -> buang
+        out.append(s)
+    return out
+
+
 def suppress_revision_clouds(segs):
     """Buang polyline yang membentuk awan revisi (scalloped revision clouds) atau loop tertutup.
     Pipa proses adalah garis ortogonal (lurus / siku), sedangkan awan revisi berbentuk lengkungan bergelombang."""
@@ -1124,6 +1386,9 @@ def suppress_revision_clouds(segs):
         return []
     out = []
     for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         pts = s.points
         if len(pts) < 5:
             out.append(s)
@@ -1168,6 +1433,9 @@ def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
     max_len = min(max_diag_len, 0.10 * max(W, H))
     out = []
     for s in segs:
+        if getattr(s, "equipment_outline", False):
+            out.append(s)
+            continue
         pts = s.points
         p0, p1 = pts[0], pts[-1]
         dx = abs(p1[0] - p0[0])
@@ -1184,15 +1452,24 @@ def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
     return out
 
 
-def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
+def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4, block_boxes=None):
     """Sambungkan segmen pipa kolinear yang terpotong celah kecil (gap di sekitar label/nozzle/header).
-    Menjaga kontinuitas pipa panjang seperti HP/LP Production Headers."""
+    Menjaga kontinuitas pipa panjang seperti HP/LP Production Headers.
+
+    `block_boxes`: daftar bbox yang TIDAK boleh dilewati saat menyambung (mis. bubble
+    instrumen — pipa harus putus di instrumen, bukan dijembatani).
+    """
     if not segs or len(segs) < 2:
         return segs
 
     horiz_groups = defaultdict(list)
     vert_groups = defaultdict(list)
     others = []
+
+    def _is_eq(r):
+        if hasattr(r, "equipment_outline"):
+            return bool(r.equipment_outline)
+        return bool(r.get("equipment_outline", False))
 
     for s in segs:
         pts = s.points if hasattr(s, "points") else s.get("points", [])
@@ -1202,59 +1479,61 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
         (x1, y1), (x2, y2) = pts[0], pts[-1]
         is_h = abs(y1 - y2) <= tol_px
         is_v = abs(x1 - x2) <= tol_px
+        eq_tag = _is_eq(s)
         if is_h and not is_v:
             y_mid = int(round((y1 + y2) / 2.0))
-            key = y_mid // (tol_px + 1)
+            key = (y_mid // (tol_px + 1), eq_tag)
             horiz_groups[key].append((min(x1, x2), max(x1, x2), y_mid, s))
         elif is_v and not is_h:
             x_mid = int(round((x1 + x2) / 2.0))
-            key = x_mid // (tol_px + 1)
+            key = (x_mid // (tol_px + 1), eq_tag)
             vert_groups[key].append((min(y1, y2), max(y1, y2), x_mid, s))
         else:
             others.append(s)
 
     out = list(others)
 
+    def _mk(a, b, axis, base_s, const):
+        col = getattr(base_s, "color", "#2563EB")
+        lbl = getattr(base_s, "label", "")
+        eqo = _is_eq(base_s)
+        pts = [(a, const), (b, const)] if axis == "h" else [(const, a), (const, b)]
+        return PipeRun(pts, axis=axis, color=col, label=lbl, equipment_outline=eqo)
+
     # Process horizontal groups
     for key, items in horiz_groups.items():
         items.sort(key=lambda it: it[0])
         curr_min, curr_max, curr_y, base_s = items[0]
-        color = getattr(base_s, "color", "#2563EB")
-        label = getattr(base_s, "label", "")
 
         for next_min, next_max, next_y, s in items[1:]:
-            if next_min - curr_max <= max_gap_px:
+            if next_min - curr_max <= max_gap_px and not _seg_crosses_boxes(
+                    (curr_max, curr_y), (next_min, next_y), block_boxes):
                 curr_max = max(curr_max, next_max)
                 curr_y = int(round((curr_y + next_y) / 2.0))
             else:
-                out.append(PipeRun([(curr_min, curr_y), (curr_max, curr_y)], axis="h", color=color, label=label))
+                out.append(_mk(curr_min, curr_max, "h", base_s, curr_y))
                 curr_min, curr_max, curr_y, base_s = next_min, next_max, next_y, s
-                color = getattr(base_s, "color", "#2563EB")
-                label = getattr(base_s, "label", "")
-        out.append(PipeRun([(curr_min, curr_y), (curr_max, curr_y)], axis="h", color=color, label=label))
+        out.append(_mk(curr_min, curr_max, "h", base_s, curr_y))
 
     # Process vertical groups
     for key, items in vert_groups.items():
         items.sort(key=lambda it: it[0])
         curr_min, curr_max, curr_x, base_s = items[0]
-        color = getattr(base_s, "color", "#2563EB")
-        label = getattr(base_s, "label", "")
 
         for next_min, next_max, next_x, s in items[1:]:
-            if next_min - curr_max <= max_gap_px:
+            if next_min - curr_max <= max_gap_px and not _seg_crosses_boxes(
+                    (curr_x, curr_max), (next_x, next_min), block_boxes):
                 curr_max = max(curr_max, next_max)
                 curr_x = int(round((curr_x + next_x) / 2.0))
             else:
-                out.append(PipeRun([(curr_x, curr_min), (curr_x, curr_max)], axis="v", color=color, label=label))
+                out.append(_mk(curr_min, curr_max, "v", base_s, curr_x))
                 curr_min, curr_max, curr_x, base_s = next_min, next_max, next_x, s
-                color = getattr(base_s, "color", "#2563EB")
-                label = getattr(base_s, "label", "")
-        out.append(PipeRun([(curr_x, curr_min), (curr_x, curr_max)], axis="v", color=color, label=label))
+        out.append(_mk(curr_min, curr_max, "v", base_s, curr_x))
 
     return out
 
 def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
-                             branch_tol_px=10):
+                             branch_tol_px=10, block_boxes=None):
     """Rantai segmen pipa yang SEGARIS (collinear) dan berjarak sangat dekat
     (gap <= max_gap_px, default 15px) menjadi SATU PipeRun utuh — TAPI hanya bila
     tidak ada percabangan pipa lain di antara keduanya.
@@ -1319,6 +1598,11 @@ def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
     consumed = set()
     chains = []  # list of (list_of_run_idx) built in discovery order
 
+    def _is_eq(r):
+        if hasattr(r, "equipment_outline"):
+            return bool(r.equipment_outline)
+        return bool(r.get("equipment_outline", False))
+
     n = len(work)
     for i in range(n):
         if i in consumed:
@@ -1338,6 +1622,10 @@ def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
                 if j in consumed:
                     continue
                 rj = work[j]
+                # Jangan campur run outline alat dengan pipa dalam satu rantai: kontur
+                # alat punya bridging tersendiri (bridge_equipment_outline_fragments).
+                if _is_eq(work[chain[0]]) != _is_eq(rj):
+                    continue
                 pj = _pts(rj)
                 if len(pj) < 2:
                     continue
@@ -1355,6 +1643,9 @@ def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
                     cx_, cy_ = chain_end[2], chain_end[3]
                     ex_, ey_ = rj_t[2], rj_t[3]
                     if _math.hypot(cx_ - ex_, cy_ - ey_) > max_gap_px:
+                        return None
+                    # Jangan jembatani celah yang melewati bubble instrumen.
+                    if _seg_crosses_boxes((cx_, cy_), (ex_, ey_), block_boxes):
                         return None
                     # outward tangents must point toward each other (anti-parallel)
                     if chain_end[0] * rj_t[0] + chain_end[1] * rj_t[1] > -cos_min:
@@ -1445,6 +1736,7 @@ def _merge_chain(work, chain):
     r = base
     color = getattr(r, "color", "#2563EB")
     label = getattr(r, "label", "")
+    eq_outline = bool(getattr(r, "equipment_outline", False))
     # The merged result is a real polyline; only keep a simple H/V label when it is
     # exactly straight, otherwise promote to 'poly' (never mislabel a diagonal as H/V).
     if len(pts) == 2:
@@ -1452,7 +1744,7 @@ def _merge_chain(work, chain):
         axis = "h" if dy <= max(1, dx * 0.2) else "v" if dx <= max(1, dy * 0.2) else "d"
     else:
         axis = "poly"
-    return PipeRun(pts, axis=axis, color=color, label=label)
+    return PipeRun(pts, axis=axis, color=color, label=label, equipment_outline=eq_outline)
 
 
 def _has_branch(work, consumed, exclude_j, mx, my, tol_px):
@@ -1472,8 +1764,372 @@ def _has_branch(work, consumed, exclude_j, mx, my, tol_px):
     return False
 
 
+def tag_equipment_outlines(runs, detections, page_wh=None, min_inside_frac=0.85,
+                           protect_mask=None, min_on_mask_frac=0.5):
+    """Tandai run yang merupakan KONTUR alat (vessel/tangki tabung) sebagai `equipment_outline`.
+
+    Dua jalur deteksi (OR):
+
+    A. EVIDENCE-BASED (utama, bila `protect_mask` diberi): run yang >= `min_on_mask_frac`
+       panjangnya berada di atas piksel mask outline alat (hasil
+       `equipment_outline_protect_mask`) -> PASTI guratan kontur alat. Fragmen kecil pun
+       boleh (nanti di-bridge/di-chain).
+
+    B. SHAPE+POSITION (fallback, bila mask tak tersedia): run dengan >= 3 vertex yang
+       berbentuk kontur (loop hampir tertutup ATAU bbox 'tabung-like') dan >= 85% titiknya
+       di dalam kotak equipment. Garis lurus 2-titik tidak pernah ditandai.
+
+    Men-set `equipment_outline=True` pada PipeRun; run tetap ada di daftar (user bisa
+    label/split sendiri) tapi frontend/backend menandainya berbeda dari pipa.
+    """
+    eqs = [d for d in (detections or []) if d.get("coarse") == "equipment"]
+    if not runs or not eqs:
+        return runs
+
+    def _on_mask(r):
+        if protect_mask is None:
+            return False
+        pts = r.points if hasattr(r, "points") else r.get("points", [])
+        if len(pts) < 2:
+            return False
+        tot, on = 0.0, 0.0
+        for a, b in zip(pts, pts[1:]):
+            d = math.hypot(b[0] - a[0], b[1] - a[1])
+            tot += d
+            if d <= 1e-6:
+                continue
+            steps = max(2, int(d / 3.0))
+            hits = 0
+            for k in range(steps + 1):
+                x = int(round(a[0] + (b[0] - a[0]) * k / steps))
+                y = int(round(a[1] + (b[1] - a[1]) * k / steps))
+                if 0 <= y < protect_mask.shape[0] and 0 <= x < protect_mask.shape[1] \
+                        and protect_mask[y, x] > 0:
+                    hits += 1
+            on += d * (hits / (steps + 1))
+        return tot > 1e-6 and (on / tot) >= min_on_mask_frac
+
+    boxes = [(float(d.get("x1", 0)), float(d.get("y1", 0)),
+              float(d.get("x2", 0)), float(d.get("y2", 0))) for d in eqs]
+    # margin kecil saja: titik harus benar-benar di dalam alat.
+    pad = 3.0
+    result = []
+    for r in runs:
+        pts = r.points if hasattr(r, "points") else r.get("points", [])
+        if len(pts) < 2:
+            result.append(r)
+            continue
+
+        is_outline = _on_mask(r)
+
+        if not is_outline and protect_mask is None:
+            # Fallback shape+position heuristic (no mask available).
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            bb_w = max(xs) - min(xs)
+            bb_h = max(ys) - min(ys)
+            L = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+            gap = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+            if len(pts) > 2:
+                thin_line = (min(bb_w, bb_h) <= max(6.0, 0.06 * max(bb_w, bb_h))) and len(pts) <= 4
+                is_closed = (L > 1e-6 and gap <= 0.15 * L and len(pts) >= 5)
+                tube_like = (bb_w >= 24 and bb_h >= 24 and len(pts) >= 3
+                             and min(bb_w, bb_h) >= 0.18 * max(bb_w, bb_h))
+                if not thin_line and (is_closed or tube_like):
+                    best_frac = 0.0
+                    for bx1, by1, bx2, by2 in boxes:
+                        inside = 0
+                        for x, y in pts:
+                            if bx1 - pad <= x <= bx2 + pad and by1 - pad <= y <= by2 + pad:
+                                inside += 1
+                        best_frac = max(best_frac, inside / len(pts))
+                    if best_frac >= min_inside_frac:
+                        is_outline = True
+
+        if is_outline:
+            if hasattr(r, "equipment_outline"):
+                r.equipment_outline = True
+                result.append(r)
+            else:
+                nr = dict(r)
+                nr["equipment_outline"] = True
+                result.append(nr)
+        else:
+            result.append(r)
+    return result
+
+def bridge_piecemeal_gaps(runs, max_gap_px=48, tol_px=8, angle_tol_deg=35.0,
+                          short_len_px=40.0, branch_tol_px=8, block_boxes=None):
+    """AGRESIF: rantai fragmen pipa pecahan (piecemeal) menjadi satu run utuh.
+
+    Skeletonisasi sering memecah SATU pipa fisik menjadi banyak fragmen pendek (1-2px /
+    puluhan px) yang saling berdekatan tapi tidak tersambung graf. Fragmen pendek
+    (<= short_len_px) sering gugur karena `min_length`, sehingga pipa panjang HILANG dari
+    hasil trace — jauh lebih mahal (user harus menarik ulang) daripada salah sambung yang
+    bisa dikoreksi manual.
+
+    Beda dari `chain_collinear_segments` (celah <= 15px, toleransi sudut 12°): di sini
+    celah lebih besar (default 48px) dan toleransi sudut lebih longgar (35°), HANYA
+    disambung bila salah satu ujung run pendek (fragment). Guard anti-cabang tetap aktif
+    supaya T-junction tidak dilipat.
+    """
+    if not runs or len(runs) < 2:
+        return runs
+
+    def _pts(r):
+        return r.points if hasattr(r, "points") else r.get("points", [])
+
+    def _len(r):
+        p = _pts(r)
+        return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(p, p[1:]))
+
+    def _outward(r, which):
+        p = _pts(r)
+        if len(p) < 2:
+            return None
+        if which == 0:
+            ax, ay = p[0][0] - p[1][0], p[0][1] - p[1][1]
+            return (ax, ay, p[0][0], p[0][1])
+        ax, ay = p[-1][0] - p[-2][0], p[-1][1] - p[-2][1]
+        return (ax, ay, p[-1][0], p[-1][1])
+
+    def _u(v):
+        L = math.hypot(v[0], v[1])
+        return None if L < 1e-6 else (v[0] / L, v[1] / L)
+
+    cos_min = math.cos(math.radians(angle_tol_deg))
+    work = list(runs)
+    consumed = set()
+    chains = []
+    n = len(work)
+
+    def _is_eq(r):
+        if hasattr(r, "equipment_outline"):
+            return bool(r.equipment_outline)
+        return bool(r.get("equipment_outline", False))
+
+    for i in range(n):
+        if i in consumed:
+            continue
+        chain = [i]
+        consumed.add(i)
+        changed = True
+        while changed:
+            changed = False
+            head = _outward(work[chain[0]], 0)
+            tail = _outward(work[chain[-1]], -1)
+            for j in range(n):
+                if j in consumed:
+                    continue
+                rj = work[j]
+                # Jangan campur fragmen outline alat dengan pipa: vessel outline punya
+                # jembatan khusus (bridge_equipment_outline_fragments). Menyambungnya di
+                # sini membuat polyline bolak-balik (outline↔nozzle↔outline).
+                if _is_eq(work[chain[0]]) != _is_eq(rj):
+                    continue
+                pj = _pts(rj)
+                if len(pj) < 2:
+                    continue
+                for chain_end, at_head in ((head, True), (tail, False)):
+                    if chain_end is None:
+                        continue
+                    cu = _u(chain_end)
+                    if cu is None:
+                        continue
+                    attached = False
+                    for rj_which in (0, -1):
+                        rj_e = _outward(rj, rj_which)
+                        if rj_e is None:
+                            continue
+                        rju = _u(rj_e)
+                        if rju is None:
+                            continue
+                        # gap
+                        gap = math.hypot(chain_end[2] - rj_e[2], chain_end[3] - rj_e[3])
+                        if gap > max_gap_px:
+                            continue
+                        # Jangan jembatani celah yang melewati bubble instrumen.
+                        if _seg_crosses_boxes((chain_end[2], chain_end[3]),
+                                              (rj_e[2], rj_e[3]), block_boxes):
+                            continue
+                        # at least one side must be a short fragment
+                        if _len(work[chain[0]]) > short_len_px and _len(rj) > short_len_px:
+                            continue
+                        # anti-parallel tangents
+                        if cu[0] * rju[0] + cu[1] * rju[1] > -cos_min:
+                            continue
+                        # lateral collinearity
+                        px, py = rj_e[2] - chain_end[2], rj_e[3] - chain_end[3]
+                        if abs(px * cu[1] - py * cu[0]) > tol_px:
+                            continue
+                        mx, my = (chain_end[2] + rj_e[2]) / 2.0, (chain_end[3] + rj_e[3]) / 2.0
+                        if _has_branch(work, consumed, j, mx, my, branch_tol_px):
+                            continue
+                        if at_head:
+                            chain.insert(0, j)
+                        else:
+                            chain.append(j)
+                        consumed.add(j)
+                        attached = True
+                        changed = True
+                        break
+                    if attached:
+                        break
+                if changed:
+                    break
+        chains.append(chain)
+
+    chain_of = {}
+    for ci, chain in enumerate(chains):
+        for idx in chain:
+            chain_of[idx] = ci
+    out = []
+    emitted = set()
+    for idx, r in enumerate(work):
+        if idx in emitted:
+            continue
+        ci = chain_of.get(idx)
+        if ci is None:
+            out.append(r)
+            continue
+        chain = chains[ci]
+        for c in chain:
+            emitted.add(c)
+        out.append(_merge_chain(work, chain))
+    return out
+
+def bridge_equipment_outline_fragments(runs, detections=None, max_gap_px=90):
+    """Sambung fragmen outline alat (equipment_outline=True) menjadi SATU polyline tertutup.
+
+    Kontur vessel (dome + dinding + bottom + nozzle) sering terpecah skeletonisasi menjadi
+    beberapa fragmen; user minta bentuk akhirnya satu polyline tertutup supaya tinggal di-split
+    sendiri. Berbeda dari `bridge_piecemeal_gaps`, di sini celah LEBIH BESAR diizinkan karena
+    SEMUA fragmen sudah pasti bagian kontur alat yang sama (bukti: berada di atas protect_mask).
+    Sambung greedy: pasangan fragmen outline dengan ujung terdekat selalu disatukan.
+
+    PENTING: hanya fragmen dalam KOTAK EQUIPMENT YANG SAMA yang boleh disambung. Tanpa
+    batasan ini, fragmen vessel bisa ter-bridge ke fragmen alat lain yang jauh (false merge).
+
+    Hanya menyentuh run `equipment_outline=True`; run pipa tidak berubah.
+    """
+    if not runs or len(runs) < 2:
+        return runs
+
+    def _is_eq(r):
+        if hasattr(r, "equipment_outline"):
+            return bool(r.equipment_outline)
+        return bool(r.get("equipment_outline", False))
+
+    def _pts(r):
+        return r.points if hasattr(r, "points") else r.get("points", [])
+
+    # Kelompokkan fragmen outline per kotak equipment (berdasarkan centroid). Fragmen
+    # yang tidak masuk kotak mana pun -> kelompok sendiri (tidak disambung lintas box).
+    boxes = []
+    for d in (detections or []):
+        if d.get("coarse") == "equipment":
+            boxes.append((float(d.get("x1", 0)), float(d.get("y1", 0)),
+                          float(d.get("x2", 0)), float(d.get("y2", 0))))
+
+    def _box_of(pts):
+        if not boxes:
+            return 0
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        for bi, (bx1, by1, bx2, by2) in enumerate(boxes):
+            pad = 0.12 * max(bx2 - bx1, by2 - by1)
+            if bx1 - pad <= cx <= bx2 + pad and by1 - pad <= cy <= by2 + pad:
+                return bi + 1
+        return 0
+
+    # Work list per group: {group_key: [[points, original_index], ...]}
+    groups = defaultdict(list)
+    for i, r in enumerate(runs):
+        if _is_eq(r):
+            p = _pts(r)
+            if len(p) >= 2:
+                pl = [(float(x), float(y)) for x, y in p]
+                groups[_box_of(pl)].append([pl, i])
+
+    merged_by_first = {}
+    drop_idx = set()
+    for gkey, work in groups.items():
+        if len(work) < 2:
+            if work:
+                merged_by_first[work[0][1]] = work[0][0]
+            continue
+        changed = True
+        while changed:
+            changed = False
+            best = None
+            for a in range(len(work)):
+                for b in range(a + 1, len(work)):
+                    pa, pb = work[a][0], work[b][0]
+                    for oa in (0, 1):
+                        for ob in (0, 1):
+                            qa = pa[0] if oa == 0 else pa[-1]
+                            qb = pb[0] if ob == 0 else pb[-1]
+                            d = math.hypot(qa[0] - qb[0], qa[1] - qb[1])
+                            if d <= max_gap_px and (best is None or d < best[0]):
+                                best = (d, a, b, oa, ob)
+            if best is None:
+                break
+            _, a, b, oa, ob = best
+            pa, pb = list(work[a][0]), list(work[b][0])
+            # `oa`/`ob` = ujung yang dipilih untuk disambung (0 = titik awal, 1 = titik akhir).
+            # Agar ujung terpilih menjadi TAIL dari pa dan HEAD dari pb (pa + pb),
+            # pa dibalik bila ujung terpilih adalah titik AWAL, dan pb dibalik bila titik AKHIR.
+            if oa == 0:
+                pa = pa[::-1]
+            if ob == 1:
+                pb = pb[::-1]
+            merged = pa + pb
+            cleaned = [merged[0]]
+            for q in merged[1:]:
+                if abs(q[0] - cleaned[-1][0]) <= 2 and abs(q[1] - cleaned[-1][1]) <= 2:
+                    continue
+                cleaned.append(q)
+            work[a][0] = cleaned
+            work.pop(b)
+            changed = True
+        # Setiap entri `work` yang tersisa adalah satu chain final (hasil merge). Simpan
+        # chain pada indeks fragmen pertamanya; fragmen lain yang sudah di-merge ke dalam
+        # chain ini otomatis hilang dari `work` sehingga akan di-drop oleh sapuan di bawah.
+        # JANGAN drop work[1:] — mereka adalah chain terpisah yang gagal merge (gap > max_gap)
+        # dan HARUS tetap ada (bug: vessel outline hilang total karena ini).
+        for pts, idx in work:
+            merged_by_first[idx] = pts
+
+    # Fragmen outline yang tidak menjadi 'first' chain mana pun = sudah di-merge ke chain
+    # lain -> drop. Fragmen yang tetap berdiri sendiri tetap dipertahankan.
+    for i, r in enumerate(runs):
+        if _is_eq(r) and i not in merged_by_first:
+            drop_idx.add(i)
+
+    out = []
+    for i, r in enumerate(runs):
+        if i in drop_idx:
+            continue
+        if i in merged_by_first:
+            pts = merged_by_first[i]
+            color = getattr(r, "color", "#2563EB") if hasattr(r, "color") else r.get("color", "#2563EB")
+            if hasattr(r, "points"):
+                out.append(PipeRun([(int(x), int(y)) for x, y in pts], axis="poly",
+                                   color=color, equipment_outline=True))
+            else:
+                nr = dict(r)
+                nr["points"] = [[int(x), int(y)] for x, y in pts]
+                nr["axis"] = "poly"
+                nr["equipment_outline"] = True
+                xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+                nr["x1"], nr["y1"], nr["x2"], nr["y2"] = min(xs), min(ys), max(xs), max(ys)
+                out.append(nr)
+            continue
+        out.append(r)
+    return out
+
 def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
-                            angle_tol_deg=20.0, containment_margin_px=12):
+                            angle_tol_deg=20.0, containment_margin_px=12, block_boxes=None):
     """Sambungkan pipa lurus yang terpotong oleh katup inline (valve) atau celah kecil.
     Menghubungkan dua PipeRun terpisah melewati gap katup menjadi satu polyline bersambung.
 
@@ -1490,6 +2146,11 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
     valves = [d for d in (detections or []) if d.get("coarse") == "valve"]
     if not valves:
         return runs
+
+    def _is_eq(r):
+        if hasattr(r, "equipment_outline"):
+            return bool(r.equipment_outline)
+        return bool(r.get("equipment_outline", False))
 
     valve_boxes = [(float(v["x1"]), float(v["y1"]), float(v["x2"]), float(v["y2"])) for v in valves]
 
@@ -1531,6 +2192,12 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
                 pts2 = r2.points if hasattr(r2, "points") else r2.get("points", [])
                 if len(pts2) < 2:
                     continue
+                # Jangan campur run outline alat dengan pipa: kontur alat punya bridging
+                # tersendiri. Tanpa guard ini, fragmen outline yang menempel di ujung pipa
+                # (mis. skirt vessel dekat valve N3) terserap ke run pipa dan KEHILANGAN
+                # flag equipment_outline (akar spaghetti run-32).
+                if _is_eq(r1) != _is_eq(r2):
+                    continue
 
                 pairs = [
                     (pts1[-1], pts2[0], False, False, pts1[-2], pts2[1]),   # r1 -> r2
@@ -1545,6 +2212,10 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
                     dist = math.hypot(dx, dy)
 
                     if not (0 < dist <= max_gap_px):
+                        continue
+
+                    # Jangan jembatani celah yang melewati bubble instrumen.
+                    if _seg_crosses_boxes(pA, pB, block_boxes):
                         continue
 
                     # Tangent check: both incoming segment (prevA -> pA) and outgoing (pB -> nextB) must be collinear
@@ -1566,12 +2237,36 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
                     if lenA > 1e-6 and lenB > 1e-6 and (is_hA == is_hB and is_vA == is_vB):
                         cos_ang = abs((vA[0] * vB[0] + vA[1] * vB[1]) / (lenA * lenB))
                         collinear = cos_ang >= cos_tol
+                        if collinear:
+                            # Lateral-offset guard: tangents searah saja TIDAK cukup — dua
+                            # pipa paralel yang bergeser puluhan px (dinding vessel x=1394
+                            # vs panel-X x=1450) tidak boleh disambung; tanpa guard ini
+                            # terbentuk polyline zigzag bolak-balik.
+                            if lenA >= lenB:
+                                ux, uy = vA[0] / lenA, vA[1] / lenA
+                            else:
+                                ux, uy = vB[0] / lenB, vB[1] / lenB
+                            lateral = abs((pB[0] - pA[0]) * uy - (pB[1] - pA[1]) * ux)
+                            if lateral > tol_px:
+                                collinear = False
 
                     # Containment: both facing endpoints sit inside the SAME valve bbox
                     contained = False
                     va, vb = valve_containing(pA), valve_containing(pB)
                     if va is not None and va == vb:
                         contained = True
+                        # Directional continuity: walau di dalam valve yang sama, kedua ujung
+                        # harus saling berhadapan SEPANJANG arah pipa. Tanpa cek ini, baris
+                        # pipa paralel yang kebetulan sama-sama menyentuh bbox valve besar
+                        # (N8A/N8B/N7B di vessel) terlipat jadi satu run zigzag.
+                        conn = (pB[0] - pA[0], pB[1] - pA[1])
+                        cl = math.hypot(conn[0], conn[1])
+                        if cl > 1e-6 and lenA > 1e-6 and lenB > 1e-6:
+                            ux, uy = conn[0] / cl, conn[1] / cl
+                            cosA = (ux * vA[0] + uy * vA[1]) / lenA
+                            cosB = (ux * vB[0] + uy * vB[1]) / lenB
+                            if cosA < math.cos(math.radians(40)) or cosB < math.cos(math.radians(40)):
+                                contained = False
 
                     if is_h or is_v or collinear or contained:
                         first_pts = list(pts2 if swap else pts1)
@@ -1589,8 +2284,11 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
                         axis = getattr(base_r, "axis", "poly") if hasattr(base_r, "axis") else base_r.get("axis", "poly")
                         color = getattr(base_r, "color", "#2563EB") if hasattr(base_r, "color") else base_r.get("color", "#2563EB")
                         label = getattr(base_r, "label", "") if hasattr(base_r, "label") else base_r.get("label", "")
+                        eqo = bool(getattr(base_r, "equipment_outline", False)) if hasattr(base_r, "equipment_outline") \
+                            else bool(base_r.get("equipment_outline", False))
 
-                        merged_run = PipeRun(points=clean_pts, axis=axis, color=color, label=label)
+                        merged_run = PipeRun(points=clean_pts, axis=axis, color=color, label=label,
+                                             equipment_outline=eqo)
 
                         out.pop(j)
                         out.pop(i)
@@ -1617,6 +2315,7 @@ def extract_pipe_runs(img_bgr, dpi=350, detections=None, furniture=None, diagona
 
     # Drafting suppressions & header continuity
     segs = suppress_drawing_margins(segs, page_wh=(img_bgr.shape[1], img_bgr.shape[0]))
+    segs = suppress_page_frame(segs, page_wh=(img_bgr.shape[1], img_bgr.shape[0]))
     segs = suppress_revision_clouds(segs)
     segs = suppress_diagonal_artifacts(segs, page_wh=(img_bgr.shape[1], img_bgr.shape[0]))
     segs = bridge_collinear_headers(segs)

@@ -15,6 +15,7 @@ from ..lines import (
     suppress_box_outlines,
     detect_boxes,
     suppress_drawing_margins,
+    suppress_page_frame,
     suppress_revision_clouds,
     suppress_diagonal_artifacts,
     suppress_text_artifacts,
@@ -22,6 +23,10 @@ from ..lines import (
     bridge_collinear_headers,
     bridge_inline_valve_gaps,
     chain_collinear_segments,
+    equipment_outline_protect_mask,
+    tag_equipment_outlines,
+    bridge_piecemeal_gaps,
+    bridge_equipment_outline_fragments,
 )
 
 
@@ -466,17 +471,65 @@ class SkeletonLineTracer(BaseLineTracer):
                 dil_y2 = min(H, ty2 + dil_r)
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
-        # 2. Equipment Interior Masking: Blackout total interior of equipment boxes (vessels, tanks, etc.)
-        # Keep an inset of 4px so the outer physical perimeter remains for snapping (snap-to-edge)
+        # 2. Equipment Interior Masking: Blackout the chest of equipment boxes (vessels, tanks,
+        #    columns) so their DENSE interior art/text does not become pipe runs. BUT the tool's
+        #    own OUTLINE must survive: if the detection box is slightly offset (common) or the
+        #    vessel is drawn as a thin-walled tube (dome + two walls), zeroing the whole box would
+        #    delete the vessel outline itself. So we compute an OUTLINE-PROTECT mask (long thin
+        #    strokes + curved arcs inside each equipment box) and subtract it from the blackout.
         eq_margin = max(3, int(4 * (dpi / 350.0)))
-        for d in (detections or []):
-            if d.get("coarse") == "equipment":
-                ex1 = int(d.get("x1", 0)) + eq_margin
-                ey1 = int(d.get("y1", 0)) + eq_margin
-                ex2 = int(d.get("x2", 0)) - eq_margin
-                ey2 = int(d.get("y2", 0)) - eq_margin
+        equip_dets = [d for d in (detections or []) if d.get("coarse") == "equipment"]
+        outline_mask = None
+        tight_dets = list(detections or [])
+        inst_boxes = []
+        if equip_dets:
+            outline_mask, tight_boxes = equipment_outline_protect_mask(
+                clean_binary, equip_dets, dpi=dpi, eq_margin_px=eq_margin, return_tight=True
+            )
+            # Tighten equipment boxes to the actual silhouette bbox (union of protected
+            # outline components). The raw YOLO box is often much wider than the tool
+            # (vessel 605-V-221-B: box (1362,846,1921,1657) vs silhouette x≈1393..1663),
+            # so using the raw box for interior blackout / interior clipping would erase
+            # REAL nozzle pipes outside the tool (N6A/N6B/N4 on the right wall).
+            tight_iter = iter(tight_boxes)
+            new_dets = []
+            for d in (detections or []):
+                if d.get("coarse") == "equipment":
+                    tb = next(tight_iter, None)
+                    if tb is not None:
+                        d = {**d, "x1": tb[0], "y1": tb[1], "x2": tb[2], "y2": tb[3]}
+                new_dets.append(d)
+            tight_dets = new_dets
+            interior_blackout = np.zeros_like(clean_binary)
+            for (ex1, ey1, ex2, ey2) in tight_boxes:
+                ex1 += eq_margin; ey1 += eq_margin
+                ex2 -= eq_margin; ey2 -= eq_margin
                 if ex2 > ex1 and ey2 > ey1:
-                    clean_binary[ey1:ey2, ex1:ex2] = 0
+                    interior_blackout[ey1:ey2, ex1:ex2] = 255
+            # keep only the interior portion that is NOT part of the preserved outline
+            interior_blackout[outline_mask > 0] = 0
+            clean_binary[interior_blackout > 0] = 0
+
+        # 2b. Instrument bubble blackout: process pipes STOP at instruments and resume
+        #     after them (user request: "kalo ada instrumen dia gk garisi dan lanjut lagi
+        #     setelah instrumen"). Bridging passes receive `inst_boxes` so the gap is
+        #     never re-bridged. Valve symbols are NOT blacked out (they get bridged).
+        inst_dets = [d for d in (detections or []) if d.get("coarse") == "instrument"]
+        if inst_dets:
+            inst_blk = np.zeros_like(clean_binary)
+            for d in inst_dets:
+                ix1 = int(d.get("x1", 0)) - 1
+                iy1 = int(d.get("y1", 0)) - 1
+                ix2 = int(d.get("x2", 0)) + 1
+                iy2 = int(d.get("y2", 0)) + 1
+                ix1 = max(0, ix1); iy1 = max(0, iy1)
+                ix2 = min(W, ix2); iy2 = min(H, iy2)
+                if ix2 > ix1 and iy2 > iy1:
+                    inst_blk[iy1:iy2, ix1:ix2] = 255
+                    inst_boxes.append((ix1, iy1, ix2, iy2))
+            if outline_mask is not None:
+                inst_blk[outline_mask > 0] = 0
+            clean_binary[inst_blk > 0] = 0
 
         # 3. Furniture Masking (title block, drawing border, notes tables)
         if furniture:
@@ -519,14 +572,25 @@ class SkeletonLineTracer(BaseLineTracer):
         min_len = max(2, int(effective_min * (dpi / 350.0)))
         raw_runs = _graph_segments(skel, min_len)
 
+        # 5b. Tag equipment-outline runs (vessel/tangki kontur) BEFORE suppression passes so
+        #     that interior-clipping does not destroy the tool's own outline. They remain in
+        #     the run list so the engineer can label/split them manually.
+        raw_runs = tag_equipment_outlines(raw_runs, tight_dets, page_wh=(W, H),
+                                          protect_mask=outline_mask)
+
         # 6. Apply standard suppressions (symbol edges, equipment interiors, furniture)
-        filtered = suppress_box_edges(raw_runs, detections or [])
+        #    Instruments are excluded from box-edge suppression: their small bbox + wide
+        #    edge band would drop real nozzle stubs next to the bubble (they are handled
+        #    by the blackout above instead).
+        box_edge_dets = [d for d in tight_dets if d.get("coarse") != "instrument"]
+        filtered = suppress_box_edges(raw_runs, box_edge_dets)
         filtered = suppress_equipment_interior(
-            filtered, detections or [], margin_pt=3, page_wh=(W, H)
+            filtered, tight_dets, margin_pt=3, page_wh=(W, H)
         )
-        # Snap endpoints to equipment perimeter (Phase B.5)
+        # Snap endpoints to equipment perimeter (Phase B.5); ray-snap to the real wall
+        # ink via the outline mask so endpoints never get pulled to the raw box edge.
         filtered = snap_endpoints_to_equipment(
-            filtered, detections or [], snap_radius_pt=14, dpi=dpi
+            filtered, tight_dets, snap_radius_pt=14, dpi=dpi, snap_mask=outline_mask
         )
         if furniture:
             filtered = suppress_furniture(filtered, furniture)
@@ -537,18 +601,35 @@ class SkeletonLineTracer(BaseLineTracer):
 
         # Drafting suppressions & header continuity
         filtered = suppress_drawing_margins(filtered, page_wh=(W, H))
+        # Frame guard: buang bingkai gambar (polyline yang menelusuri 3-4 sisi kertas)
+        # yang lolos filter margin di atas karena vertex-nya menyentuh 2 dimensi.
+        filtered = suppress_page_frame(filtered, page_wh=(W, H))
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
-        filtered = bridge_collinear_headers(filtered, max_gap_px=55)
+        filtered = bridge_collinear_headers(filtered, max_gap_px=55, block_boxes=inst_boxes)
 
         # 7. Bridge pipe runs cut by inline valves (relaxed: containment + 20deg collinearity, 115px gap)
-        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115)
+        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115,
+                                            block_boxes=inst_boxes)
 
         # 7a. Chain collinear segments whose ends sit within a tiny residual crack
         #     (<= 15px) and are NOT a T-branch point, fusing one physical pipe that the
         #     skeletonizer fractured into several runs along a single transmission path.
         filtered = chain_collinear_segments(
-            filtered, max_gap_px=max(12, int(15 * (dpi / 350.0))), tol_px=6
+            filtered, max_gap_px=max(12, int(15 * (dpi / 350.0))), tol_px=6,
+            block_boxes=inst_boxes,
+        )
+
+        # 7a-bis. Piecemeal bridge: fragment pendek hasil skeletonisasi yang tidak nyambung
+        # ke graf sering gugur `min_length` -> pipa panjang HILANG. Sambung agresif (celah
+        # sampai ~48px, sudut longgar) dengan mengutamakan fragmen pendek sebagai jembatan.
+        filtered = bridge_piecemeal_gaps(
+            filtered,
+            max_gap_px=max(24, int(48 * (dpi / 350.0))),
+            tol_px=max(6, int(8 * (dpi / 350.0))),
+            angle_tol_deg=35.0,
+            short_len_px=max(24, int(40 * (dpi / 350.0))),
+            block_boxes=inst_boxes,
         )
 
         # 7b. T-junction orthogonal snap: pull dead-end endpoints onto the body of a
@@ -561,6 +642,20 @@ class SkeletonLineTracer(BaseLineTracer):
             filtered = suppress_floating_stubs(
                 filtered, detections=detections, page_wh=(W, H), dpi=dpi,
                 max_len_px=self.floating_stub_max_len_px,
+            )
+
+        # 9. (final) Re-tag equipment-outline runs in case merging/bridging created new
+        #    geometry; keeps the flag authoritative for downstream consumers.
+        filtered = tag_equipment_outlines(filtered, tight_dets, page_wh=(W, H),
+                                          protect_mask=outline_mask)
+
+        # 10. Re-join outline fragments into ONE closed polyline per tool (user request:
+        #     vessel outline = 1 closed polyline; engineer can split it later). Grouped
+        #     per equipment box so fragments of different tools never merge.
+        if outline_mask is not None:
+            filtered = bridge_equipment_outline_fragments(
+                filtered, detections=tight_dets,
+                max_gap_px=max(30, int(90 * (dpi / 350.0)))
             )
 
         return filtered

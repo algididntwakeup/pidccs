@@ -56,6 +56,7 @@ export interface PipeRun {
   pid?: string;
   fluid?: string;
   manual?: boolean;
+  equipment_outline?: boolean;
   length?: number;
 }
 
