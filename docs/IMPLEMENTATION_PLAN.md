@@ -1608,5 +1608,5 @@ visually distinct and splittable; (e) document YOLO/ML detection problems.
 
 ### Tooling
 `backend/_diag_trace_only.py`: caches OCR/YOLO/furniture per image hash and re-runs only the
-tracer (~3s vs ~10min). Flags `--rebuild`, `--crop`, `--labels`. Kept untracked for future
-sprint iterations.
+tracer (~3s vs ~10min). Flags `--rebuild`, `--crop`, `--labels`. Kept in the repo (git-tracked)
+for future sprint iterations; the per-image cache `backend/_cache_*.json` is gitignored.
