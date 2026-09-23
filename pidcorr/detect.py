@@ -78,8 +78,6 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
 def predict_tiled(model, img_bgr: np.ndarray, tile: int = 640, overlap: float = 0.2,
                   conf: float = 0.25, iou_merge: float = 0.5, device="cpu") -> tuple[list[Det], int]:
     """Inferensi YOLO ber-tile pada gambar penuh. return (deteksi, jumlah tile)."""
-    # FP16 (half=True) hanya aman di CUDA. Di CPU, software half-precision emulation
-    # menyebabkan overhead besar pada CPU Intel tanpa gain apa pun -> kunci FP32.
     try:
         import torch as _torch
         use_half = bool(_torch.cuda.is_available())

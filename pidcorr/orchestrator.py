@@ -17,7 +17,7 @@ from .implementations.yolo_classifier import YOLOValveClassifier
 from .layout import detect_furniture
 from .lines import associate
 from .connpoint import find_connection_points, class_vocab
-from .propagate import split_at_connection_points, propagate_labels, propagate_run_labels
+from .propagate import split_at_connection_points, propagate_labels
 
 
 def _dedup_pid_recs(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -149,28 +149,19 @@ class PipelineOrchestrator:
         run_recs = []
         for i, r in enumerate(runs):
             run_id = f"run-{i}"
-            _is_eo = bool(getattr(r, "equipment_outline", False)) if hasattr(r, "points") \
-                else bool(r.get("equipment_outline", False))
-            # Kontur alat bukan pipa: piping-ID association tidak boleh menempelkan
-            # line number pipa ke run equipment_outline.
-            if _is_eo:
-                assigned_label = getattr(r, "label", "") if hasattr(r, "points") else r.get("label", "")
-            else:
-                assigned_label = run_label_map.get(i, getattr(r, "label", getattr(r, "pid", "")))
+            assigned_label = run_label_map.get(i, getattr(r, "label", getattr(r, "pid", "")))
             if hasattr(r, "points"):
                 pts = [[int(x), int(y)] for x, y in r.points]
                 axis = getattr(r, "axis", "poly")
                 underline = bool(getattr(r, "underline", False))
                 color = getattr(r, "color", "#2563EB")
                 manual = bool(getattr(r, "manual", False))
-                equip_outline = bool(getattr(r, "equipment_outline", False))
             else:
                 pts = r.get("points", [])
                 axis = r.get("axis", "poly")
                 underline = bool(r.get("underline", False))
                 color = r.get("color", "#2563EB")
                 manual = bool(r.get("manual", False))
-                equip_outline = bool(r.get("equipment_outline", False))
 
             run_recs.append({
                 "id": run_id,
@@ -184,7 +175,6 @@ class PipelineOrchestrator:
                 "color": color,
                 "label": assigned_label or "",
                 "manual": manual,
-                "equipment_outline": equip_outline,
             })
 
         # Stage 5: Connection Points (Spec breaks) detection
@@ -229,15 +219,6 @@ class PipelineOrchestrator:
                 run_item["label"] = ""
             if "manual" not in run_item:
                 run_item["manual"] = False
-
-        # Stage 4b: Spread the full piping TAG (line number) along the connected path
-        # so a single transmission line does not shatter into anonymous fragments.
-        # Seeds = runs the associator already matched to a line number; propagation
-        # walks the pipe-adjacency graph until equipment / spec-break boundaries.
-        try:
-            propagate_run_labels(result, dpi=dpi)
-        except Exception:
-            pass
 
         # Detect Off-Page Connectors (OPC)
         opcs = []

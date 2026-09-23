@@ -102,3 +102,5 @@ frontend/blob-report/
 
 # Fast iteration diag (untracked tool + cache)
 backend/_cache_*.json
+backend/_trace_diag.json
+backend/trace_full_diag.png

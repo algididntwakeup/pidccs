@@ -11,22 +11,15 @@ from ..lines import (
     suppress_equipment_interior,
     snap_endpoints_to_equipment,
     suppress_furniture,
-    snap_t_junctions,
     suppress_box_outlines,
     detect_boxes,
     suppress_drawing_margins,
-    suppress_page_frame,
     suppress_revision_clouds,
     suppress_diagonal_artifacts,
     suppress_text_artifacts,
     suppress_floating_stubs,
     bridge_collinear_headers,
     bridge_inline_valve_gaps,
-    chain_collinear_segments,
-    equipment_outline_protect_mask,
-    tag_equipment_outlines,
-    bridge_piecemeal_gaps,
-    bridge_equipment_outline_fragments,
 )
 
 
@@ -182,25 +175,17 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 
     dilated_nodes = cv2.dilate(node_pixels, np.ones((3, 3), np.uint8))
     touch_mask = (edge_labels > 0) & (dilated_nodes > 0)
-    e_touch = edge_labels[touch_mask]
+    touch_ys, touch_xs = np.where(touch_mask)
+    H, W = node_labels.shape
 
     edge_adjacent: Dict[int, set] = defaultdict(set)
-    padded_nodes = np.pad(node_labels, 1, mode="constant", constant_values=0)
-    shifts = [
-        padded_nodes[:-2, 1:-1], padded_nodes[2:, 1:-1],
-        padded_nodes[1:-1, :-2], padded_nodes[1:-1, 2:],
-        padded_nodes[:-2, :-2], padded_nodes[:-2, 2:],
-        padded_nodes[2:, :-2], padded_nodes[2:, 2:],
-    ]
-    for s in shifts:
-        s_touch = s[touch_mask]
-        valid = s_touch > 0
-        if np.any(valid):
-            ev = e_touch[valid]
-            nv = s_touch[valid]
-            unq = np.unique(np.column_stack((ev, nv)), axis=0)
-            for e_id, n_id in unq:
-                edge_adjacent[int(e_id)].add(int(n_id))
+    for x, y in zip(touch_xs, touch_ys):
+        e_id = int(edge_labels[y, x])
+        y0, y1 = max(0, y - 1), min(H, y + 2)
+        x0, x1 = max(0, x - 1), min(W, x + 2)
+        for nid in node_labels[y0:y1, x0:x1].flat:
+            if nid > 0:
+                edge_adjacent[e_id].add(int(nid))
 
     valid_edge_ids = {eid for eid, adj in edge_adjacent.items() if len(adj) == 2}
 
@@ -225,25 +210,9 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
             pts.sort(key=lambda pt: (pt[0] - p0[0]) * nx + (pt[1] - p0[1]) * ny)
         ordered_points = [p0] + [(int(x), int(y)) for x, y in pts[::max(1, len(pts)//15)]] + [p1]
 
-        # Simplify collinear points along edge. For STRAIGHT edges a coarse epsilon (1.5) is
-        # ideal: the skeleton is a 1px staircase and we want clean orthogonal runs. But
-        # vessel/equipment cylinder outlines (ellipse/arc boundaries) live in the SAME skeleton:
-        # a coarse epsilon turns their smooth curve into a stiff zig-zag. So we branch: if the
-        # edge is a genuine curve (its ordered pixels bow away from the p0->p1 chord), simplify
-        # with a much finer epsilon (0.5-0.8) to keep the arc smooth and vertex-dense.
-        pts_all = [(int(x), int(y)) for x, y in pts]
-        chord_len = max(1.0, math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
-        curve_bow = 0.0
-        if len(pts_all) >= 3:
-            ux, uy = (p1[0] - p0[0]) / chord_len, (p1[1] - p0[1]) / chord_len
-            for qx, qy in pts_all[:: max(1, len(pts_all) // 24)]:
-                # perpendicular distance from the p0->p1 chord
-                perp = abs((qx - p0[0]) * (-uy) + (qy - p0[1]) * ux)
-                curve_bow = max(curve_bow, perp)
-        is_curved = curve_bow > max(1.5, 0.035 * chord_len)
-        eps = 0.6 if is_curved else 1.5
+        # Simplify collinear points along edge
         pts_arr = np.array(ordered_points, dtype=np.int32).reshape((-1, 1, 2))
-        approx = cv2.approxPolyDP(pts_arr, epsilon=eps, closed=False)
+        approx = cv2.approxPolyDP(pts_arr, epsilon=1.5, closed=False)
         clean_pts = [(int(pt[0][0]), int(pt[0][1])) for pt in approx]
         if len(clean_pts) < 2:
             clean_pts = [p0, p1]
@@ -341,7 +310,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 
     # Diagonal PCA staircase fallback for isolated diagonal strokes
     component_count, component_labels, component_stats, _ = cv2.connectedComponentsWithStats(ink, 8)
-    components_with_edges = set(np.unique(component_labels[edge_labels > 0]))
+    components_with_edges = set(component_labels[edge_labels > 0])
     H, W = ink.shape[:2]
 
     for component_id in range(1, component_count):
@@ -359,28 +328,12 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
         ys = sub_ys + by
         points = np.column_stack((xs.astype(float), ys.astype(float)))
         centered = points - points.mean(axis=0)
-        
-        # Closed-form 2x2 covariance eigenvalues (100x faster than full SVD)
-        # C = X^T X = [[a, b], [b, c]]
-        a = float(np.sum(centered[:, 0] ** 2))
-        b = float(np.sum(centered[:, 0] * centered[:, 1]))
-        c = float(np.sum(centered[:, 1] ** 2))
-        tr = a + c
-        delta = math.sqrt(max(0.0, (a - c) ** 2 + 4.0 * b * b))
-        lam1 = (tr + delta) * 0.5
-        lam2 = max(0.0, (tr - delta) * 0.5)
-
-        # Check linearity: true straight stroke must have low perpendicular variance (s1/s0 <= 0.12 => lam2/lam1 <= 0.0144)
-        if lam1 <= 1e-6 or (lam2 / lam1) > 0.0144:
+        _, s, vh = np.linalg.svd(centered, full_matrices=False)
+        # Check linearity: true straight stroke must have low perpendicular variance
+        if s[0] <= 0 or (s[1] / s[0]) > 0.12:
             continue
 
-        if abs(b) > 1e-6:
-            v_raw = (b, lam1 - a)
-            v_len = math.hypot(v_raw[0], v_raw[1])
-            direction = np.array([v_raw[0] / v_len, v_raw[1] / v_len])
-        else:
-            direction = np.array([1.0, 0.0]) if a >= c else np.array([0.0, 1.0])
-
+        direction = vh[0]
         projection = centered @ direction
         p0 = points[projection.argmin()]
         p1 = points[projection.argmax()]
@@ -402,9 +355,9 @@ class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
     def __init__(self, min_length_px: int = 12, suppress_text_artifacts: bool = True,
-                 text_artifact_max_side_pt: float = 9.3,
-                 text_artifact_max_area_pt2: float = 25.5,
-                 text_artifact_max_aspect: float = 3.5,
+                 text_artifact_max_side_pt: float = 10.0,
+                 text_artifact_max_area_pt2: float = 40.0,
+                 text_artifact_max_aspect: float = 4.0,
                  suppress_floating_stubs: bool = True,
                  floating_stub_max_len_px: float = 28.0):
         self.min_length_px = min_length_px
@@ -423,55 +376,24 @@ class SkeletonLineTracer(BaseLineTracer):
         furniture: Optional[List[List[int]]] = None,
         tokens: Optional[List[Dict[str, Any]]] = None,
         progress: Optional[Callable[[str], None]] = None,
-        binary_img: Optional[np.ndarray] = None,
-        roi: bool = False,
         **kwargs,
     ) -> List[PipeRun]:
-        """Extract pipe runs via skeletonization, junction analysis, and suppression.
-
-        Parameters
-        ----------
-        binary_img : np.ndarray, optional
-            Pra-binarisasi (BINARY_INV, ink=255) yang SUDAH dihitung pada resolusi penuh.
-            Jika diberikan, adaptive threshold TIDAK dijalankan ulang. Ini penting untuk
-            ROI re-scan: crop sub-image yang didominasi background putih tidak memiliki
-            statistik lokal yang cukup sehingga adaptive threshold lokal rusak dan stroke
-            pipa tipis hilang.
-        roi : bool
-            Mode ROI re-scan. Menyambungkan kembali piksel pipa yang berlubang karena
-            masking teks OCR di sekitar kotak (MORPH_CLOSE kernel 3x3) dan memakai
-            min_length_px adaptif.
-        """
+        """Extract pipe runs via skeletonization, junction analysis, and suppression."""
         if progress:
             progress("Skeletonizing P&ID pipe network...")
 
         H, W = img_bgr.shape[:2]
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
 
-        if binary_img is not None:
-            # Region/whole-image path: reuse the already-computed full-resolution binary.
-            # Never re-run adaptive thresholding on a cropped sub-image (local statistics
-            # collapse under white-background domination -> thin pipe strokes vanish).
-            binary = binary_img
-            if binary.shape[:2] != (H, W):
-                binary = cv2.resize(binary, (W, H), interpolation=cv2.INTER_NEAREST)
-        else:
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
-            # Adaptive thresholding to capture clean pipe strokes (tuned to blockSize=21, C=6 for faint CAD lines)
-            binary = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
-            )
+        # Adaptive thresholding to capture clean pipe strokes (tuned to blockSize=21, C=6 for faint CAD lines)
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
+        )
 
         # Remove very small noise dots
         clean_binary = cv2.morphologyEx(
             binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         )
-
-        # ROI bridge: reconnect pipe pixels that OCR masking punched through near the box
-        # so a line crossing a masked label does not shatter into disconnected fragments.
-        if roi:
-            clean_binary = cv2.morphologyEx(
-                clean_binary, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            )
 
         # 1. Dilated Text Masking: Scaled with DPI (5px at 350 DPI)
         # to blackout notes/underlines while avoiding false gap creation in dense areas
@@ -495,75 +417,17 @@ class SkeletonLineTracer(BaseLineTracer):
                 dil_y2 = min(H, ty2 + dil_r)
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
-        # 2. Equipment Interior Masking: Blackout the chest of equipment boxes (vessels, tanks,
-        #    columns) so their DENSE interior art/text does not become pipe runs. BUT the tool's
-        #    own OUTLINE must survive: if the detection box is slightly offset (common) or the
-        #    vessel is drawn as a thin-walled tube (dome + two walls), zeroing the whole box would
-        #    delete the vessel outline itself. So we compute an OUTLINE-PROTECT mask (long thin
-        #    strokes + curved arcs inside each equipment box) and subtract it from the blackout.
+        # 2. Equipment Interior Masking: Blackout total interior of equipment boxes (vessels, tanks, etc.)
+        # Keep an inset of 4px so the outer physical perimeter remains for snapping (snap-to-edge)
         eq_margin = max(3, int(4 * (dpi / 350.0)))
-        equip_dets = [d for d in (detections or []) if d.get("coarse") == "equipment"]
-        outline_mask = None
-        tight_dets = list(detections or [])
-        inst_boxes = []
-        if equip_dets:
-            outline_mask, tight_boxes = equipment_outline_protect_mask(
-                clean_binary, equip_dets, dpi=dpi, eq_margin_px=eq_margin, return_tight=True
-            )
-            # Tighten equipment boxes to the actual silhouette bbox (union of protected
-            # outline components). The raw YOLO box is often much wider than the tool
-            # (vessel 605-V-221-B: box (1362,846,1921,1657) vs silhouette x≈1393..1663),
-            # so using the raw box for interior blackout / interior clipping would erase
-            # REAL nozzle pipes outside the tool (N6A/N6B/N4 on the right wall).
-            tight_iter = iter(tight_boxes)
-            new_dets = []
-            for d in (detections or []):
-                if d.get("coarse") == "equipment":
-                    tb = next(tight_iter, None)
-                    if tb is not None:
-                        d = {**d, "x1": tb[0], "y1": tb[1], "x2": tb[2], "y2": tb[3]}
-                new_dets.append(d)
-            tight_dets = new_dets
-            interior_blackout = np.zeros_like(clean_binary)
-            for (ex1, ey1, ex2, ey2) in tight_boxes:
-                ex1 += eq_margin; ey1 += eq_margin
-                ex2 -= eq_margin; ey2 -= eq_margin
+        for d in (detections or []):
+            if d.get("coarse") == "equipment":
+                ex1 = int(d.get("x1", 0)) + eq_margin
+                ey1 = int(d.get("y1", 0)) + eq_margin
+                ex2 = int(d.get("x2", 0)) - eq_margin
+                ey2 = int(d.get("y2", 0)) - eq_margin
                 if ex2 > ex1 and ey2 > ey1:
-                    interior_blackout[ey1:ey2, ex1:ex2] = 255
-            # keep only the interior portion that is NOT part of the preserved outline
-            interior_blackout[outline_mask > 0] = 0
-            clean_binary[interior_blackout > 0] = 0
-
-        # 2b. Instrument bubble blackout: process pipes STOP at instruments and resume
-        #     after them (user request: "kalo ada instrumen dia gk garisi dan lanjut lagi
-        #     setelah instrumen"). Bridging passes receive `inst_boxes` so the gap is
-        #     never re-bridged. Valve symbols are NOT blacked out (they get bridged).
-        inst_dets = [d for d in (detections or []) if d.get("coarse") == "instrument"]
-        if inst_dets:
-            inst_blk = np.zeros_like(clean_binary)
-            for d in inst_dets:
-                ix1 = int(d.get("x1", 0)) - 1
-                iy1 = int(d.get("y1", 0)) - 1
-                ix2 = int(d.get("x2", 0)) + 1
-                iy2 = int(d.get("y2", 0)) + 1
-                ix1 = max(0, ix1); iy1 = max(0, iy1)
-                ix2 = min(W, ix2); iy2 = min(H, iy2)
-                if ix2 > ix1 and iy2 > iy1:
-                    inst_blk[iy1:iy2, ix1:ix2] = 255
-                    inst_boxes.append((ix1, iy1, ix2, iy2))
-        # 2c. Collect block boxes that bridging passes must NOT cross.
-        # Pada mode ROI re-scan, bodi valve juga dimasukkan ke block_boxes agar bridging passes
-        # apa pun (collinear headers, piecemeal, chain collinear) tidak menyeberang menembus valve.
-        block_boxes = list(inst_boxes)
-        if roi and detections:
-            for d in detections:
-                if d.get("coarse") == "valve":
-                    vx1 = max(0, int(d.get("x1", 0)))
-                    vy1 = max(0, int(d.get("y1", 0)))
-                    vx2 = min(W, int(d.get("x2", 0)))
-                    vy2 = min(H, int(d.get("y2", 0)))
-                    if vx2 > vx1 and vy2 > vy1:
-                        block_boxes.append((vx1, vy1, vx2, vy2))
+                    clean_binary[ey1:ey2, ex1:ex2] = 0
 
         # 3. Furniture Masking (title block, drawing border, notes tables)
         if furniture:
@@ -597,34 +461,17 @@ class SkeletonLineTracer(BaseLineTracer):
         skel = _morphological_skeleton(clean_binary)
 
         # 5. Extract graph segments and resolve junctions (crossovers vs T-junctions)
-        # In ROI mode the selection box is small; shrink the minimum run length so short but
-        # genuine pipe fragments inside the box are kept, while never exceeding the configured
-        # page-level minimum (min(8, min_length_px) per task spec).
-        effective_min = self.min_length_px
-        if roi:
-            effective_min = min(8, self.min_length_px)
-        min_len = max(2, int(effective_min * (dpi / 350.0)))
+        min_len = int(self.min_length_px * (dpi / 350.0))
         raw_runs = _graph_segments(skel, min_len)
 
-        # 5b. Tag equipment-outline runs (vessel/tangki kontur) BEFORE suppression passes so
-        #     that interior-clipping does not destroy the tool's own outline. They remain in
-        #     the run list so the engineer can label/split them manually.
-        raw_runs = tag_equipment_outlines(raw_runs, tight_dets, page_wh=(W, H),
-                                          protect_mask=outline_mask)
-
         # 6. Apply standard suppressions (symbol edges, equipment interiors, furniture)
-        #    Instruments are excluded from box-edge suppression: their small bbox + wide
-        #    edge band would drop real nozzle stubs next to the bubble (they are handled
-        #    by the blackout above instead).
-        box_edge_dets = [d for d in tight_dets if d.get("coarse") != "instrument"]
-        filtered = suppress_box_edges(raw_runs, box_edge_dets)
+        filtered = suppress_box_edges(raw_runs, detections or [])
         filtered = suppress_equipment_interior(
-            filtered, tight_dets, margin_pt=3, page_wh=(W, H)
+            filtered, detections or [], margin_pt=3, page_wh=(W, H)
         )
-        # Snap endpoints to equipment perimeter (Phase B.5); ray-snap to the real wall
-        # ink via the outline mask so endpoints never get pulled to the raw box edge.
+        # Snap endpoints to equipment perimeter (Phase B.5)
         filtered = snap_endpoints_to_equipment(
-            filtered, tight_dets, snap_radius_pt=14, dpi=dpi, snap_mask=outline_mask
+            filtered, detections or [], snap_radius_pt=14, dpi=dpi
         )
         if furniture:
             filtered = suppress_furniture(filtered, furniture)
@@ -635,42 +482,12 @@ class SkeletonLineTracer(BaseLineTracer):
 
         # Drafting suppressions & header continuity
         filtered = suppress_drawing_margins(filtered, page_wh=(W, H))
-        # Frame guard: buang bingkai gambar (polyline yang menelusuri 3-4 sisi kertas)
-        # yang lolos filter margin di atas karena vertex-nya menyentuh 2 dimensi.
-        filtered = suppress_page_frame(filtered, page_wh=(W, H))
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
-        filtered = bridge_collinear_headers(filtered, max_gap_px=55, block_boxes=block_boxes)
+        filtered = bridge_collinear_headers(filtered, max_gap_px=55)
 
-        # 7. Bridge pipe runs cut by inline valves (relaxed: containment + 20deg collinearity, 115px gap)
-        # Pada mode ROI re-scan, pipa harus berhenti rapi di port valve, bukan menembus bodinya.
-        if not roi:
-            filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115,
-                                                block_boxes=block_boxes)
-
-        # 7a. Chain collinear segments whose ends sit within a tiny residual crack
-        #     (<= 15px) and are NOT a T-branch point, fusing one physical pipe that the
-        #     skeletonizer fractured into several runs along a single transmission path.
-        filtered = chain_collinear_segments(
-            filtered, max_gap_px=max(12, int(15 * (dpi / 350.0))), tol_px=6,
-            block_boxes=block_boxes,
-        )
-
-        # 7a-bis. Piecemeal bridge: fragment pendek hasil skeletonisasi yang tidak nyambung
-        # ke graf sering gugur `min_length` -> pipa panjang HILANG. Sambung agresif (celah
-        # sampai ~48px, sudut longgar) dengan mengutamakan fragmen pendek sebagai jembatan.
-        filtered = bridge_piecemeal_gaps(
-            filtered,
-            max_gap_px=max(24, int(48 * (dpi / 350.0))),
-            tol_px=max(6, int(8 * (dpi / 350.0))),
-            angle_tol_deg=35.0,
-            short_len_px=max(24, int(40 * (dpi / 350.0))),
-            block_boxes=block_boxes,
-        )
-
-        # 7b. T-junction orthogonal snap: pull dead-end endpoints onto the body of a
-        #     perpendicular run so branches meet their header without a 5-15px gap.
-        filtered = snap_t_junctions(filtered, near_px=max(12, int(16 * (dpi / 350.0))))
+        # 7. Bridge pipe runs cut by inline valves
+        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=90)
 
         # 8. Post-filter: drop isolated short diagonal strokes (surviving text/hand scratches)
         #    that do not attach to any detected symbol. No-op when detections is empty.
@@ -678,20 +495,6 @@ class SkeletonLineTracer(BaseLineTracer):
             filtered = suppress_floating_stubs(
                 filtered, detections=detections, page_wh=(W, H), dpi=dpi,
                 max_len_px=self.floating_stub_max_len_px,
-            )
-
-        # 9. (final) Re-tag equipment-outline runs in case merging/bridging created new
-        #    geometry; keeps the flag authoritative for downstream consumers.
-        filtered = tag_equipment_outlines(filtered, tight_dets, page_wh=(W, H),
-                                          protect_mask=outline_mask)
-
-        # 10. Re-join outline fragments into ONE closed polyline per tool (user request:
-        #     vessel outline = 1 closed polyline; engineer can split it later). Grouped
-        #     per equipment box so fragments of different tools never merge.
-        if outline_mask is not None:
-            filtered = bridge_equipment_outline_fragments(
-                filtered, detections=tight_dets,
-                max_gap_px=max(30, int(90 * (dpi / 350.0)))
             )
 
         return filtered

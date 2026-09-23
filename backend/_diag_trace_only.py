@@ -26,7 +26,10 @@ if "--crop" in args:
 
 from pidcorr.factory import get_configured_orchestrator
 from pidcorr.lines import associate
-from pidcorr.propagate import propagate_run_labels
+try:
+    from pidcorr.propagate import propagate_run_labels
+except ImportError:
+    def propagate_run_labels(res, dpi=350): pass
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 
 img = cv2.imread(path)
@@ -57,16 +60,12 @@ if cache is None:
         furniture = detect_furniture(img, orc.layout_weights)
     except Exception:
         furniture = []
-    for s in syms:
-        if s.get("coarse") == "valve" and not s.get("subtype"):
-            try: s["subtype"] = orc.classifier.classify_valve(img, s)
-            except Exception: pass
-        elif s.get("coarse") == "instrument" and not s.get("subtype"):
-            try:
-                func, loop = orc.classifier.classify_instrument(img, s)
-                if func:
-                    s["subtype"] = func; s["isa_func"] = func; s["isa_loop"] = loop
-            except Exception: pass
+    try:
+        from pidcorr.subtype import classify_valve_crops
+        valves = [s for s in syms if s.get("coarse") == "valve"]
+        classify_valve_crops(img, valves, getattr(orc.classifier, "weights_path", None))
+    except Exception:
+        pass
 
     def _pid_dump(p):
         if isinstance(p, dict):

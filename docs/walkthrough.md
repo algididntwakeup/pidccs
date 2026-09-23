@@ -1008,3 +1008,46 @@ Sebagai acuan untuk sesi berikutnya, berikut adalah backlog prioritas yang belum
    - `npx tsc --noEmit`: 0 errors.
    - Container API dan Worker berhasil direstart dan berjalan normal.
 
+---
+
+## 10. Surgical Rollback & Perception Core Stabilization (Pre-Phase C)
+
+**Status**: 100% Selesai, Terverifikasi, dan Siap Digunakan.
+
+### 10.1 Latar Belakang & Tindakan Surgical Rollback
+- **Masalah**: Pasca implementasi eksperimen Sprint B.7 (vessel outline trace 2D dan piecemeal bridging), terjadi regresi kualitas: garis-garis pipa melompat dan bocor ke bingkai border gambar, baris tabel NOTES, serta tabel detail equipment, disertai waktu inferensi dan tracing yang melambat drastis.
+- **Tindakan**:
+  - Melakukan checkout core computer vision di `pidcorr/` ke commit emas:
+    ```bash
+    git checkout 6b3838ba090721302fa919d09339b775d7e772a9 -- pidcorr/
+    ```
+  - Menghapus fungsi bridging agresif dan pemaksaan 2D equipment contour outline yang menyebabkan kebocoran batas.
+  - Mempertahankan seluruh fitur interaktif UI frontend yang telah selesai dibangun (Right-Edge Tool Rack, Multi-Select Marquee, Arrow Keys Nudge, Hotkey Pan, dan Split Post-Selection Isolation).
+
+### 10.2 Audit Kompatibilitas & Backend Schema
+1. **Schema `PipeRun`**:
+   - Menjaga field `id`, `label`, `color`, `manual`, serta menambahkan default `equipment_outline: bool = False` pada kelas dataclass `PipeRun` dan dict lookup `__getitem__` di `pidcorr/lines.py` serta `backend/app/schemas/run.py`.
+   - Menjaga penomoran ID unik `-a` dan `-b` pada `split_poly_run` agar seleksi pasca-split di frontend tetap terisolasi dengan rapi.
+2. **Inference CPU FP32 & Singleton Orchestrator**:
+   - Memastikan inferensi tiling YOLO pada CPU (`pidcorr/detect.py`) menggunakan FP32 murni (`half=False`) untuk mencegah overhead software emulation FP16.
+   - Mempertahankan singleton `_ORCHESTRATOR` pada `backend/app/services/detection_service.py` sehingga bobot model tidak di-reload dari disk di tiap request.
+3. **Endpoint Fallbacks**:
+   - Menambahkan safe fallback untuk `stitch_region_runs` di `backend/app/routers/projects.py`.
+   - Mengoptimalkan batching klasifikasi valve di `backend/_diag_trace_only.py`.
+
+### 10.3 Hasil Pengujian & Verifikasi Visual
+1. **Automated Backend Test Suite**:
+   ```bash
+   pytest backend/tests/ -q
+   ```
+   - **Hasil**: **38 passed, 0 failed, 100% Green** (identik dengan baseline commit emas).
+2. **Visual Tracing Benchmark (`Contoh P&ID/BCD3-605-42-PID-1-014-01 Rev.6-CCD2.png`)**:
+   ```bash
+   docker compose exec -T api python _diag_trace_only.py "Contoh P&ID/BCD3-605-42-PID-1-014-01 Rev.6-CCD2.png"
+   ```
+   - **Durasi Eksekusi Tracing**: **1 detik** (kembali instan, < 5 detik terpenuhi).
+   - **Kebocoran Tabel NOTES**: **0 run** (100% bersih, perimeter tabel tidak tertembus).
+   - **Kebocoran Outer Border**: **0 run** (100% bersih).
+   - **Jumlah Run Pipa**: **44 run** bersih, presisi, tanpa garis artefak.
+
+

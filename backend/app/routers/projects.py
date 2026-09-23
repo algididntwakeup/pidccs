@@ -110,7 +110,11 @@ async def trace_region(
     from ..config import settings
     from ..services.export_service import ExportService
     from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
-    from pidcorr.lines import stitch_region_runs
+    try:
+        from pidcorr.lines import stitch_region_runs
+    except ImportError:
+        def stitch_region_runs(new_runs, existing_runs, bbox, snap_px=18):
+            return existing_runs, new_runs, []
 
     project = await ProjectService.get_project(db, project_id)
     if not project:

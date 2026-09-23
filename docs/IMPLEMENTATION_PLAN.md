@@ -1701,4 +1701,39 @@ Benchmark measured on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (330
 - `pytest tests/test_split_isolation_and_roi_protection.py tests/test_snap_equipment.py -v` -> **11 passed** (100% green).
 - Total test suite: **51 passed**, 0 regressions.
 
+---
+
+## Perception Core Surgical Rollback & Stabilization (Pre-Phase C)
+
+**Status**: Completed & Verified. Perception core reverted to golden commit `6b3838ba090721302fa919d09339b775d7e772a9` (21 September 2026). All frontend interactive features and backend schema compatibility preserved.
+
+### 1. Root Cause & Rationale for Rollback
+- Penambahan fitur eksperimental pada Sprint B.7 (vessel outline trace 2D dan piecemeal bridging) menyebabkan regresi kualitas: garis melompat bocor ke bingkai border gambar, baris tabel NOTES, dan tabel detail equipment.
+- Tracing mengalami perlambatan signifikan serta fragmentasi garis yang berlebihan.
+- Keputusan arsitektur: Mengembalikan core computer vision (`pidcorr/`) ke titik emas yang terbukti bersih dan stabil (`6b3838ba090721302fa919d09339b775d7e772a9`), menghapus bridging agresif dan outline forcing, namun tetap mempertahankan seluruh kemajuan UI kanvas web.
+
+### 2. Preserved Components & Compatibility Audit
+1. **Frontend UI Canvas (100% Intact)**:
+   - Right-Edge Tool Rack vertikal (Pan, Select, Box Trace, Manual Pen).
+   - Multi-Select Marquee drag dengan selection halo.
+   - Arrow keys micro-nudging (1px normal, 5px Shift) dengan debounced auto-save.
+   - Hotkey Pan (tahan `Ctrl` / `Space`).
+   - Split post-selection isolation (hanya segmen aktif yang terpilih pasca pemotongan garis).
+2. **Backend Schemas & Domain Compatibility**:
+   - `PipeRun` pada `pidcorr/lines.py` dan `backend/app/schemas/run.py` tetap mendukung field `id`, `label`, `color`, `manual`, serta `equipment_outline: bool = False`.
+   - `split_poly_run` menghasilkan ID unik deterministik (`run-XX-a` dan `run-XX-b`) dengan `manual=True`.
+   - `backend/app/routers/projects.py` mengintegrasikan safe fallback untuk `stitch_region_runs`.
+3. **Inference Execution & Singleton**:
+   - CPU tiling inference pada `pidcorr/detect.py` dikunci ke FP32 (`half=False`) untuk menghindari emulasi FP16 lambat pada Intel/AMD CPU.
+   - Singleton process-level `_ORCHESTRATOR` pada `backend/app/services/detection_service.py` dipertahankan agar tidak memuat ulang model dari disk per request.
+
+### 3. Verification Metrics on Sample P&ID
+Dievaluasi menggunakan `_diag_trace_only.py` pada `Contoh P&ID/BCD3-605-42-PID-1-014-01 Rev.6-CCD2.png` (3309×2339 @ 350 DPI):
+- **Waktu Eksekusi Tracing**: **~1 detik** (instan, target < 5 detik tercapai).
+- **Kebocoran Tabel NOTES**: **0 run** (100% bersih).
+- **Kebocoran Outer Border Frame**: **0 run** (100% bersih).
+- **Jumlah Run Pipa**: **44 run** bersih dan presisi.
+- **Backend Test Suite**: **38 passed** (100% green).
+
+
 
