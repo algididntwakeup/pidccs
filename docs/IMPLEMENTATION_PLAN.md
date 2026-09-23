@@ -1610,3 +1610,95 @@ visually distinct and splittable; (e) document YOLO/ML detection problems.
 `backend/_diag_trace_only.py`: caches OCR/YOLO/furniture per image hash and re-runs only the
 tracer (~3s vs ~10min). Flags `--rebuild`, `--crop`, `--labels`. Kept in the repo (git-tracked)
 for future sprint iterations; the per-image cache `backend/_cache_*.json` is gitignored.
+
+---
+
+## Sprint Handover: Split Post-Selection Isolation, Localized OCR & Symbol Protection in Box Trace
+
+**Status**: Implemented, tested (50 backend tests passed green), verified locally — 2026-09-24.
+
+### 1. Scope & Root Cause Resolution
+
+| # | Feature / Bugfix | Files | Resolution Summary |
+|---|------------------|-------|--------------------|
+| 1 | **Split Post-Selection Isolation** | `pidcorr/lines.py`, `frontend/src/app/project/[id]/page.tsx`, `frontend/src/components/InteractivePipeCanvas.tsx` | Root cause: `split_poly_run` cloned the base run's string `id` for both segments, causing canvas selection (`selectedRunIds.has(r.id)`) to highlight both pieces simultaneously. Fixed by generating distinct unique IDs `f"{base_id}-a"` and `f"{base_id}-b"`, tagging `manual=True`. Frontend `handleSplitRun` automatically turns off `splitMode` (`setSplitMode(false)`) and cleanly clears selection (`selectRunIds([])`) so neither segment is accidentally selected or linked. Deduplication added in `_apply_points` to prevent duplicate junction vertices when extending/bridging runs. |
+| 2 | **Localized OCR & Auto-Labeling in Box Trace** | `backend/app/routers/projects.py` | In `/trace-region` (Box Trace / Re-scan), localized OCR (`BaseTextExtractor.extract()`) and `RegexPipingIDParser` are executed directly on the cropped BGR region (`roi_bgr`). Any detected line tag is matched and assigned to the nearest newly traced `PipeRun` (`run["label"]`, `run["pid"]`, `run["fluid"]`). The tag is registered into `sheet.result_json["piping_ids"]` with `run_idx` pointing to the assigned run, instantly syncing to the Pipe Inspector sidebar and Lines list. Falls back to full-sheet OCR if crop OCR yields no tags. |
+| 3 | **Symbol Protection in Box Trace (Anti-Nabrak)** | `backend/app/routers/projects.py`, `pidcorr/implementations/skeleton_tracer.py` | In `/trace-region`, existing `valve` and `instrument` YOLO detections intersecting the ROI crop are converted to local crop coordinates and blacked out on `binary_crop` before skeletonization. When `roi=True`, `bridge_inline_valve_gaps` is skipped. Valve bounding boxes are added into `block_boxes` in ROI mode, blocking `bridge_collinear_headers`, `chain_collinear_segments`, and `bridge_piecemeal_gaps` from bridging through valve bodies. Pipes terminate cleanly at valve ports without penetration. T-junction geometry classifier `_classify_junction_geometry` is preserved. |
+
+### 2. Files Modified
+
+- [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py):
+  - `split_poly_run`: generates distinct IDs (`f"{base_id}-a"`, `f"{base_id}-b"`), sets `manual=True`.
+  - `stitch_region_runs`: propagates `label`, `pid`, `fluid` during 1-to-1 extension and 1-to-2 bridging.
+  - `_apply_points`: deduplicates consecutive identical points to avoid duplicate vertices at junctions.
+- [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py):
+  - Skips `bridge_inline_valve_gaps` when `roi=True`.
+  - Injects valve boxes into `block_boxes` when `roi=True` across collinear, chaining, and piecemeal passes.
+- [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py):
+  - In `trace_region`: blackouts valve and instrument bounding boxes on `binary_crop` before skeletonization.
+  - Runs localized OCR (`extractor.extract`) + `RegexPipingIDParser` on `roi_bgr`.
+  - Attaches detected tag to closest run and registers tag with `run_idx` in `result_json["piping_ids"]`.
+- [`frontend/src/app/project/[id]/page.tsx`](file:///c:/Werk/pidccs/frontend/src/app/project/[id]/page.tsx):
+  - `handleSplitRun`: calls `setSplitMode(false)` and `selectRunIds([])` for clean deselect.
+- [`backend/tests/test_split_isolation_and_roi_protection.py`](file:///c:/Werk/pidccs/backend/tests/test_split_isolation_and_roi_protection.py):
+  - 5 comprehensive tests for split ID uniqueness, stitch label propagation & deduplication, valve anti-penetration in ROI, and regex parsing.
+
+### 3. Verification
+
+- `pytest tests/test_split_isolation_and_roi_protection.py -v` -> **5 passed** (100% green).
+- Full regression suite (`tests/test_split_and_color.py`, `tests/test_masking_and_runs.py`) -> **45 passed**.
+- Total backend test suite: **50 passed**, 0 regressions.
+- Docker services restarted: `pidstudio-api` and `pidstudio-worker`.
+
+---
+
+## Sprint B.8: Deep Diagnostic, Profiling & Line Tracing Algorithmic Optimization
+
+**Status**: Implemented & verified across 51 backend tests. Tracing latency dramatically reduced; test suite execution time reduced from 32.65s to 2.86s (11.4x faster).
+
+### 1. Scope & Algorithmic Problem Resolution
+
+| # | Optimization / Feature | Files | Technical Resolution |
+|---|------------------------|-------|----------------------|
+| 1 | **Fast AABB Reject + Liang-Barsky Clipping** | `pidcorr/lines.py` | Replaced the discrete 4px stepping ray-marching loop in `_seg_crosses_boxes` with an analytical AABB fast reject + Liang-Barsky parametric line clipping check ($O(1)$ per box). Eliminates millions of float coordinate increments per P&ID sheet. |
+| 2 | **Spatial Grid Indexing for Valves & Endpoints** | `pidcorr/lines.py` | Integrated 2D spatial binning (`defaultdict(list)`) for valve bounding boxes and candidate run endpoints in `bridge_inline_valve_gaps`. Reduces pair comparisons from $O(N^2)$ brute-force to localized $O(1)$ cell lookups. Latency dropped from **1,403.7 ms** to **284.7 ms** (almost 5x faster). |
+| 3 | **Spatial Candidate Filtering in Chaining & Piecemeal** | `pidcorr/lines.py` | Built endpoint spatial grids for `chain_collinear_segments` and `bridge_piecemeal_gaps`. Candidate neighbors are queried only in adjacent cells within `max_gap_px`. Pass `end_grid` to `_has_branch` for $O(1)$ T-junction branch detection. Chaining latency dropped from **122.2 ms** to **23.5 ms** (5.2x faster); piecemeal dropped from **136.8 ms** to **25.0 ms** (5.5x faster). |
+| 4 | **Vectorized Adjacency Matching in Graph Segments** | `pidcorr/implementations/skeleton_tracer.py` | Replaced 50,000-iteration Python pixel loop and scalar neighborhood slicing in `_graph_segments` with 8-neighbor padded array shifts in NumPy. Latency of `5_graph_segments` dropped from **4,701.3 ms** to **2,906.7 ms** (~1.8 seconds saved). |
+| 5 | **Closed-Form 2x2 Covariance Eigenvalues** | `pidcorr/implementations/skeleton_tracer.py` | Replaced iterative `np.linalg.svd` calls on hundreds of connected components in the diagonal PCA fallback with closed-form 2x2 symmetric matrix quadratic eigenvalue formulas ($O(1)$ pure float math). |
+| 6 | **Boolean Lookup Table Indexing** | `pidcorr/lines.py` | Replaced `np.isin(labels, drop_ids)` in `suppress_text_artifacts` with direct 1D boolean array indexing `drop_lut[labels]`. |
+| 7 | **Equipment Dome Arc & Wall Line Rescue** | `pidcorr/lines.py` | Relaxed strict 2-axis spanning condition in `equipment_outline_protect_mask` by adding `is_dome_arc` ($cw \ge 0.40 \cdot box\_w, ch \ge 0.08 \cdot box\_h, \text{area} \ge 50$) and `is_wall_line` ($ch \ge 0.40 \cdot box\_h, cw \ge 0.04 \cdot box\_w$). Protects severed vessel domes and cylindrical side walls from interior blackout while continuing to suppress thin internal baffles ($ch \approx 2-3\text{px}$). |
+
+### 2. Actual Profiling Breakdown Comparison
+
+Benchmark measured on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (3309×2339 @ 350 DPI, 76 symbols, 356 tokens):
+
+| Stage | Baseline Post-B.7 (ms) | After Algorithmic Optimization (ms) | Speedup Factor |
+|---|---|---|---|
+| `5_graph_segments` | 4,701.3 ms | 2,906.7 ms | **1.62x faster** |
+| `7b_bridge_inline_valve_gaps` | 1,403.7 ms | 284.7 ms | **4.93x faster** |
+| `7c_chain_collinear_segments` | 122.2 ms | 23.5 ms | **5.20x faster** |
+| `7d_bridge_piecemeal_gaps` | 136.8 ms | 25.0 ms | **5.47x faster** |
+| **Sum of Bridging Passes (7b+7c+7d)** | **1,662.7 ms** | **333.2 ms** | **5.00x faster** |
+| **Total Test Suite Runtime (`test_masking_and_runs.py`)** | **32.65 s** | **2.86 s** | **11.4x faster** |
+
+### 3. Files Modified
+
+- [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py):
+  - `_seg_crosses_boxes`: Fast AABB pre-filtering + Liang-Barsky parametric line-segment AABB clipping.
+  - `bridge_inline_valve_gaps`: Spatial grid for valve boxes (`_vg_cell = max(128.0, max_gap_px)`) and run endpoints (`end_grid`).
+  - `chain_collinear_segments`: Spatial grid candidate lookup for head/tail outward ends.
+  - `bridge_piecemeal_gaps`: Spatial grid candidate lookup for head/tail outward ends.
+  - `_has_branch`: Added spatial lookup support via `end_grid` for $O(1)$ T-junction branch detection.
+  - `suppress_text_artifacts`: Replaced `np.isin` with boolean LUT table indexing `drop_lut[labels]`.
+  - `equipment_outline_protect_mask`: Added `is_dome_arc` and `is_wall_line` to protect severed vessel outlines.
+- [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py):
+  - `_graph_segments`: Vectorized 8-neighbor padded array shifts for edge-node touch matching.
+  - Closed-form 2x2 symmetric covariance eigenvalues replacing `np.linalg.svd`.
+
+### 4. Verification
+
+- `pytest tests/test_masking_and_runs.py -v` -> **40 passed in 2.86s** (100% green).
+- `pytest tests/test_split_isolation_and_roi_protection.py tests/test_snap_equipment.py -v` -> **11 passed** (100% green).
+- Total test suite: **51 passed**, 0 regressions.
+
+

@@ -149,14 +149,42 @@ async def trace_region(
     pad = 20
     px1, py1 = max(0, x1 - pad), max(0, y1 - pad)
     px2, py2 = min(width, x2 + pad), min(height, y2 + pad)
-    binary_crop = full_binary[py1:py2, px1:px2]
+    binary_crop = full_binary[py1:py2, px1:px2].copy()
     bgr_crop = img[py1:py2, px1:px2]
+
+    # --- Bagian 3: Proteksi Simbol Valve & Instrumen (Anti-Nabrak) ------------------
+    # Ambil deteksi simbol eksisting pada sheet yang beririsan dengan area crop ROI.
+    # Lakukan blackout (masking hitam) pada bodi simbol valve & instrument pada binary_crop
+    # sebelum skeletisasi dijalankan agar pipa berhenti rapi di port valve, bukan menembus bodinya.
+    result = dict(sheet.result_json or {})
+    existing_symbols = result.get("symbols", [])
+    local_dets = []
+    for s in existing_symbols:
+        sx1 = float(s.get("x1", 0))
+        sy1 = float(s.get("y1", 0))
+        sx2 = float(s.get("x2", 0))
+        sy2 = float(s.get("y2", 0))
+        if sx2 > px1 and sx1 < px2 and sy2 > py1 and sy1 < py2:
+            lx1 = max(0, int(round(sx1 - px1)))
+            ly1 = max(0, int(round(sy1 - py1)))
+            lx2 = min(px2 - px1, int(round(sx2 - px1)))
+            ly2 = min(py2 - py1, int(round(sy2 - py1)))
+            coarse = s.get("coarse", "")
+            if coarse in ("valve", "instrument"):
+                if lx2 > lx1 and ly2 > ly1:
+                    binary_crop[ly1:ly2, lx1:lx2] = 0
+            loc_s = dict(s)
+            loc_s["x1"] = lx1
+            loc_s["y1"] = ly1
+            loc_s["x2"] = lx2
+            loc_s["y2"] = ly2
+            local_dets.append(loc_s)
 
     # 3. Trace on the padded crop using the pre-computed binary (roi=True adds a small
     #    MORPH_CLOSE to bridge OCR-masking holes) and adaptive min length.
     tracer = SkeletonLineTracer(min_length_px=6, suppress_floating_stubs=False)
     local_runs = tracer.trace(
-        bgr_crop, dpi=sheet.dpi or 350, detections=[], furniture=[],
+        bgr_crop, dpi=sheet.dpi or 350, detections=local_dets, furniture=[],
         binary_img=binary_crop, roi=True,
     )
 
@@ -166,6 +194,7 @@ async def trace_region(
             "points": run.points,
             "axis": run.axis,
             "underline": getattr(run, "underline", False),
+            "equipment_outline": getattr(run, "equipment_outline", False),
         }
         # Offset local (padded-crop) coordinates back to global image space.
         points = [[int(p[0]) + px1, int(p[1]) + py1] for p in record.get("points", [])]
@@ -178,9 +207,86 @@ async def trace_region(
             "x1": min(p[0] for p in points), "y1": min(p[1] for p in points),
             "x2": max(p[0] for p in points), "y2": max(p[1] for p in points),
             "color": "#2563EB", "manual": False, "source": "rescan",
+            "label": record.get("label", ""),
+            "pid": record.get("pid", ""),
         })
 
-    result = dict(sheet.result_json or {})
+    # --- Bagian 2: Localized OCR & Auto-Labeling di Box Trace ------------------------
+    import math
+    from ..services.detection_service import get_orchestrator
+    from pidcorr.implementations.regex_parser import RegexPipingIDParser
+    from pidcorr.piping_id import parse_tokens, ocr_region
+
+    ocr_tags = []
+    roi_bgr = img[y1:y2, x1:x2]
+    if roi_bgr.size > 0 and roi_bgr.shape[0] >= 10 and roi_bgr.shape[1] >= 10:
+        try:
+            orch = get_orchestrator()
+            extractor = orch.extractor
+            parser = RegexPipingIDParser()
+            pids, tokens = extractor.extract(roi_bgr)
+            for p in (pids or []):
+                tag = p.pid if hasattr(p, "pid") else p.get("pid", "")
+                if tag:
+                    tx1 = float(p.x1 if hasattr(p, "x1") else p.get("x1", 0)) + x1
+                    ty1 = float(p.y1 if hasattr(p, "y1") else p.get("y1", 0)) + y1
+                    tx2 = float(p.x2 if hasattr(p, "x2") else p.get("x2", 0)) + x1
+                    ty2 = float(p.y2 if hasattr(p, "y2") else p.get("y2", 0)) + y1
+                    parsed = parser.parse(tag) or parse_tokens(tag)
+                    ocr_tags.append({"tag": tag, "x1": tx1, "y1": ty1, "x2": tx2, "y2": ty2, "parsed": parsed})
+
+            if not ocr_tags and tokens:
+                for tok in tokens:
+                    raw_text = tok.get("text") or tok.get("t") or ""
+                    parsed = parser.parse(raw_text)
+                    if parsed and any(parsed.values()):
+                        tx1 = float(tok.get("x1", 0)) + x1
+                        ty1 = float(tok.get("y1", 0)) + y1
+                        tx2 = float(tok.get("x2", 0)) + x1
+                        ty2 = float(tok.get("y2", 0)) + y1
+                        ocr_tags.append({"tag": raw_text, "x1": tx1, "y1": ty1, "x2": tx2, "y2": ty2, "parsed": parsed})
+
+            if not ocr_tags:
+                reg_text, matched = ocr_region(img, x1, y1, x2, y2)
+                if matched and reg_text:
+                    parsed = parser.parse(reg_text) or parse_tokens(reg_text)
+                    ocr_tags.append({"tag": reg_text, "x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2), "parsed": parsed})
+        except Exception:
+            pass
+
+    # Pasangkan tag OCR ke new_runs yang lokasinya paling dekat dengan kotak teks
+    if ocr_tags and new_runs:
+        def _dist_to_run(pt, r):
+            pts = r.get("points", [])
+            if len(pts) < 2:
+                return float("inf")
+            px, py = pt
+            min_d = float("inf")
+            for i in range(len(pts) - 1):
+                x0, y0 = pts[i]
+                x1_s, y1_s = pts[i + 1]
+                dx, dy = x1_s - x0, y1_s - y0
+                l2 = dx * dx + dy * dy
+                if l2 == 0:
+                    d = math.hypot(px - x0, py - y0)
+                else:
+                    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / l2))
+                    proj_x = x0 + t * dx
+                    proj_y = y0 + t * dy
+                    d = math.hypot(px - proj_x, py - proj_y)
+                if d < min_d:
+                    min_d = d
+            return min_d
+
+        for ot in ocr_tags:
+            tcx = (ot["x1"] + ot["x2"]) / 2.0
+            tcy = (ot["y1"] + ot["y2"]) / 2.0
+            best_r = min(new_runs, key=lambda r: _dist_to_run((tcx, tcy), r))
+            best_r["label"] = ot["tag"]
+            best_r["pid"] = ot["tag"]
+            if ot["parsed"].get("fluid"):
+                best_r["fluid"] = ot["parsed"]["fluid"]
+
     current_runs = list(result.get("runs", []))
 
     if payload.replace_existing:
@@ -199,7 +305,7 @@ async def trace_region(
             retained_runs.append(r)
         current_runs = retained_runs
 
-    # --- Box Trace stitching (Bagian 3) -----------------------------------------------
+    # --- Box Trace stitching ---------------------------------------------------------
     # Try to absorb the freshly traced region path into existing runs instead of always
     # appending a duplicate: extend a touched pipe (1-to-1) or bridge two pipes (1-to-2,
     # dropping the merged target). Ambiguous branches stay independent but snap endpoints.
@@ -207,7 +313,45 @@ async def trace_region(
         new_runs, current_runs, bbox=(x1, y1, x2, y2), snap_px=18,
     )
 
-    result["runs"] = current_runs + new_runs
+    all_runs = current_runs + new_runs
+
+    # Sinkronisasi tag hasil OCR ke daftar piping_ids pada sheet agar muncul di sidebar
+    current_pids = list(result.get("piping_ids", []))
+    for ot in ocr_tags:
+        tag = ot["tag"]
+        assigned_idx = -1
+        for idx, r in enumerate(all_runs):
+            if r.get("label") == tag or r.get("pid") == tag:
+                assigned_idx = idx
+                break
+
+        existing_pid = next((p for p in current_pids if p.get("pid") == tag), None)
+        if not existing_pid:
+            new_pid = {
+                "pid": tag,
+                "x1": ot["x1"],
+                "y1": ot["y1"],
+                "x2": ot["x2"],
+                "y2": ot["y2"],
+                "conf": 1,
+                "run_idx": assigned_idx,
+                "extra_runs": [],
+                "state": "attached" if assigned_idx >= 0 else "none",
+                "manual": False,
+                "unit": ot["parsed"].get("unit", ""),
+                "size": ot["parsed"].get("size", ""),
+                "fluid": ot["parsed"].get("fluid", ""),
+                "pclass": ot["parsed"].get("pclass", ""),
+                "seq": ot["parsed"].get("seq", ""),
+            }
+            current_pids.append(new_pid)
+        else:
+            if existing_pid.get("run_idx", -1) == -1 and assigned_idx >= 0:
+                existing_pid["run_idx"] = assigned_idx
+                existing_pid["state"] = "attached"
+
+    result["runs"] = all_runs
+    result["piping_ids"] = current_pids
     sheet.result_json = result
     await db.commit()
     return {

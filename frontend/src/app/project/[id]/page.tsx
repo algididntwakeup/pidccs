@@ -331,10 +331,9 @@ export default function ProjectWorkspace() {
         const nextPids = res.result.piping_ids || result.piping_ids;
         pushHistory(`Split pipa #${runIdx}`, prevRuns, nextRuns, prevPids, nextPids);
         setResult({ ...result, runs: nextRuns, piping_ids: nextPids });
-        // Select the freshly created segment BY ID (index-based selection would break
-        // because the backend reindexed the runs array across the split).
-        const newRun = nextRuns[res.new_run_idx];
-        selectRunIds(newRun && newRun.id ? [newRun.id] : []);
+        // Automatically exit split mode and deselect cleanly so user can freely click either piece
+        setSplitMode(false);
+        selectRunIds([]);
         showToast(`Pipa #${runIdx} berhasil dipecah menjadi 2 segmen!`, 3000);
       }
     } catch (err: any) {

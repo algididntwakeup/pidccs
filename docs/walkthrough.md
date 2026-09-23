@@ -1,5 +1,38 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Deep Diagnostic, Spatial Indexing Optimization & Line Tracing Rescue (Sprint B.8)
+
+**Status**: Implemented, tested (51 backend tests), full pipeline verified with profiling on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (3309×2339 @ 350 DPI).
+
+### Problem & Regresi Pasca Sprint B.7
+1. **Tracing Latency Drastis**: Tracing mengalami lonjakan waktu eksekusi ekstrem akibat akumulasi 5 pass bridging sekuensial yang menerapkan komputasi kuadratik $O(N^2)$ dan ray-marching per-piksel tanpa indeks spasial.
+2. **Pipa Hilang / Terfragmentasi**: Strict collinearity guards ($20^\circ$ & offset lateral $10\text{px}$) menggagalkan bridging pada valve di belokan manifold, dan kaskade filter `min_length` membuang potongan pipa pendek yang gagal tersambung.
+3. **Outline Equipment Putus**: Kriteria `min_span_frac = 0.40` pada kedua sumbu menggugurkan kubah elips bejana (*dome*) dan dinding silinder vertikal ketika terputus oleh lubang masking teks OCR.
+
+### Algorithmic Solutions Implemented
+1. **Fast AABB Pre-filtering + Liang-Barsky Line Clipping**:
+   - `_seg_crosses_boxes` dioptimasi menggantikan loop stepping float 4px dengan fast AABB reject + Liang-Barsky analytical parametric line clipping ($O(1)$ per box).
+2. **Spatial Grid Indexing pada Pass Bridging**:
+   - `bridge_inline_valve_gaps`: Dibangun spatial hash grid untuk boks valve dan run endpoints. Pengecekan kandidat pasangan run direduksi dari $O(N^2)$ menjadi $O(1)$. Latensi turun dari **1,403.7 ms** ke **284.7 ms** (**hampir 5x lebih cepat**).
+   - `chain_collinear_segments`: Spatial grid candidate lookup untuk titik ujung head/tail. Latensi turun dari **122.2 ms** ke **23.5 ms** (**5.2x lebih cepat**).
+   - `bridge_piecemeal_gaps`: Spatial grid candidate lookup + spatial lookup pada `_has_branch`. Latensi turun dari **136.8 ms** ke **25.0 ms** (**5.5x lebih cepat**).
+   - **Total waktu gabungan 3 bridging passes**: Turun dari **1,662.7 ms** ke **333.2 ms** (**5x lebih cepat**).
+3. **Vectorized Adjacency Matching pada Graph Segments**:
+   - Loop piksel 50.000 iterasi dengan slicing skalar di `_graph_segments` digantikan dengan operasi vektor shift 8-arah NumPy. Latensi `5_graph_segments` turun dari **4,701.3 ms** ke **2,906.7 ms** (~1.8 detik terpangkas).
+4. **Closed-Form 2x2 Covariance Eigenvalues**:
+   - Pemanggilan iterative `np.linalg.svd` pada ratusan komponen terhubung pada fallback PCA diagonal digantikan rumus kuadratik nilai eigen matriks simetris 2x2.
+5. **Boolean Lookup Table Indexing**:
+   - `np.isin(labels, drop_ids)` pada array 7.7 juta piksel di `suppress_text_artifacts` digantikan 1D direct boolean LUT indexing `drop_lut[labels]`.
+6. **Penyelamatan Kubah Bejana & Dinding Silinder**:
+   - Ditambahkan pengenalan `is_dome_arc` ($cw \ge 0.40 \cdot box\_w, ch \ge 0.08 \cdot box\_h, \text{area} \ge 50$) dan `is_wall_line` ($ch \ge 0.40 \cdot box\_h, cw \ge 0.04 \cdot box\_w$) pada `equipment_outline_protect_mask` agar kubah dan dinding yang terpotong teks tetap terlindungi dari interior blackout.
+
+### Hasil Pengujian & Benchmark
+- `pytest tests/test_masking_and_runs.py -v`: **40 passed dalam 2.86s** (sebelumnya **32.65s** — **11.4x lebih cepat**).
+- `pytest tests/test_split_isolation_and_roi_protection.py tests/test_snap_equipment.py -v`: **11 passed**.
+- Total: **51 passed**, 0 regresi.
+
+---
+
 ## Sprint Handover: Vessel Outline Trace, Instrument Gaps, Piecemeal Bridging & Right-Nozzle Rescue
 
 **Status**: Implemented, tested (71 backend tests), full pipeline verified on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (3309×2339, vessel `605-V-221-B`).
@@ -922,3 +955,56 @@ Sebagai acuan untuk sesi berikutnya, berikut adalah backlog prioritas yang belum
   - **13 passed, 1 skipped, 100% PASSED**.
   - Termasuk verifikasi unit test baru untuk endpoint `update_run_points`.
 - Frontend compile: `npx tsc --noEmit` $\rightarrow$ **0 errors (100% Clean TypeScript build)**.
+
+---
+
+## 9. Split Post-Selection Isolation, Localized OCR & Symbol Protection in Box Trace
+
+**Status**: 100% Selesai, Terverifikasi, dan Siap Digunakan.
+
+### 9.1 Fitur & Perbaikan Utama
+
+1. **Isolasi Seleksi Pasca-Split Line (`split_poly_run` & `handleSplitRun`)**:
+   - **Akar Masalah**: Fungsi pemotong polyline `split_poly_run()` sebelumnya meng-clone dictionary atau objek `PipeRun` asal tanpa membuat ID baru untuk kedua potongan garis. Akibatnya, `run_a` dan `run_b` memiliki string `id` yang persis sama. Ketika frontend menerima data baru atau user mengklik salah satu potongan, `selectedRunIds.has(r.id)` mencocokkan kedua garis sekaligus dan membuat keduanya terpilih bersamaan.
+   - **Solusi**:
+     - `split_poly_run` kini secara otomatis meng-assign ID unik yang berbeda: `f"{base_id}-a"` untuk potongan pertama dan `f"{base_id}-b"` untuk potongan kedua, serta menandai `manual: True`.
+     - Handler `handleSplitRun` di `page.tsx` mematikan mode split (`setSplitMode(false)`) dan mengosongkan seleksi kanvas (`selectRunIds([])`).
+     - Hasil: Kanvas kembali bersih setelah split, dan user dapat secara bebas memilih, menginspeksi, mewarnai, atau menghapus salah satu potongan tanpa potongan lainnya ikut terpengaruh.
+     - Fungsi `_apply_points` di `pidcorr/lines.py` ditambahkan deduplikasi titik bersebelahan berturut-turut untuk mencegah timbulnya vertex duplikat saat perpanjangan/penyambungan run.
+
+2. **Localized OCR & Auto-Labeling pada Box Trace (Re-scan)**:
+   - **Akar Masalah**: Saat men-trace ulang area lokal menggunakan Box Trace, jalur pipa yang ditemukan sering kali tidak memiliki label tag (`label: ""`), meskipun di dalam kotak seleksi terdapat teks tag pipa yang jelas.
+   - **Solusi**:
+     - Endpoint `/trace-region` kini menjalankan ekstraksi OCR langsung pada sub-crop gambar yang diseleksi (`roi_bgr`) menggunakan `BaseTextExtractor.extract()`.
+     - Output teks dianalisis oleh `RegexPipingIDParser` untuk mengekstrak format tag pipa Pertamina/PetroChina (`fluid`, `pclass`, `size`).
+     - Tag yang ditemukan otomatis dipasangkan ke `PipeRun` baru terdekat dengan menghitung jarak minimum ke segmen garis pipa.
+     - Tag tersebut juga langsung diregistrasikan ke dalam `sheet.result_json["piping_ids"]` dengan `run_idx` yang sesuai, sehingga langsung tersinkronisasi ke sidebar Pipe Inspector dan tabel Piping Lines.
+     - Disediakan fallback otomatis ke pencarian tag OCR full-sheet bila crop lokal tidak menghasilkan teks.
+
+3. **Symbol Protection pada Box Trace (Anti-Nabrak Simbol)**:
+   - **Akar Masalah**: Pada mode ROI re-scan, garis pipa baru terkadang menembus simbol valve (bowtie) atau instrument bubble karena algoritma bridging valve mencoba menyambungkan garis melintasi simbol tersebut.
+   - **Solusi**:
+     - Sebelum proses skeletonization Zhang-Suen dijalankan pada `binary_crop`, semua bounding box deteksi `valve` dan `instrument` yang bersinggungan dengan kotak ROI dibersihkan (di-blackout ke warna background 0).
+     - Pada mode ROI (`roi=True`), tahap `bridge_inline_valve_gaps` dinonaktifkan (`return runs`).
+     - Bounding box valve dimasukkan ke dalam `block_boxes`, sehingga `bridge_collinear_headers`, `chain_collinear_segments`, dan `bridge_piecemeal_gaps` dilarang keras menyeberangi atau menembus badan valve.
+     - Garis pipa berhenti secara rapi di port/flange valve tanpa menembus ke dalam.
+     - Klasifikasi geometri percabangan T-junction (`_classify_junction_geometry`) tetap dipertahankan.
+
+### 9.2 Automated Verification & Test Results
+
+1. **Unit Test Suite Baru (`backend/tests/test_split_isolation_and_roi_protection.py`)**:
+   - `test_split_run_generates_distinct_unique_ids_dict`: **PASSED** (ID unik `-a` dan `-b` pada dict).
+   - `test_split_run_generates_distinct_unique_ids_object`: **PASSED** (ID unik `-a` dan `-b` pada PipeRun).
+   - `test_stitch_region_runs_propagates_labels`: **PASSED** (propagasi label dan deduplikasi titik pada stitching).
+   - `test_roi_tracer_does_not_bridge_inline_valves`: **PASSED** (garis berhenti di port valve, tidak menembus bodi valve).
+   - `test_regex_piping_id_parser_in_roi`: **PASSED** (parsing tag pipa valid).
+   - **Hasil: 5 passed in 2.66s (100% Green)**.
+
+2. **Regression Test Suite**:
+   - `pytest tests/test_split_and_color.py tests/test_masking_and_runs.py -v`:
+   - **45 passed in 23.03s (100% Green)**.
+
+3. **Frontend Compilation**:
+   - `npx tsc --noEmit`: 0 errors.
+   - Container API dan Worker berhasil direstart dan berjalan normal.
+

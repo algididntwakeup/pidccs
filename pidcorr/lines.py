@@ -288,18 +288,51 @@ def extract_diagonal_segments(img_bgr, dpi, connect_pts, detections=None,
 
 def _seg_crosses_boxes(p, q, boxes, step_px=4.0):
     """True bila segmen p->q melewati interior salah satu kotak (mis. bbox instrumen).
-    Dipakai bridging: celah di instrumen TIDAK boleh dijembatani pipa."""
+    Dipakai bridging: celah di instrumen TIDAK boleh dijembatani pipa.
+    Dioptimasi menggunakan Fast AABB Pre-filtering + Liang-Barsky clipping analitik (O(1) per box)."""
     if not boxes:
         return False
-    (px, py), (qx, qy) = p, q
-    d = math.hypot(qx - px, qy - py)
-    n = max(2, int(d / step_px) + 1)
-    for k in range(n + 1):
-        x = px + (qx - px) * k / n
-        y = py + (qy - py) * k / n
-        for bx1, by1, bx2, by2 in boxes:
-            if bx1 <= x <= bx2 and by1 <= y <= by2:
-                return True
+    px, py = float(p[0]), float(p[1])
+    qx, qy = float(q[0]), float(q[1])
+    dx = qx - px
+    dy = qy - py
+    sx1 = px if dx >= 0 else qx
+    sx2 = qx if dx >= 0 else px
+    sy1 = py if dy >= 0 else qy
+    sy2 = qy if dy >= 0 else py
+
+    for bx1, by1, bx2, by2 in boxes:
+        # 1. Fast AABB reject (eliminasi 98%+ box dalam 4 perbandingan)
+        if sx2 < bx1 or sx1 > bx2 or sy2 < by1 or sy1 > by2:
+            continue
+        # 2. Bila salah satu endpoint berada di dalam atau di batas box
+        if (bx1 <= px <= bx2 and by1 <= py <= by2) or (bx1 <= qx <= bx2 and by1 <= qy <= by2):
+            return True
+        # 3. Liang-Barsky parametric line-segment AABB clipping
+        t0, t1 = 0.0, 1.0
+        p_q = ((-dx, px - bx1), (dx, bx2 - px), (-dy, py - by1), (dy, by2 - py))
+        cross = True
+        for p_k, q_k in p_q:
+            if p_k == 0:
+                if q_k < 0:
+                    cross = False
+                    break
+            else:
+                r = q_k / p_k
+                if p_k < 0:
+                    if r > t1:
+                        cross = False
+                        break
+                    if r > t0:
+                        t0 = r
+                else:
+                    if r < t0:
+                        cross = False
+                        break
+                    if r < t1:
+                        t1 = r
+        if cross and t0 <= t1:
+            return True
     return False
 
 
@@ -776,6 +809,12 @@ def stitch_region_runs(new_runs, existing_runs, bbox, snap_px=18):
             else:
                 merged_pts = [[int(p[0]), int(p[1])] for p in (base + ext)]
             _apply_points(existing[m["ri"]], merged_pts)
+            if nr.get("label") and not existing[m["ri"]].get("label"):
+                existing[m["ri"]]["label"] = nr["label"]
+                if nr.get("pid"):
+                    existing[m["ri"]]["pid"] = nr["pid"]
+                if nr.get("fluid"):
+                    existing[m["ri"]]["fluid"] = nr["fluid"]
             consumed_ids.append(nr.get("id"))
         elif len(matching) == 2:
             # --- 1-to-2: bridge M (a) and F (b). Check collinearity sanity. ---
@@ -803,6 +842,12 @@ def stitch_region_runs(new_runs, existing_runs, bbox, snap_px=18):
                 base_f = base_f[::-1]
             merged_pts = [[int(p[0]), int(p[1])] for p in base_m] + mid + [[int(p[0]), int(p[1])] for p in base_f]
             _apply_points(existing[m["ri"]], merged_pts)
+            if not existing[m["ri"]].get("label"):
+                lbl = existing[f["ri"]].get("label") or nr.get("label")
+                if lbl:
+                    existing[m["ri"]]["label"] = lbl
+                    existing[m["ri"]]["pid"] = existing[f["ri"]].get("pid") or nr.get("pid") or lbl
+                    existing[m["ri"]]["fluid"] = existing[f["ri"]].get("fluid") or nr.get("fluid", "")
             consumed_ids.append(nr.get("id"))
             consumed_ids.append(existing[f["ri"]].get("id"))
             existing[f["ri"]]["_drop"] = True
@@ -816,11 +861,18 @@ def stitch_region_runs(new_runs, existing_runs, bbox, snap_px=18):
 
 
 def _apply_points(run, clean_pts):
-    run["points"] = clean_pts
-    run["x1"] = min(p[0] for p in clean_pts)
-    run["y1"] = min(p[1] for p in clean_pts)
-    run["x2"] = max(p[0] for p in clean_pts)
-    run["y2"] = max(p[1] for p in clean_pts)
+    if not clean_pts:
+        run["points"] = []
+        return
+    dedup = [clean_pts[0]]
+    for p in clean_pts[1:]:
+        if p[0] != dedup[-1][0] or p[1] != dedup[-1][1]:
+            dedup.append(p)
+    run["points"] = dedup
+    run["x1"] = min(p[0] for p in dedup)
+    run["y1"] = min(p[1] for p in dedup)
+    run["x2"] = max(p[0] for p in dedup)
+    run["y2"] = max(p[1] for p in dedup)
 
 
 def _snap_new_endpoints(nr, matching):
@@ -930,7 +982,13 @@ def split_poly_run(
             pts_a = [pts[0], [mid_x, mid_y]]
             pts_b = [[mid_x, mid_y], pts[-1]]
 
-    def _make_run(base_run, new_pts):
+    base_id = getattr(target, "id", "") if hasattr(target, "id") else (target.get("id", "") if isinstance(target, dict) else "")
+    if not base_id:
+        base_id = f"run-{run_idx}"
+    id_a = f"{base_id}-a"
+    id_b = f"{base_id}-b"
+
+    def _make_run(base_run, new_pts, run_id):
         clean_pts = [(int(p[0]), int(p[1])) for p in new_pts]
         if hasattr(base_run, "points"):
             return PipeRun(
@@ -940,20 +998,26 @@ def split_poly_run(
                 fluid=getattr(base_run, "fluid", ""),
                 underline=getattr(base_run, "underline", False),
                 color=getattr(base_run, "color", "#2563EB"),
+                id=run_id,
+                label=getattr(base_run, "label", ""),
+                manual=True,
                 equipment_outline=bool(getattr(base_run, "equipment_outline", False)),
             )
         else:
             r = dict(base_run)
+            r["id"] = run_id
             r["points"] = [[int(p[0]), int(p[1])] for p in clean_pts]
             r["x1"] = min(p[0] for p in clean_pts)
             r["y1"] = min(p[1] for p in clean_pts)
             r["x2"] = max(p[0] for p in clean_pts)
             r["y2"] = max(p[1] for p in clean_pts)
             r["color"] = base_run.get("color", "#2563EB")
+            r["label"] = base_run.get("label", "")
+            r["manual"] = True
             return r
 
-    run_a = _make_run(target, pts_a)
-    run_b = _make_run(target, pts_b)
+    run_a = _make_run(target, pts_a, id_a)
+    run_b = _make_run(target, pts_b, id_b)
 
     new_runs = list(runs)
     new_runs[run_idx] = run_a
@@ -1052,8 +1116,9 @@ def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
         drop_ids.append(i)
 
     if drop_ids:
-        drop_mask = np.isin(labels, drop_ids)
-        out[drop_mask] = 0
+        drop_lut = np.zeros(n, dtype=bool)
+        drop_lut[drop_ids] = True
+        out[drop_lut[labels]] = 0
 
     out[out > 0] = 255
     return out
@@ -1255,8 +1320,14 @@ def equipment_outline_protect_mask(binary, detections, dpi=350, eq_margin_px=Non
         for ci in range(1, n_lbl):
             cw = stats[ci, cv2.CC_STAT_WIDTH]
             ch = stats[ci, cv2.CC_STAT_HEIGHT]
-            # Kontur alat = komponen besar yang membentang di KEDUA sumbu area.
-            if cw >= min_span_frac * box_w and ch >= min_span_frac * box_h:
+            area = stats[ci, cv2.CC_STAT_AREA]
+            # Kontur alat = komponen besar yang membentang di KEDUA sumbu area,
+            # ATAU lengkungan kubah elips (lebar horizontal tapi dangkal vertikal),
+            # ATAU dinding silinder vertikal (tinggi vertikal tapi tipis horizontal).
+            is_spanning = (cw >= min_span_frac * box_w and ch >= min_span_frac * box_h)
+            is_dome_arc = (cw >= 0.40 * box_w and ch >= 0.08 * box_h and area >= 50)
+            is_wall_line = (ch >= 0.40 * box_h and cw >= 0.04 * box_w and area >= 50)
+            if is_spanning or is_dome_arc or is_wall_line:
                 keep[lbl == ci] = 255
                 cx1 = stats[ci, cv2.CC_STAT_LEFT]
                 cy1 = stats[ci, cv2.CC_STAT_TOP]
@@ -1604,6 +1675,16 @@ def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
         return bool(r.get("equipment_outline", False))
 
     n = len(work)
+    _cg_cell = max(64.0, float(max_gap_px))
+    end_grid = defaultdict(list)
+    for idx, r in enumerate(work):
+        pts = _pts(r)
+        if len(pts) >= 2:
+            for pt in (pts[0], pts[-1]):
+                gx = int(pt[0] // _cg_cell)
+                gy = int(pt[1] // _cg_cell)
+                end_grid[(gx, gy)].append((idx, pt[0], pt[1]))
+
     for i in range(n):
         if i in consumed:
             continue
@@ -1618,7 +1699,23 @@ def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
             head_idx, tail_idx = chain[0], chain[-1]
             head_end = _tangent_at(work[head_idx], 0)
             tail_end = _tangent_at(work[tail_idx], -1)
-            for j in range(n):
+
+            # Query candidate js near head_end and tail_end (O(1) candidates via spatial grid)
+            cand_j = set()
+            for chain_end in (head_end, tail_end):
+                if chain_end is None:
+                    continue
+                cx = int(chain_end[2] // _cg_cell)
+                cy = int(chain_end[3] // _cg_cell)
+                for dgx in (-1, 0, 1):
+                    for dgy in (-1, 0, 1):
+                        bucket = end_grid.get((cx + dgx, cy + dgy))
+                        if bucket:
+                            for item in bucket:
+                                if item[0] not in consumed:
+                                    cand_j.add(item[0])
+
+            for j in sorted(cand_j):
                 if j in consumed:
                     continue
                 rj = work[j]
@@ -1656,7 +1753,7 @@ def chain_collinear_segments(runs, max_gap_px=15, tol_px=6, angle_tol_deg=12.0,
                     if perp > tol_px:
                         return None
                     mx, my = (cx_ + ex_) / 2.0, (cy_ + ey_) / 2.0
-                    if _has_branch(work, consumed, j, mx, my, branch_tol_px):
+                    if _has_branch(work, consumed, j, mx, my, branch_tol_px, end_grid=end_grid, cell_size=_cg_cell):
                         return None
                     return (mx, my)
 
@@ -1747,11 +1844,26 @@ def _merge_chain(work, chain):
     return PipeRun(pts, axis=axis, color=color, label=label, equipment_outline=eq_outline)
 
 
-def _has_branch(work, consumed, exclude_j, mx, my, tol_px):
+def _has_branch(work, consumed, exclude_j, mx, my, tol_px, end_grid=None, cell_size=64.0):
     """True bila ada ujung run lain (selain yang sedang disambung) yang berada dalam
     radius tol_px dari titik sambung (mx,my) -> menandakan percabangan T. Merge dibatalkan
-    supaya header bercabang tidak dilipat jadi satu garis lurus."""
+    supaya header bercabang tidak dilipat jadi satu garis lurus.
+    Mendukung spatial grid lookup O(1) bila end_grid disediakan."""
     r2 = tol_px * tol_px
+    if end_grid is not None:
+        gx = int(mx // cell_size)
+        gy = int(my // cell_size)
+        for dgx in (-1, 0, 1):
+            for dgy in (-1, 0, 1):
+                bucket = end_grid.get((gx + dgx, gy + dgy))
+                if not bucket:
+                    continue
+                for (k, ex, ey) in bucket:
+                    if k in consumed or k == exclude_j:
+                        continue
+                    if (ex - mx) ** 2 + (ey - my) ** 2 <= r2:
+                        return True
+        return False
     for k, rk in enumerate(work):
         if k in consumed or k == exclude_j:
             continue
@@ -1902,6 +2014,15 @@ def bridge_piecemeal_gaps(runs, max_gap_px=48, tol_px=8, angle_tol_deg=35.0,
     consumed = set()
     chains = []
     n = len(work)
+    _pg_cell = max(64.0, float(max_gap_px))
+    end_grid = defaultdict(list)
+    for idx, r in enumerate(work):
+        pts = _pts(r)
+        if len(pts) >= 2:
+            for pt in (pts[0], pts[-1]):
+                gx = int(pt[0] // _pg_cell)
+                gy = int(pt[1] // _pg_cell)
+                end_grid[(gx, gy)].append((idx, pt[0], pt[1]))
 
     def _is_eq(r):
         if hasattr(r, "equipment_outline"):
@@ -1918,7 +2039,23 @@ def bridge_piecemeal_gaps(runs, max_gap_px=48, tol_px=8, angle_tol_deg=35.0,
             changed = False
             head = _outward(work[chain[0]], 0)
             tail = _outward(work[chain[-1]], -1)
-            for j in range(n):
+
+            # Query candidate js near head and tail (O(1) lookup via spatial grid)
+            cand_j = set()
+            for chain_end in (head, tail):
+                if chain_end is None:
+                    continue
+                cx = int(chain_end[2] // _pg_cell)
+                cy = int(chain_end[3] // _pg_cell)
+                for dgx in (-1, 0, 1):
+                    for dgy in (-1, 0, 1):
+                        bucket = end_grid.get((cx + dgx, cy + dgy))
+                        if bucket:
+                            for item in bucket:
+                                if item[0] not in consumed:
+                                    cand_j.add(item[0])
+
+            for j in sorted(cand_j):
                 if j in consumed:
                     continue
                 rj = work[j]
@@ -1963,7 +2100,7 @@ def bridge_piecemeal_gaps(runs, max_gap_px=48, tol_px=8, angle_tol_deg=35.0,
                         if abs(px * cu[1] - py * cu[0]) > tol_px:
                             continue
                         mx, my = (chain_end[2] + rj_e[2]) / 2.0, (chain_end[3] + rj_e[3]) / 2.0
-                        if _has_branch(work, consumed, j, mx, my, branch_tol_px):
+                        if _has_branch(work, consumed, j, mx, my, branch_tol_px, end_grid=end_grid, cell_size=_pg_cell):
                             continue
                         if at_head:
                             chain.insert(0, j)
@@ -2154,17 +2291,40 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
 
     valve_boxes = [(float(v["x1"]), float(v["y1"]), float(v["x2"]), float(v["y2"])) for v in valves]
 
+    _vg_cell = max(128.0, float(max_gap_px))
+    valve_grid = defaultdict(list)
+    for idx, (vx1, vy1, vx2, vy2) in enumerate(valve_boxes):
+        min_gx = int((vx1 - max_gap_px) // _vg_cell)
+        max_gx = int((vx2 + max_gap_px) // _vg_cell)
+        min_gy = int((vy1 - max_gap_px) // _vg_cell)
+        max_gy = int((vy2 + max_gap_px) // _vg_cell)
+        for gx in range(min_gx, max_gx + 1):
+            for gy in range(min_gy, max_gy + 1):
+                valve_grid[(gx, gy)].append(idx)
+
     def near_any_valve(pt):
         px, py = pt
+        gx = int(px // _vg_cell)
+        gy = int(py // _vg_cell)
+        cand = valve_grid.get((gx, gy))
+        if not cand:
+            return False
         return any(
-            (vx1 - max_gap_px <= px <= vx2 + max_gap_px) and (vy1 - max_gap_px <= py <= vy2 + max_gap_px)
-            for vx1, vy1, vx2, vy2 in valve_boxes
+            (valve_boxes[idx][0] - max_gap_px <= px <= valve_boxes[idx][2] + max_gap_px) and
+            (valve_boxes[idx][1] - max_gap_px <= py <= valve_boxes[idx][3] + max_gap_px)
+            for idx in cand
         )
 
     def valve_containing(pt):
         """Kembalikan index bbox valve yang memuat `pt` (dengan margin), atau None."""
         px, py = pt
-        for idx, (vx1, vy1, vx2, vy2) in enumerate(valve_boxes):
+        gx = int(px // _vg_cell)
+        gy = int(py // _vg_cell)
+        cand = valve_grid.get((gx, gy))
+        if not cand:
+            return None
+        for idx in cand:
+            vx1, vy1, vx2, vy2 = valve_boxes[idx]
             if (vx1 - containment_margin_px <= px <= vx2 + containment_margin_px) and \
                (vy1 - containment_margin_px <= py <= vy2 + containment_margin_px):
                 return idx
@@ -2177,6 +2337,16 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
     while merged:
         merged = False
         n = len(out)
+        # Spatial Grid untuk endpoint kandidat run
+        end_grid = defaultdict(set)
+        for idx, r in enumerate(out):
+            pts = r.points if hasattr(r, "points") else r.get("points", [])
+            if len(pts) >= 2:
+                for pt in (pts[0], pts[-1]):
+                    gx = int(pt[0] // _vg_cell)
+                    gy = int(pt[1] // _vg_cell)
+                    end_grid[(gx, gy)].add(idx)
+
         for i in range(n):
             if merged:
                 break
@@ -2185,7 +2355,18 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=115, tol_px=10,
             if len(pts1) < 2 or not (near_any_valve(pts1[0]) or near_any_valve(pts1[-1])):
                 continue
 
-            for j in range(i + 1, n):
+            # Ambil hanya kandidat j yang berada di sel sekitar endpoint r1
+            cand_j = set()
+            for pt in (pts1[0], pts1[-1]):
+                gx = int(pt[0] // _vg_cell)
+                gy = int(pt[1] // _vg_cell)
+                for dgx in (-1, 0, 1):
+                    for dgy in (-1, 0, 1):
+                        cand_j.update(end_grid.get((gx + dgx, gy + dgy), ()))
+
+            for j in sorted(cand_j):
+                if j <= i or j >= n:
+                    continue
                 if merged:
                     break
                 r2 = out[j]

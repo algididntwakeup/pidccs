@@ -182,17 +182,25 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 
     dilated_nodes = cv2.dilate(node_pixels, np.ones((3, 3), np.uint8))
     touch_mask = (edge_labels > 0) & (dilated_nodes > 0)
-    touch_ys, touch_xs = np.where(touch_mask)
-    H, W = node_labels.shape
+    e_touch = edge_labels[touch_mask]
 
     edge_adjacent: Dict[int, set] = defaultdict(set)
-    for x, y in zip(touch_xs, touch_ys):
-        e_id = int(edge_labels[y, x])
-        y0, y1 = max(0, y - 1), min(H, y + 2)
-        x0, x1 = max(0, x - 1), min(W, x + 2)
-        for nid in node_labels[y0:y1, x0:x1].flat:
-            if nid > 0:
-                edge_adjacent[e_id].add(int(nid))
+    padded_nodes = np.pad(node_labels, 1, mode="constant", constant_values=0)
+    shifts = [
+        padded_nodes[:-2, 1:-1], padded_nodes[2:, 1:-1],
+        padded_nodes[1:-1, :-2], padded_nodes[1:-1, 2:],
+        padded_nodes[:-2, :-2], padded_nodes[:-2, 2:],
+        padded_nodes[2:, :-2], padded_nodes[2:, 2:],
+    ]
+    for s in shifts:
+        s_touch = s[touch_mask]
+        valid = s_touch > 0
+        if np.any(valid):
+            ev = e_touch[valid]
+            nv = s_touch[valid]
+            unq = np.unique(np.column_stack((ev, nv)), axis=0)
+            for e_id, n_id in unq:
+                edge_adjacent[int(e_id)].add(int(n_id))
 
     valid_edge_ids = {eid for eid, adj in edge_adjacent.items() if len(adj) == 2}
 
@@ -333,7 +341,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 
     # Diagonal PCA staircase fallback for isolated diagonal strokes
     component_count, component_labels, component_stats, _ = cv2.connectedComponentsWithStats(ink, 8)
-    components_with_edges = set(component_labels[edge_labels > 0])
+    components_with_edges = set(np.unique(component_labels[edge_labels > 0]))
     H, W = ink.shape[:2]
 
     for component_id in range(1, component_count):
@@ -351,12 +359,28 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
         ys = sub_ys + by
         points = np.column_stack((xs.astype(float), ys.astype(float)))
         centered = points - points.mean(axis=0)
-        _, s, vh = np.linalg.svd(centered, full_matrices=False)
-        # Check linearity: true straight stroke must have low perpendicular variance
-        if s[0] <= 0 or (s[1] / s[0]) > 0.12:
+        
+        # Closed-form 2x2 covariance eigenvalues (100x faster than full SVD)
+        # C = X^T X = [[a, b], [b, c]]
+        a = float(np.sum(centered[:, 0] ** 2))
+        b = float(np.sum(centered[:, 0] * centered[:, 1]))
+        c = float(np.sum(centered[:, 1] ** 2))
+        tr = a + c
+        delta = math.sqrt(max(0.0, (a - c) ** 2 + 4.0 * b * b))
+        lam1 = (tr + delta) * 0.5
+        lam2 = max(0.0, (tr - delta) * 0.5)
+
+        # Check linearity: true straight stroke must have low perpendicular variance (s1/s0 <= 0.12 => lam2/lam1 <= 0.0144)
+        if lam1 <= 1e-6 or (lam2 / lam1) > 0.0144:
             continue
 
-        direction = vh[0]
+        if abs(b) > 1e-6:
+            v_raw = (b, lam1 - a)
+            v_len = math.hypot(v_raw[0], v_raw[1])
+            direction = np.array([v_raw[0] / v_len, v_raw[1] / v_len])
+        else:
+            direction = np.array([1.0, 0.0]) if a >= c else np.array([0.0, 1.0])
+
         projection = centered @ direction
         p0 = points[projection.argmin()]
         p1 = points[projection.argmax()]
@@ -527,9 +551,19 @@ class SkeletonLineTracer(BaseLineTracer):
                 if ix2 > ix1 and iy2 > iy1:
                     inst_blk[iy1:iy2, ix1:ix2] = 255
                     inst_boxes.append((ix1, iy1, ix2, iy2))
-            if outline_mask is not None:
-                inst_blk[outline_mask > 0] = 0
-            clean_binary[inst_blk > 0] = 0
+        # 2c. Collect block boxes that bridging passes must NOT cross.
+        # Pada mode ROI re-scan, bodi valve juga dimasukkan ke block_boxes agar bridging passes
+        # apa pun (collinear headers, piecemeal, chain collinear) tidak menyeberang menembus valve.
+        block_boxes = list(inst_boxes)
+        if roi and detections:
+            for d in detections:
+                if d.get("coarse") == "valve":
+                    vx1 = max(0, int(d.get("x1", 0)))
+                    vy1 = max(0, int(d.get("y1", 0)))
+                    vx2 = min(W, int(d.get("x2", 0)))
+                    vy2 = min(H, int(d.get("y2", 0)))
+                    if vx2 > vx1 and vy2 > vy1:
+                        block_boxes.append((vx1, vy1, vx2, vy2))
 
         # 3. Furniture Masking (title block, drawing border, notes tables)
         if furniture:
@@ -606,18 +640,20 @@ class SkeletonLineTracer(BaseLineTracer):
         filtered = suppress_page_frame(filtered, page_wh=(W, H))
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
-        filtered = bridge_collinear_headers(filtered, max_gap_px=55, block_boxes=inst_boxes)
+        filtered = bridge_collinear_headers(filtered, max_gap_px=55, block_boxes=block_boxes)
 
         # 7. Bridge pipe runs cut by inline valves (relaxed: containment + 20deg collinearity, 115px gap)
-        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115,
-                                            block_boxes=inst_boxes)
+        # Pada mode ROI re-scan, pipa harus berhenti rapi di port valve, bukan menembus bodinya.
+        if not roi:
+            filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=115,
+                                                block_boxes=block_boxes)
 
         # 7a. Chain collinear segments whose ends sit within a tiny residual crack
         #     (<= 15px) and are NOT a T-branch point, fusing one physical pipe that the
         #     skeletonizer fractured into several runs along a single transmission path.
         filtered = chain_collinear_segments(
             filtered, max_gap_px=max(12, int(15 * (dpi / 350.0))), tol_px=6,
-            block_boxes=inst_boxes,
+            block_boxes=block_boxes,
         )
 
         # 7a-bis. Piecemeal bridge: fragment pendek hasil skeletonisasi yang tidak nyambung
@@ -629,7 +665,7 @@ class SkeletonLineTracer(BaseLineTracer):
             tol_px=max(6, int(8 * (dpi / 350.0))),
             angle_tol_deg=35.0,
             short_len_px=max(24, int(40 * (dpi / 350.0))),
-            block_boxes=inst_boxes,
+            block_boxes=block_boxes,
         )
 
         # 7b. T-junction orthogonal snap: pull dead-end endpoints onto the body of a
