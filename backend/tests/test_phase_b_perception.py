@@ -1,3 +1,33 @@
+from pidcorr.detect import predict_tiled
+
+
+class _FakeBoxes:
+    def __iter__(self):
+        return iter(())
+
+
+class _FakeResult:
+    boxes = _FakeBoxes()
+
+
+class _FakeModel:
+    names = {0: "valve"}
+
+    def predict(self, *args, **kwargs):
+        return [_FakeResult()]
+
+
+def test_predict_tiled_reports_each_tile():
+    progress = []
+    detections, tiles = predict_tiled(
+        _FakeModel(), np.zeros((700, 700, 3), dtype=np.uint8),
+        tile=640, overlap=0.2, progress=progress.append,
+    )
+    assert detections == []
+    assert tiles == 4
+    assert progress == ["YOLO tile 1/4", "YOLO tile 2/4", "YOLO tile 3/4", "YOLO tile 4/4"]
+
+
 import os
 import sys
 import pytest

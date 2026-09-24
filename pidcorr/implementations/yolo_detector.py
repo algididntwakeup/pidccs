@@ -37,11 +37,9 @@ class YOLOTiledDetector(BaseSymbolDetector):
         conf: float = 0.3,
         progress: Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
-        """Detect equipment, valves, and instruments using tiled inference."""
+        """Detect symbols using tiled YOLO plus large-equipment fallback."""
         if progress:
-            progress("YOLO tiled detection on P&ID drawing...")
-
-        # 1. Tiled inference (640px tiles with NMS)
+            progress("YOLO tiled detection: mulai")
         model = self._get_model()
         if model is not None:
             try:
@@ -50,49 +48,36 @@ class YOLOTiledDetector(BaseSymbolDetector):
             except Exception:
                 dev = "cpu"
             dets, _ = predict_tiled(
-                model=model,
-                img_bgr=img_bgr,
-                tile=640,
-                overlap=0.20,
-                conf=conf,
-                device=dev,
+                model=model, img_bgr=img_bgr, tile=640, overlap=0.20,
+                conf=conf, device=dev, progress=progress,
             )
         else:
             dets = []
-
-        # 2. Contour-based box detection for equipment & details
+        if progress:
+            progress("YOLO tiled detection: selesai")
+        # Contour-based box detection for equipment/detail outlines.
         boxes = detect_boxes(img_bgr)
         eq_boxes, _ = classify_boxes(img_bgr, boxes)
         for b, name in eq_boxes:
             dets.append(Det(b[0], b[1], b[2], b[3], 0.95,
                             name or "box_contour", "equipment"))
-
-        # 3. Full-page detection for large equipment (vessels, towers)
+        if progress:
+            progress("Deteksi kontur equipment selesai")
         if os.path.exists(self.equip_big_weights):
+            if progress:
+                progress("Deteksi equipment besar (full-page)")
             eq_big = detect_fullpage(
-                img_bgr,
-                weights=self.equip_big_weights,
-                imgsz=1024,
-                conf=0.25,
-                with_conf=True,
+                img_bgr, weights=self.equip_big_weights,
+                imgsz=1024, conf=0.25, with_conf=True,
             )
             for b in eq_big:
                 dets.append(Det(b[0], b[1], b[2], b[3], b[4], "equip_big", "equipment"))
-
-        # Format to list of dictionaries
         raw_syms = [
-            {
-                "coarse": d.coarse,
-                "cls": d.cls,
-                "conf": round(float(d.conf), 3),
-                "x1": float(d.x1),
-                "y1": float(d.y1),
-                "x2": float(d.x2),
-                "y2": float(d.y2),
-            }
+            {"coarse": d.coarse, "cls": d.cls, "conf": round(float(d.conf), 3),
+             "x1": float(d.x1), "y1": float(d.y1), "x2": float(d.x2), "y2": float(d.y2)}
             for d in dets
         ]
-
-        # Merge overlapping equipment
         final_syms = merge_equipment(raw_syms, overlap=0.25)
+        if progress:
+            progress(f"Deteksi simbol selesai ({len(final_syms)} objek)")
         return final_syms

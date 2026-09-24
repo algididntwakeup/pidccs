@@ -1,3 +1,80 @@
+## Sprint Handover: Phase 2 — Hybrid Line Tracer (Vector-First CAD Extraction)
+
+**Status**: Implemented, tested, verified on `Contoh P&ID/BCD3-605-42-PID-1-014-01 Rev.6-CCD2.pdf`
+(1191×842 pt, `rotation: 270`) — **74 runs in 0.52 s**, garis 100% lurus, border/title-block/tabel
+TAG/NOTES bersih. Fallback raster (PNG) terverifikasi.
+
+### Problem
+Sebagian besar P&ID modern adalah PDF VEKTOR keluaran AutoCAD/SmartPlant. Selama ini semuanya
+diraster lalu di-binarisasi + skeletonisasi: mahal di CPU dan menghasilkan garis bergerigi (tangga
+piksel) yang tidak pernah 100% lurus. Padahal koordinat garis pipa sudah tersimpan eksak di PDF.
+
+### Implementation
+- **`pidcorr/implementations/vector_tracer.py`** (baru) — `VectorLineTracer(BaseLineTracer)`:
+  `tier_of` / `tier_of_pdf` (A1 vektor-dominan-garis, A2 vektor-banyak-kurva, raster),
+  `extract_vector_runs(pdf_path, dpi, rot)` -> `list[PipeRun]` dengan skema identik skeleton tracer
+  (`points: [(int,int), ...]`, `axis ∈ {h,v,d,poly}`, `color="#2563EB"`, `manual=False`).
+- **Interval bucket merge** segmen H/V: `AXIS_TOL_PT=1.2`, `MERGE_GAP_PT=42.0`, `MIN_RUN_PT=10.0`,
+  lalu konversi ke piksel `scale = dpi / 72.0`.
+- **Filter Fase 1 dipakai ulang**: `is_furniture_geometry` per run + `suppress_furniture_geometry`
+  (band 15.1% simetris) di ruang titik PDF — rasio, jadi sah tanpa konversi lebih dulu.
+- **Hybrid dispatch di `pidcorr/orchestrator.py`**: input `.pdf` -> cek tier; A1/A2 -> ekstraksi
+  vektor dan tahap binarisasi/skeletonisasi **di-bypass**; raster atau non-PDF (PNG/JPG) -> otomatis
+  `SkeletonLineTracer`. Hasil kosong dari jalur vektor juga jatuh ke raster. Provenance dicatat di
+  `result["tracer"] = "vector:A1" | "raster"`.
+- `pidcorr/factory.py` menerima `TRACER_IMPL=hybrid|vector|auto`; `skeleton`/`morphology` tetap
+  memaksa jalur raster (dipakai benchmark A/B).
+- `pdfplumber>=0.11.0` ditambahkan ke `backend/requirements.txt` dan dipasang di `api` + `worker`.
+
+### Temuan teknis penting
+1. **Engine**: spesifikasi menyebut `pdfplumber`, dan paketnya tetap dipasang — tetapi akses
+   `page.lines`/`page.curves` memakan **6.4–11.0 s** pada lembar referensi, sehingga target <1 s
+   mustahil. Ekstraksi memakai PyMuPDF `get_cdrawings()` (**0.26 s**, dokumen & geometri sama).
+   Kesetaraan diverifikasi: `Point * page.rotation_matrix` mereproduksi koordinat display-space
+   pdfplumber persis (`(791.04, 381.60) → (381.60, 50.96)`).
+2. **Ruang koordinat**: `get_cdrawings()` mengembalikan koordinat **un-rotated**, sedangkan pipeline
+   merender dengan `/Rotate` diterapkan. Tanpa `rotation_matrix`, seluruh hasil vektor meleset/tertukar
+   sumbu (lembar referensi `rotation: 270`). Setelah itu rotasi manual `rot` diterapkan dengan konvensi
+   CW yang sama seperti `pipeline.rotate_bgr`.
+3. **Closed path**: bubble instrumen, outline valve, kotak equipment, dan glyph huruf adalah path
+   tertutup — dikecualikan (`_is_closed_path`), sesuai `not _closed(cv)` pada instruksi. Ini sendiri
+   membuang ~62 run palsu.
+4. **Teks-outline**: PDF referensi punya `chars: 0` — semua label digambar sebagai outline glyph,
+   sehingga ekstraksi naif menghasilkan 753–906 run. Dua saringan geometris mengatasinya tanpa
+   menyentuh pipa: pra-filter segmen (`GLYPH_MAX_SEG_PT=14`) dan `_drop_glyph_noise` (stub pendek tetap
+   hidup bila menyambung ke run lain — stub valve selamat, goresan glyph terpisah tidak).
+5. **Deteksi tabel dari struktur**: `_table_regions` mengenali title block / TAG list / NOTES / blok
+   revisi sebagai cluster >=3 baris sejajar yang rentangnya saling menumpuk. Dua detail menentukan:
+   uji overlap harus berlaku terhadap **baris dan cluster** (kalau tidak, garis border selebar lembar
+   menyerap semua baris tabel menjadi satu cluster raksasa dan filter gagal total), dan tabel
+   berdampingan pada ketinggian sama tidak boleh tergabung (lembar referensi punya DUA tabel TAG).
+   Jalur vektor jadi tidak butuh masking furniture raster sama sekali.
+
+### Verification
+- Lembar referensi: **74 runs dalam 0.52 s** (target <1 s); semua run H/V eksak lurus
+  (`y0 == y1`, `x0 == x1`); border kertas, title block, kedua tabel TAG, dan NOTES bersih dari garis
+  (overlay visual per-run).
+- Input PNG raster: `tier_of_pdf` -> `raster`, orchestrator memakai skeleton tracer tanpa error.
+- `pytest backend/tests/test_vector_tracer.py` — unit + integrasi (skema PipeRun, <1 s, kelurusan,
+  closed-path, dispatch hybrid).
+
+## Audit Performa PyTorch/YOLO dan Progres Deteksi — 2026-09-24
+
+Alur production sudah konsisten: RapidOCR menemukan piping ID, YOLO mendeteksi simbol,
+furniture detector menandai area non-gambar, lalu `SkeletonLineTracer` melakukan masking,
+skeletonization 8-connected, ekstraksi graph, dan asosiasi piping ID. YOLO bukan pengganti
+skeleton tracer; hasil YOLO menjadi konteks masking/snap.
+
+Kelambatan di 65% berasal dari dua hal: 35 tile YOLO (7×5 untuk gambar 3300×2340) diproses
+satu per satu di CPU, dan progress sebelumnya memakai angka 65% tetap tanpa callback per tile.
+Sekarang UI menerima `YOLO tile i/35`, disusul tahap furniture, subtype, tracing, dan spec-break.
+Model classifier valve juga tidak dimuat ulang untuk setiap simbol.
+
+PyTorch di container memiliki build CUDA tetapi `cuda_available=False`, `device_count=0`,
+dan host tidak memiliki `nvidia-smi`; GPU Docker tidak dapat diaktifkan pada mesin ini.
+Benchmark detector tetap menunjukkan masalah kualitas model yang terpisah dari masalah latency:
+YOLOTiled mAP@0.5 3.94%, recall equipment 45.45%, instrument/valve 0%.
+
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
 ## Sprint Handover: Phase 1 — 5 Aturan Saklek Filter Geometri (Anti-Table & Frame Leak)

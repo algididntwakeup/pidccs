@@ -72,13 +72,17 @@ class PipelineOrchestrator:
             progress("Mendeteksi simbol equipment, valve, dan instrument...")
         syms = self.detector.detect(img_bgr=img_bgr, conf=0.30, progress=progress)
 
-        # Stage 3: Furniture Detection (Title blocks, notes, drawing borders)
+        # Furniture dan subtype tetap eksplisit di progres; tahap ini sebelumnya
+        # terlihat macet di 65% walaupun YOLO tiled sudah selesai.
+        if progress:
+            progress("Mendeteksi furniture (title block/tabel)...")
         try:
             furniture = detect_furniture(img_bgr, self.layout_weights)
         except Exception:
             furniture = []
 
-        # Subtype classification for valves & instruments
+        if progress:
+            progress("Mengklasifikasikan subtype simbol...")
         for s in syms:
             if s.get("coarse") == "valve" and not s.get("subtype"):
                 try:
@@ -94,24 +98,61 @@ class PipelineOrchestrator:
                         s["isa_loop"] = loop
                 except Exception:
                     pass
+        if progress:
+            progress(f"Subtype selesai ({len(syms)} simbol)")
 
-        # Stage 4: Pipe Line Tracing
+        # Stage 4: Pipe Line Tracing — HYBRID (vector-first, raster fallback).
+        #
+        # PDF vektor (AutoCAD/SmartPlant) menyimpan koordinat garis pipa secara
+        # eksak. Mengekstraknya langsung dari geometri PDF jauh lebih cepat dan
+        # menghasilkan garis 100% lurus, dibanding binarisasi + skeletonisasi
+        # yang memakan waktu CPU dan menghasilkan garis bergerigi. Halaman scan
+        # (raster) tidak punya geometri vektor, jadi otomatis memakai tracer
+        # raster yang sudah ada (`SkeletonLineTracer` di production).
         if progress:
             progress("Tracing jalur pipa...")
-        trace_kwargs = {
-            "img_bgr": img_bgr,
-            "dpi": dpi,
-            "detections": syms,
-            "furniture": furniture,
-            "progress": progress,
-        }
-        import inspect
-        sig = inspect.signature(self.tracer.trace)
-        if "tokens" in sig.parameters:
-            trace_kwargs["tokens"] = tokens
-        if "pids" in sig.parameters:
-            trace_kwargs["pids"] = pids
-        runs = self.tracer.trace(**trace_kwargs)
+        runs = None
+        tracer_used = "raster"
+        if str(image_path).lower().endswith(".pdf"):
+            try:
+                from .implementations.vector_tracer import (
+                    tier_of_pdf, extract_vector_runs,
+                )
+                tier = tier_of_pdf(image_path)
+                if tier in ("A1", "A2"):
+                    if progress:
+                        progress(f"PDF vektor (tier {tier}) — ekstraksi geometri vektor...")
+                    vector_runs = extract_vector_runs(
+                        image_path, dpi=dpi, rot=rot, progress=progress,
+                    )
+                    if vector_runs:
+                        runs = vector_runs
+                        tracer_used = f"vector:{tier}"
+                        if progress:
+                            progress(f"Tracing vektor selesai ({len(runs)} run)")
+                    elif progress:
+                        progress("Vektor tidak menghasilkan run — fallback ke raster...")
+                elif progress:
+                    progress(f"PDF raster (tier {tier}) — memakai skeleton tracer...")
+            except Exception as e:
+                if progress:
+                    progress(f"Ekstraksi vektor dilewati ({e}) — fallback ke raster...")
+
+        if runs is None:
+            trace_kwargs = {
+                "img_bgr": img_bgr,
+                "dpi": dpi,
+                "detections": syms,
+                "furniture": furniture,
+                "progress": progress,
+            }
+            import inspect
+            sig = inspect.signature(self.tracer.trace)
+            if "tokens" in sig.parameters:
+                trace_kwargs["tokens"] = tokens
+            if "pids" in sig.parameters:
+                trace_kwargs["pids"] = pids
+            runs = self.tracer.trace(**trace_kwargs)
 
         # Association: link piping IDs to pipe runs
         if progress:
@@ -202,6 +243,7 @@ class PipelineOrchestrator:
             "runs": run_recs,
             "conn_points": conn_pts,
             "piping_ids": pid_recs,
+            "tracer": tracer_used,
         }
 
         # Split pipe runs at spec breaks

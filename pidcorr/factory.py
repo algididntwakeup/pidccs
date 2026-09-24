@@ -6,6 +6,7 @@ from .implementations.rapidocr_extractor import RapidOCRExtractor
 from .implementations.paddleocr_extractor import PaddleOCRExtractor
 from .implementations.morphology_tracer import MorphologyLineTracer
 from .implementations.skeleton_tracer import SkeletonLineTracer
+from .implementations.vector_tracer import VectorLineTracer
 from .implementations.yolo_classifier import YOLOValveClassifier
 
 
@@ -28,7 +29,13 @@ def get_configured_orchestrator() -> PipelineOrchestrator:
         extractor = RapidOCRExtractor()
 
     # 3. Line Tracer selection
-    if tracer_type == "skeleton":
+    #    `hybrid` (default produksi): vector-first untuk PDF vektor, otomatis
+    #    jatuh ke skeleton untuk scan raster. Orchestrator yang memilih jalurnya.
+    #    `skeleton`/`morphology` memaksa tracer raster (dipakai untuk benchmark
+    #    dan perbandingan A/B).
+    if tracer_type in ("hybrid", "vector", "auto"):
+        tracer = SkeletonLineTracer()
+    elif tracer_type == "skeleton":
         tracer = SkeletonLineTracer()
     else:
         tracer = MorphologyLineTracer()

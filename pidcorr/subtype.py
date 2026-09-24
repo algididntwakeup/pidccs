@@ -25,6 +25,9 @@ import re
 import numpy as np
 import cv2
 
+_VALVE_MODELS = {}
+
+
 # ------------------------------------------------------------------ ISA-5.1 -------
 # Deskripsi kode instrumen umum (subset ISA-5.1 yang lazim di P&ID kilang).
 ISA_DESC = {
@@ -181,16 +184,17 @@ _VALVE_PAD = 0.30      # padding crop — HARUS sama dgn saat membangun dataset 
 
 
 def classify_valve_crops(img_bgr, symbols, weights, conf_thr=0.6, progress=None):
-    """Isi symbol['subtype'] utk valve via classifier bentuk in-domain (valve_cls).
-    Prediksi conf < conf_thr atau kelas 'notvalve' -> subtype '' (jujur soal
-    ketidakpastian, tampil sbg 'Valve lainnya'). Kalau weights tak ada -> no-op."""
+    """Isi subtype valve; model YOLO classifier di-cache per path proses."""
     import os
     if not weights or not os.path.exists(weights):
         return 0
     try:
         import torch
         from ultralytics import YOLO
-        model = YOLO(weights)
+        model = _VALVE_MODELS.get(weights)
+        if model is None:
+            model = YOLO(weights)
+            _VALVE_MODELS[weights] = model
         dev = 0 if torch.cuda.is_available() else "cpu"
     except Exception:
         return 0

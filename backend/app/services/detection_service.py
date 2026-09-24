@@ -54,33 +54,43 @@ def execute_sheet_detection(
             return
         if len(args) == 2 and isinstance(args[0], (int, float)) and isinstance(args[1], (int, float)):
             current, total = int(args[0]), int(args[1])
-            step = "ocr_tiled"
-            msg = f"OCR tile {current}/{total}"
-            progress_callback(step, current, total, msg)
+            progress_callback("ocr_tiled", current, total, f"OCR tile {current}/{total}")
             return
 
         msg = str(args[0]) if args else ""
-        step = "processing"
-        current, total = 0, 100
-        if "OCR tile" in msg:
-            step = "ocr_tiled"
-            try:
-                parts = msg.split(" ")[2].split("/")
-                current, total = int(parts[0]), int(parts[1])
-            except Exception:
-                pass
-        elif "equipment" in msg or "YOLO" in msg:
+        step, current, total = "processing", 0, 100
+        if msg.startswith("YOLO tile "):
             step = "symbol_detection"
-            current, total = 65, 100
+            try:
+                done, count = msg.rsplit(" ", 1)[-1].split("/")
+                current = 65 + round(10 * int(done) / max(1, int(count)))
+                total = 100
+            except (ValueError, IndexError):
+                current = 65
+        elif "YOLO tiled detection: mulai" in msg:
+            step, current = "symbol_detection", 65
+        elif "Mendeteksi furniture" in msg:
+            step, current = "symbol_detection", 78
+        elif "Mengklasifikasikan subtype" in msg:
+            step, current = "symbol_detection", 79
+        elif "Subtype selesai" in msg:
+            step, current = "symbol_detection", 79
+        elif "YOLO tiled detection: selesai" in msg:
+            step, current = "symbol_detection", 75
+        elif "equipment besar" in msg:
+            step, current = "symbol_detection", 77
+        elif "kontur equipment" in msg:
+            step, current = "symbol_detection", 76
+        elif "Deteksi simbol selesai" in msg:
+            step, current = "symbol_detection", 79
+        elif "equipment" in msg or "YOLO" in msg:
+            step, current = "symbol_detection", 65
         elif "tracing" in msg or "line" in msg:
-            step = "line_tracing"
-            current, total = 80, 100
+            step, current = "line_tracing", 80
         elif "connection point" in msg:
-            step = "spec_break"
-            current, total = 90, 100
+            step, current = "spec_break", 90
         elif "selesai" in msg:
-            step = "completed"
-            current, total = 100, 100
+            step, current = "completed", 100
         progress_callback(step, current, total, msg)
 
     _say("Memuat citra P&ID...")

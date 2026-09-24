@@ -1,3 +1,67 @@
+## Sprint Handover: Phase 2 — Hybrid Line Tracer (Vector-First CAD Extraction)
+
+**Status**: Implemented and locally verified on 2026-09-24.
+
+- New `pidcorr/implementations/vector_tracer.py::VectorLineTracer(BaseLineTracer)` — extracts pipe
+  geometry straight from vector PDFs (AutoCAD/SmartPlant) instead of binarizing a raster.
+- `tier_of(page)` classifies a page as `A1` (vector, line-dominated), `A2` (vector, curve-heavy) or
+  `raster` (scan/image) using the ≥50 path threshold from the Phase 2 spec. `tier_of_pdf(path)` is the
+  file-level helper used by the orchestrator.
+- `extract_vector_runs(pdf_path, dpi, rot)` returns `PipeRun`s with a schema identical to the skeleton
+  tracer (`points: list[tuple[int,int]]`, `axis ∈ {h,v,d,poly}`, `color="#2563EB"`, `manual=False`).
+- **Engine note**: the spec named `pdfplumber`, and it is now a declared dependency — but its
+  `page.lines`/`page.curves` access costs **6.4–11.0 s** on the reference sheet (path parsing), which
+  makes the <1 s target unreachable. Extraction therefore uses PyMuPDF `page.get_cdrawings()`
+  (**0.26 s**, same document, same geometry). Verified equivalent: `Point * page.rotation_matrix`
+  reproduces pdfplumber's display-space coordinates exactly (`(791.04, 381.60) → (381.60, 50.96)`).
+- **Coordinate space**: `get_cdrawings()` returns **un-rotated** coordinates, while the pipeline renders
+  with `/Rotate` applied. `page.rotation_matrix` is applied to every point, then manual `rot` is applied
+  with the same CW convention as `pipeline.rotate_bgr`. The reference sheet is `rotation: 270`, so this
+  correction is what keeps vector runs aligned with the raster canvas and the OCR boxes.
+- **Closed-path exclusion**: bubbles, valve outlines, equipment boxes and text glyphs are closed paths
+  and are skipped (`_is_closed_path`), matching the spec's `not _closed(cv)` requirement. This alone
+  removed ~62 spurious runs.
+- **Text-outline handling**: the reference PDF has `chars: 0` — every label is an outline glyph, so the
+  naive extraction produced 753–906 runs. Two geometric passes fix this without touching real pipes:
+  a pre-merge segment filter (`GLYPH_MAX_SEG_PT=14`) plus `_drop_glyph_noise`, which keeps short strokes
+  only when they connect to another run (valve stubs survive, isolated glyph strokes do not).
+- **Table-region filter**: `_table_regions` detects drafting tables (title block, TAG list, NOTES,
+  revision block) from structure alone — clusters of ≥3 parallel rows whose spans mutually overlap.
+  Two details mattered: the overlap test must hold against **both** the row and the cluster (otherwise a
+  full-width border absorbs every table row into one giant cluster), and side-by-side tables must not
+  merge (the reference sheet has two TAG tables at the same height). No YOLO or raster masking needed.
+- **Hybrid dispatch in `orchestrator.py`**: `.pdf` input → `tier_of_pdf`; tier `A1`/`A2` → vector
+  extraction and the binarization/skeletonization stage is bypassed entirely; `raster` tier or any
+  non-PDF input (PNG/JPG) → existing `SkeletonLineTracer`. Empty vector results also fall back. The
+  result dict now records `"tracer": "vector:A1" | "raster"` for provenance.
+- `factory.py` accepts `TRACER_IMPL=hybrid|vector|auto` (defaults to the skeleton tracer instance; the
+  orchestrator decides the per-file path); `skeleton`/`morphology` still force the raster path.
+- **Verification**: reference sheet `BCD3-605-42-PID-1-014-01 Rev.6-CCD2.pdf` → **74 runs in 0.52 s**
+  (target <1 s), all H/V runs exactly straight (`y0 == y1`, `x0 == x1`), paper border / title block /
+  both TAG tables / NOTES free of traced lines (per-run visual overlay). Raster PNG input verified to
+  fall back to the skeleton tracer.
+- `pdfplumber>=0.11.0` added to `backend/requirements.txt` and installed in both `api` and `worker`.
+
+## Audit Performa PyTorch/YOLO → Skeleton Tracing (2026-09-24)
+
+**Temuan:** pipeline production Docker memakai `YOLOTiledDetector` + `SkeletonLineTracer`;
+YOLO menyediakan bbox simbol/equipment untuk masking dan snap, sedangkan skeletonization
+mengekstrak garis pipa dari citra. Keduanya terhubung benar, tetapi detector tetap CPU-only
+karena container melihat `torch.cuda.is_available() == False` dan host tidak menyediakan
+`nvidia-smi`.
+
+- Gambar 3300×2340 dengan tile 640 dan overlap 20% menghasilkan 35 inferensi serial
+  (7×5). Sebelumnya UI menampilkan 65% hardcoded sepanjang seluruh proses itu.
+- `predict_tiled()` sekarang mengirim progres `YOLO tile i/n`; backend memetakan tile ke
+  rentang 65–75%, lalu memisahkan furniture, subtype, tracing, dan tahap berikutnya.
+- Model classifier valve sekarang di-cache per path weights dalam satu proses. Model utama
+  detector/OCR juga tetap memakai singleton orchestrator worker.
+- Benchmark detector yang ada tetap berlaku: YOLOTiled mAP@0.5 3.94%, recall equipment
+  45.45%, instrument/valve 0%; optimasi progres tidak mengubah kualitas prediksi.
+
+**Batasan:** GPU acceleration memerlukan host NVIDIA + NVIDIA Container Toolkit; jangan
+menambahkan `gpus:` ke Compose pada mesin ini karena GPU tidak tersedia.
+
 # P&ID Studio → Web Platform: Implementation Plan
 
 ## Sprint Handover: Phase 1 — 5 Aturan Saklek Filter Geometri (Anti-Table & Frame Leak)

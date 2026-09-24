@@ -76,8 +76,9 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
 
 
 def predict_tiled(model, img_bgr: np.ndarray, tile: int = 640, overlap: float = 0.2,
-                  conf: float = 0.25, iou_merge: float = 0.5, device="cpu") -> tuple[list[Det], int]:
-    """Inferensi YOLO ber-tile pada gambar penuh. return (deteksi, jumlah tile)."""
+                  conf: float = 0.25, iou_merge: float = 0.5, device="cpu",
+                  progress=None) -> tuple[list[Det], int]:
+    """Inferensi YOLO per tile; callback menerima ``YOLO tile i/n``."""
     try:
         import torch as _torch
         use_half = bool(_torch.cuda.is_available())
@@ -86,6 +87,8 @@ def predict_tiled(model, img_bgr: np.ndarray, tile: int = 640, overlap: float = 
     H, W = img_bgr.shape[:2]
     xs, ys = tile_offsets(W, tile, overlap), tile_offsets(H, tile, overlap)
     boxes, scores, names = [], [], []
+    n_tiles = len(xs) * len(ys)
+    done = 0
     for oy in ys:
         for ox in xs:
             crop = img_bgr[oy:oy + tile, ox:ox + tile]
@@ -95,7 +98,9 @@ def predict_tiled(model, img_bgr: np.ndarray, tile: int = 640, overlap: float = 
                 boxes.append([x1 + ox, y1 + oy, x2 + ox, y2 + oy])
                 scores.append(float(b.conf[0]))
                 names.append(model.names[int(b.cls[0])])
-    n_tiles = len(xs) * len(ys)
+            done += 1
+            if progress:
+                progress(f"YOLO tile {done}/{n_tiles}")
     if not boxes:
         return [], n_tiles
     keep = _nms(np.array(boxes, dtype=float), np.array(scores, dtype=float), iou_merge)
