@@ -1,3 +1,16 @@
+## Bridge bottleneck opgelost — verificatie (2026-09-24)
+
+De fixture-test die eerder **2076s** duurde is geprofileerd. De oorzaak was
+`bridge_polyline_elbows`: `while merged` plus alle `i/j`-paren gaf effectief O(N³)
+bij 1.611 runs. De fix gebruikt een endpoint spatial grid + worklist.
+
+- `test_snap_on_fixture_pdf`: **2076s → 85.63s**, passed.
+- Full `pytest tests/ -q`: **72 passed**, **410.28s (6m50s)**.
+- Referentie-trace bleef 38 runs; de 6 elbow-permutaties blijven correct.
+- Punt 3 (valse verbinding bij 605-V-205) blijft bewust uitgesteld totdat de user
+  een nieuwe markering/afbeelding aanlevert.
+
+## Zhang-Suen Skeleton + Nozzle Recovery (2026-09-24)
 ## Zhang-Suen Skeleton + Nozzle Recovery (2026-09-24)
 
 **Status**: Implemented + verified. Ink coverage 6 area revisi user: **23.8% → 39.6%**

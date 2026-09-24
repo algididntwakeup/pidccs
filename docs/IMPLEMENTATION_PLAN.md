@@ -7,13 +7,19 @@ lalu `bridge_polyline_elbows` menjadi bottleneck karena struktur `while merged` 
 loop pasangan `i/j` yang secara efektif O(N³) pada ~1.611 runs.
 
 **Perbaikan yang sekarang diterapkan**: `bridge_polyline_elbows` memakai spatial grid
-pada endpoint, sehingga hanya pasangan dalam `max_gap_px` yang diuji; grid direbuild
-setelah merge. Permutasi keenam input elbow tetap menghasilkan satu polyline 4 titik,
-dan trace referensi tetap menghasilkan **38 runs** dalam ~9s. Full test suite belum
-dijalankan ulang setelah patch ini; jangan mengulang suite penuh sebelum ada waktu.
+pada endpoint + worklist, sehingga hanya pasangan dalam `max_gap_px` yang diuji dan
+rantai hasil merge diproses ulang tanpa mengulang seluruh daftar. Permutasi keenam
+input elbow tetap menghasilkan satu polyline 4 titik, dan trace referensi tetap
+menghasilkan **38 runs** dalam ~9s.
 
-Sisa: ukur test tunggal `test_snap_on_fixture_pdf` dengan timeout pendek, lalu
-jalankan suite penuh hanya jika bottleneck sudah terbukti turun.
+**Verifikasi performa**:
+- `test_snap_on_fixture_pdf`: **2076s → 85.63s**, 1 passed.
+- Full `pytest tests/ -q`: **72 passed**, 410.28s (6m50s), sebelumnya 2377.05s
+  (39m37s). Tidak ada regresi fungsional.
+- Slowest remaining test: `test_snap_on_fixture_pdf` 118.03s dalam full suite;
+  ini masih mahal tetapi bottleneck O(N³) sudah hilang.
+
+Full test suite sudah dijalankan ulang setelah patch dan lulus 72/72.
 
 ## CATATAN HANDOFF SESI 2026-09-24 (baca ini dulu sebelum lanjut)
 ## CATATAN HANDOFF SESI 2026-09-24 (baca ini dulu sebelum lanjut)
