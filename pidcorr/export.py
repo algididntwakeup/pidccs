@@ -220,6 +220,7 @@ def export_marked_pdf(result, out_path, mode="engineer"):
     # memakai ruang un-rotated).
     to_pdf = unrot * fitz.Matrix(72.0 / dpi, 72.0 / dpi) * page.derotation_matrix
     lw = 6 * 72.0 / dpi                            # samakan tebal dgn export PNG (6 px)
+    opacity = 0.8
 
     n_annot = 0
     for rgb, subj, run_idxs, _txt in groups:
@@ -233,10 +234,17 @@ def export_marked_pdf(result, out_path, mode="engineer"):
             a = page.add_polyline_annot(fp)
             a.set_colors(stroke=col)
             a.set_border(width=lw)
-            a.set_opacity(0.8)
+            a.set_opacity(opacity)
             ids = ", ".join(run_pids.get(int(ri), [])) or "(tanpa piping ID terasosiasi)"
             a.set_info(title=subj, subject=subj, content=ids)
             a.set_flags(fitz.PDF_ANNOT_IS_PRINT)   # ikut tercetak, TIDAK locked
+            # WAJIB (Phase 3): `update()` membangun Appearance Stream (/AP) dari
+            # properti di atas. Viewer berbasis PDFium (Chrome, Edge) TIDAK
+            # mensintesis tampilan sendiri untuk anotasi tanpa /AP. Terukur:
+            # tanpa update() -> /AP berisi default `1 w` + `1 0 0 RG` (merah,
+            # 1 pt) sehingga garis tampak tipis & salah warna; dengan update() ->
+            # `/H gs` + `6 w` + `0 .5 1 RG` + ExtGState /H <</CA .8/ca .8>>`.
+            # Jangan hapus baris ini.
             a.update()
             n_annot += 1
 

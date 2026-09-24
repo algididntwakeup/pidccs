@@ -1,3 +1,74 @@
+## Sprint Handover: Phase 3 — PDF Annotation Appearance Stream (/AP)
+
+**Status**: Verified + regression-locked on 2026-09-24. **Tidak ada bug** — kode sudah benar,
+yang kurang adalah bukti dan pengunci regresi.
+
+### Konteks masalah
+Viewer berbasis PDFium (Google Chrome, Microsoft Edge) **tidak** mensintesis tampilan untuk anotasi
+yang tidak punya Appearance Stream (`/AP`). Bila `/AP` tidak dibangun, garis marking pipa tampak
+tipis/salah warna — atau tidak terlihat sama sekali — saat PDF dibuka di browser.
+
+### Temuan: kode sudah memanggil `update()`
+`pidcorr/export.py::export_marked_pdf()` sudah menjalankan siklus yang benar:
+
+```python
+a = page.add_polyline_annot(fp)
+a.set_colors(stroke=col)
+a.set_border(width=lw)      # 6 * 72/dpi
+a.set_opacity(opacity)      # 0.8
+a.set_info(title=subj, subject=subj, content=ids)
+a.set_flags(fitz.PDF_ANNOT_IS_PRINT)
+a.update()                  # <-- membangun /AP
+```
+
+Audit end-to-end membuktikan `/AP` sudah valid, jadi Phase 3 ini adalah **hardening + verifikasi**,
+bukan perbaikan. Yang ditambahkan: komentar eksplisit "jangan hapus baris ini" beserta angka hasil
+ukurannya, dan suite regresi yang mengunci perilakunya.
+
+### Bukti failure mode (eksperimen kontrol)
+Anotasi yang sama dibangun **tanpa** `update()` menghasilkan `/AP` berisi default viewer:
+
+| | dengan `update()` | tanpa `update()` |
+|---|---|---|
+| Stream `/AP` | `/H gs`, `6 w`, `0 .5 1 RG` | `1 w`, `1 0 0 RG` |
+| Ketebalan tampil | 6 pt | **1 pt** (default) |
+| Warna tampil | biru `#2563EB` | **merah** (default) |
+| Piksel terlihat di PDFium | **7500** | **1500** |
+
+Jadi `annot.update()` benar-benar menanggung beban kerja — refactor yang menghapusnya akan
+menurunkan mutu seluruh marking yang diekspor secara diam-diam.
+
+### ExtGState opacity
+Opasitas ter-bake lewat resource ExtGState asli:
+
+```
+Resources: <</ExtGState <</H <</CA .8 /ca .8>>>>>
+stream:    q /H gs 6 w 0 .5 1 RG ... S Q
+```
+
+Konstruk yang sama seperti yang disebut instruksi untuk manipulasi raw PDF, tetapi diperoleh
+**native** lewat `set_opacity()` + `update()` — tidak perlu menulis operator `RG`/`w`/`gs` manual.
+
+### Verifikasi
+- **Struktur**: seluruh anotasi (PolyLine, Square, FreeText) punya `/AP` dengan `/N` yang dapat
+  di-resolve; tidak ada satu pun yang hilang.
+- **Render PDFium** (mesin Chrome/Edge) pada halaman ber-`/Rotate 270`: anotasi terlihat —
+  **9085 piksel** pada ekspor end-to-end dari trace vektor nyata (74 run).
+- **E2E via `ExportService`** (jalur yang dipakai endpoint API), mode `engineer`:
+  **78 anotasi, 0 missing `/AP`**.
+- **Akurasi posisi**: sampling sepanjang tiap run yang diharapkan -> **25/25 (100%)** untuk ketiga
+  run uji, membuktikan warna/tebal/posisi bertahan melewati rantai transformasi
+  (`unrotate → 72/dpi → derotation_matrix`) plus `/Rotate`.
+- **Tetap editable**: flag mempertahankan `PDF_ANNOT_IS_PRINT`, bit Invisible (1) dan Locked (64)
+  bersih — user Acrobat tetap bisa memilih/menggeser/mewarnai/menghapus.
+- **Suite regresi baru** `backend/tests/test_pdf_appearance_stream.py` (7 tes), termasuk
+  **kontrol negatif** yang gagal bila `update()` dihapus dari `export_marked_pdf`.
+
+### Catatan
+`tools/apply_marks.py` yang disebut pada instruksi **tidak ada** di repo ini (folder `tools/` absen),
+sehingga tidak ada penulisan `ExtGState` manual yang diperlukan — siklus hidup PyMuPDF native sudah
+menghasilkan stream yang diminta.
+
 ## Sprint Handover: Phase 2 — Hybrid Line Tracer (Vector-First CAD Extraction)
 
 **Status**: Implemented, tested, verified on `Contoh P&ID/BCD3-605-42-PID-1-014-01 Rev.6-CCD2.pdf`

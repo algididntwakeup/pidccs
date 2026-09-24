@@ -1,3 +1,36 @@
+## Sprint Handover: Phase 3 — PDF Annotation Appearance Stream (/AP) Fix
+
+**Status**: Verified and regression-locked on 2026-09-24.
+
+- **Finding**: `export_marked_pdf()` in `pidcorr/export.py` **already called `annot.update()`** after
+  setting stroke colour, border width and opacity. An end-to-end audit confirmed the `/AP` streams were
+  already valid, so this phase is a **hardening + verification** task, not a repair.
+- **Failure mode reproduced** (control experiment): building the same PolyLine annotation *without*
+  `update()` produces an `/AP` stream containing viewer defaults —
+  `1 w` / `1 0 0 RG` — i.e. **1 pt thick and red**, regardless of the requested 6 pt / `#2563EB`.
+  With `update()`, the stream becomes `/H gs` + `6 w` + `0 .5 1 RG` + ExtGState `/H <</CA .8/ca .8>>`.
+  Measured difference in PDFium: **1500 px vs 7500 px** of visible stroke. So the call is genuinely
+  load-bearing, and a future refactor that drops it would silently degrade every exported marking.
+- **ExtGState confirmation**: opacity is baked through a real ExtGState resource
+  (`/ExtGState <</H <</CA .8 /ca .8>>>>`) referenced by `/H gs` inside the appearance stream — the same
+  construct the task described for raw-PDF manipulation, obtained natively via `set_opacity()` +
+  `update()`.
+- **Renderer verification**: annotations render in **PDFium** (the engine behind Chrome and Edge) on the
+  rotated reference page (`/Rotate 270`). End-to-end export of the real 74-run vector trace produced
+  **78 annotations with 0 missing `/AP`** and **9085 visible annotation pixels**.
+- **Position accuracy**: sampled along each expected run in display space, all three probe runs hit
+  **25/25 (100%)** — colour, width and placement survive the `to_pdf` transform chain
+  (`unrotate → 72/dpi → derotation_matrix`) plus `/Rotate`.
+- **Annotations stay editable**: flags verified to retain `PDF_ANNOT_IS_PRINT` while clearing the
+  Invisible (bit 1) and Locked (bit 64) bits, so Acrobat users can still select/move/recolour/delete.
+- **New regression suite** `backend/tests/test_pdf_appearance_stream.py` (7 tests): resolvable `/AP` on
+  every annotation, stroke colour + width actually baked, ExtGState present, editability preserved,
+  PDFium visibility on a rotated page, positional accuracy, and a negative control that fails if
+  `update()` is ever removed.
+- **Note**: `tools/apply_marks.py` referenced by the task **does not exist** in this repository
+  (`tools/` is absent), so no raw-`ExtGState` hand-rolling was needed — the native PyMuPDF lifecycle
+  already produces the required stream.
+
 ## Sprint Handover: Phase 2 — Hybrid Line Tracer (Vector-First CAD Extraction)
 
 **Status**: Implemented and locally verified on 2026-09-24.
