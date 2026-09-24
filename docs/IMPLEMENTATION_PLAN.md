@@ -1,3 +1,96 @@
+## CATATAN HANDOFF SESI 2026-09-24 (baca ini dulu sebelum lanjut)
+
+**Commit**: `47406ba` — sudah masuk, test suite 72 passed.
+
+### Kondisi sekarang
+| Area | Sebelum | Sesudah | Delta |
+|---|---|---|---|
+| R1 | 11.9% | 34.0% | +22.1% |
+| R2 | 88.1% | 100.0% | +11.9% |
+| R3 | 54.5% | 54.5% | ±0 |
+| R4 | 17.8% | 35.7% | +17.9% |
+| R5 | 19.3% | 60.4% | +41.0% |
+| R6 | 14.5% | 29.0% | +14.5% |
+| **TOTAL** | **23.8%** | **39.6%** | **+15.9%** |
+
+Run count 27 → 38. Trace lembar referensi 10.6s → 6.2s.
+
+### YANG BELUM BERES — prioritas 1: test suite masih 40 menit
+`test_snap_on_fixture_pdf` memakan **2076s dari 2377s total (87%)**.
+Fixture-nya `backend/tests/fixtures/manual-tracing/CC_AKT-...Inlet Separator.pdf`
+→ dirender 4967×3509 px = **17,4 juta piksel** (2,25× lembar referensi).
+
+**Yang SUDAH terukur** pada fixture itu:
+- Zhang-Suen: **9,4s** (skel 281k px)
+- `_graph_segments`: **5,6s** (1.952 runs)
+- Legacy morphological: 1,0s
+
+Jadi ~15s terjelaskan, **sisa ~2000s ada di salah satu filter pasca-skeleton.**
+Kandidat yang paling mencurigakan (semuanya O(N·M) dengan `N`=runs yang di sini
+1.952 — 50× lebih banyak dari lembar referensi yang cuma 38):
+
+1. `suppress_equipment_interior` — loop `for s in segs` × `for box in boxes`
+2. `snap_endpoints_to_equipment` — loop runs × boxes
+3. `suppress_furniture_geometry` — di sini ada `_label_protects()` yang loop
+   labels × runs, **plus** `furn_pad` loop. Tanpa label pun, loop `s.segments()`
+   untuk aturan 6 jalan per segmen.
+4. `bridge_collinear_headers` / `bridge_inline_valve_gaps` /
+   `bridge_polyline_elbows` — semua pairwise O(N²). Dengan 1.952 runs itu
+   **3,8 juta pasangan** per fungsi. **Ini kandidat terkuat.**
+5. `suppress_low_ink_diagonals` — sampel 32 titik × 1.952 runs, tiap sampel
+   cek jarak ke semua run lain (junction guard) → juga O(N²).
+
+**Cara menelusuri** (JANGAN jalankan test suite penuh dulu — 40 menit):
+Pola profiler sudah dipakai sebelumnya di sesi ini: masking pra-skeleton,
+lalu tiap filter dibungkus `time.time()` dan dicetak per tahap. Jalankan
+langsung di container terhadap fixture PDF itu:
+```bash
+docker compose exec -T api python _prof_stages.py
+```
+dengan `_prof_stages.py` = replikasi urutan filter di
+`SkeletonLineTracer.trace()` (lihat daftar di baris ~470-520
+`pidcorr/implementations/skeleton_tracer.py`) + `time.time()` per tahap.
+Hentikan setelah tahap yang mencurigakan ketemu.
+
+**Perbaikan yang mungkin**: kalau terbukti pairwise O(N²), tambahkan
+**spatial index** (grid bucket / KD-tree) untuk pra-filter pasangan kandidat
+sebelum loop mahal. Untuk `suppress_low_ink_diagonals` cukup batasi
+pemeriksaan junction ke run dalam radius tertentu.
+
+### YANG BELUM BERES — prioritas 2: titik 3 (sambungan palsu)
+User minta **di-skip dulu** ("nanti aku tes dulu dari logic yang sudah
+diperbarui"). Tunggu user menandai ulang gambarnya.
+
+Data yang sudah dikumpulkan (run 28 dari hasil trace):
+```
+[(1284,1649), (1284,2128), (1261,2096), (1261,2128), (1307,2096), (1307,2203)]
+```
+4 backtrack, cos −0.81 / −0.81 / −0.57 / −0.57. Ini pola **loop tertutup di
+junction**: chaining masuk kembali ke simpul yang sudah dilewati. Perbaikan
+`_prune_chain` + anti-loop `walked_nodes` sudah menurunkan total run
+ber-backtrack dari 7 ke 3, tapi run ini belum tersentuh — artinya ia terbentuk
+lewat jalur lain (kemungkinan dari `through_map` yang menyambung 3 edge di satu
+node, sehingga `_classify_junction_geometry` memilih pasangan yang salah).
+
+### Sisa pekerjaan (checklist)
+- [ ] Profil per-tahap pada fixture 4967×3509 → temukan filter 2000s
+- [ ] Perbaiki (kemungkinan: spatial index untuk filter pairwise)
+- [ ] Verifikasi ulang: trace lembar referensi masih 38 runs, coverage 39.6%
+- [ ] `pytest tests/ -q` harus turun ke menit-an, tetap 72 passed
+- [ ] Titik 3: tunggu user, lalu perbaiki junction classification
+- [ ] Update `docs/IMPLEMENTATION_PLAN.md` + `docs/walkthrough.md` setelah selesai
+
+### Catatan metodologi (yang terbukti efektif di sesi ini)
+1. **Deteksi piksel tanda tangan user** di screenshot → dapat koordinat 6
+   lingkaran yang presisi (jangan tebak dari penglihatan).
+2. **Pisahkan piksel biru (hasil trace) dari hitam (garis asli)** → daftar
+   garis belum-ter-trace yang kuantitatif.
+3. **Lacak per tahap filter** → tahu filter mana yang membunuh, bukan menebak.
+4. **Crop visual per-lini** → putuskan apakah filter itu benar atau bug.
+   Langkah ini yang membuktikan grid tekenraam & dinding vat MEMANG harus
+   dibuang, sementara pipa ber-label tidak.
+5. **Uji dengan permutasi urutan input** → menemukan bug `_join` sebelumnya.
+
 ## Sprint Handover: Zhang-Suen Skeleton + Nozzle Recovery (2026-09-24, lanjutan)
 
 **Status**: Implemented and verified. Ink coverage 6 area revisi user: **23.8% → 39.6%**
