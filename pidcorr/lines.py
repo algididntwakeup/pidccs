@@ -840,6 +840,200 @@ def suppress_drawing_margins(segs, page_wh, margin_ratio=0.038):
     return out
 
 
+def is_furniture_geometry(x0: float, y0: float, x1: float, y1: float,
+                          length: float, W: float, H: float) -> bool:
+    """5 ATURAN EMAS geometris (Phase 1) — klasifikasi clutter drafting vs pipa proses.
+
+    Referensi: 5 formula rasio teruji yang membuang ~23.5% clutter non-pipa (border
+    kertas, title block, tabel NOTES, tick koordinat) tanpa merusak pipa utama.
+
+    KOORDINAT: origin citra = KIRI-ATAS (y bertambah ke bawah, sesuai `img_bgr` OpenCV
+    dan seluruh pipeline `pidcorr`). Karena itu "title block BAWAH" (15.1% dari dasar
+    lembar) = `cy > 0.849*H`, dan "border ATAS" (2.6% dari tepi atas) = `cy < 0.026*H`.
+
+    Args:
+        x0, y0, x1, y1: bounding box / titik ujung segmen (px citra).
+        length: panjang busur polyline (px).
+        W, H: dimensi lembar (px).
+
+    Returns:
+        True bila segmen tergolong furniture/drafting clutter, bukan pipa proses.
+    """
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    long_span_limit = 0.80 * max(W, H)
+
+    # 1. Garis tepi terluar / frame span (panjang > 80% sisi terpanjang kertas)
+    if length > long_span_limit:
+        return True
+    # 2. Title block & tabel catatan BAWAH (15.1% dari dasar lembar)
+    if cy > 0.849 * H:
+        return True
+    # 3. Garis border ATAS (2.6% dari tepi atas)
+    if cy < 0.026 * H:
+        return True
+    # 4. Garis grid tick KIRI (2.4% dari tepi kiri)
+    if cx < 0.024 * W:
+        return True
+    # 5. Garis grid tick KANAN (2.3% dari tepi kanan)
+    if cx > 0.977 * W:
+        return True
+
+    return False
+
+
+def suppress_furniture_geometry(segs, page_wh, detections=None, furniture=None,
+                                label_boxes=None, band_frac=0.151, header_len_frac=0.10,
+                                protect_margin_pt=10, label_near_pt=20, dpi=350):
+    """Post-filter Phase 1: buang segmen yang lolos sebagai furniture geometris
+    (`is_furniture_geometry`) — border kertas, title block, tabel NOTES, tick koordinat.
+
+    Band 15.1% diterapkan SIMETRIS (atas & bawah) karena `is_furniture_geometry`
+    memakai origin KIRI-ATAS: title block di dasar lembar = `cy > 0.849*H`, sedangkan
+    tabel NOTES/TAG di puncak lembar = `cy < 0.151*H`. Keduanya adalah drafting
+    furniture yang tidak boleh lolos ke pipeline tagging.
+
+    GUARD anti-"pipa utama hilang" — aturan band/edge TIDAK berlaku untuk kandidat
+    pipa asli, yaitu segmen yang memenuhi salah satu:
+      * MENEMBUS bbox simbol terdeteksi (equipment/valve/instrument) dengan irisan
+        luas nyata (pipa masuk/keluar simbol, bukan sekadar berimpit tepi tabel), ATAU
+      * berupa HEADER (panjang busur > `header_len_frac` * sisi terpanjang), ATAU
+      * punya LABEL piping-ID di dekatnya (`label_boxes`) yang berada DI LUAR region
+        furniture — label di dalam title block/NOTES adalah isi tabel, bukan penanda
+        pipa, sehingga tidak melindungi.
+    Aturan span (1) tetap tanpa kecuali: bingkai gambar raksasa selalu dibuang.
+
+    Args:
+        label_boxes: bbox teks piping-ID [(x0,y0,x1,y1), ...] untuk proteksi pipa berlabel.
+    """
+    if not segs:
+        return []
+    W, H = page_wh
+    long_span_limit = 0.80 * max(W, H)
+    header_len = header_len_frac * max(W, H)
+    m = protect_margin_pt * dpi / 72.0
+    near = 2.0 * dpi / 72.0
+    label_near = label_near_pt * dpi / 72.0
+    boxes = []
+    for d in (detections or []):
+        if d.get("coarse") in ("equipment", "valve", "instrument"):
+            boxes.append((d.get("x1", 0), d.get("y1", 0), d.get("x2", 0), d.get("y2", 0)))
+    furn = [tuple(f) for f in (furniture or [])]
+    # Label piping-ID yang berada di LUAR furniture saja yang melindungi pipa.
+    labels = []
+    for lb in (label_boxes or []):
+        if isinstance(lb, dict):
+            lx0, ly0, lx1, ly1 = lb.get("x1", 0), lb.get("y1", 0), lb.get("x2", 0), lb.get("y2", 0)
+        elif isinstance(lb, (tuple, list)):
+            lx0, ly0, lx1, ly1 = lb[0], lb[1], lb[2], lb[3]
+        else:
+            lx0, ly0 = getattr(lb, "x1", 0), getattr(lb, "y1", 0)
+            lx1, ly1 = getattr(lb, "x2", 0), getattr(lb, "y2", 0)
+        inside_furn = any(lx0 >= fx0 - m and lx1 <= fx1 + m and ly0 >= fy0 - m and ly1 <= fy1 + m
+                          for fx0, fy0, fx1, fy1 in furn)
+        if not inside_furn:
+            labels.append((lx0, ly0, lx1, ly1))
+
+    def _label_protects(x0, y0, x1, y1):
+        for lx0, ly0, lx1, ly1 in labels:
+            x_ov = min(x1, lx1) - max(x0, lx0) > -label_near
+            y_ov = min(y1, ly1) - max(y0, ly0) > -label_near
+            if x_ov and (0 <= y0 - ly1 <= label_near or 0 <= ly0 - y1 <= label_near):
+                return True                      # label di atas/bawah (pipa horizontal)
+            if y_ov and (0 <= x0 - lx1 <= label_near or 0 <= lx0 - x1 <= label_near):
+                return True                      # label di samping (pipa vertikal)
+        return False
+
+    out = []
+    for s in segs:
+        pts = s.points
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+        length = s.length if hasattr(s, "length") else sum(
+            ((a[0]-b[0])**2 + (a[1]-b[1])**2) ** 0.5 for a, b in zip(pts, pts[1:]))
+        cx = (pts[0][0] + pts[-1][0]) / 2.0
+        cy = (pts[0][1] + pts[-1][1]) / 2.0
+
+        # Span (bingkai gambar) selalu dibuang, tanpa kecuali.
+        if length > long_span_limit:
+            continue
+
+        # Aturan 6 (pelengkap 5 aturan emas): potongan TEKENRAAM yang menyusur tepi
+        # dalam ~3.2% lembar dengan panjang > 10% sisi. Aturan #1 (span > 80%) hanya
+        # menangkap frame UTUH; frame yang terpotong menjadi beberapa run lolos.
+        # Dievaluasi PER SEGMEN (edge) karena satu run bisa berupa polyline yang
+        # memuat potongan frame + potongan lain. Audit 100 lembar: 0 run ber-label
+        # piping ID terkena aturan ini.
+        edge_frac = 0.032
+        is_frame = False
+        for (ax, ay), (bx, by) in s.segments():
+            if abs(ax - bx) <= abs(ay - by):          # edge vertikal
+                if ((ax < edge_frac * W and bx < edge_frac * W)
+                        or (ax > (1 - edge_frac) * W and bx > (1 - edge_frac) * W)) \
+                        and abs(ay - by) > 0.10 * H:
+                    is_frame = True
+                    break
+            else:                                      # edge horizontal
+                if ((ay < edge_frac * H and by < edge_frac * H)
+                        or (ay > (1 - edge_frac) * H and by > (1 - edge_frac) * H)) \
+                        and abs(ax - bx) > 0.10 * W:
+                    is_frame = True
+                    break
+        if is_frame:
+            continue
+
+        # Containment furniture: segmen yang SELURUHNYA berada dalam region furniture
+        # terdeteksi (title block / NOTES / tabel) + pad kecil = garis rooster tabel.
+        # Karena furniture sudah di-blackout pra-skeletisasi, run seperti ini hanya
+        # bisa muncul dari box detector yang sedikit terlalu kecil (mis. tabel title
+        # block yang memanjang ~40px di atas box) -> tetap clutter, bukan pipa.
+        # Pipa yang MENEMBUS furniture tidak seluruhnya terkandung -> tidak kena.
+        furn_pad = 60.0 * dpi / 350.0
+        if any(x0 >= fx0 - furn_pad and x1 <= fx1 + furn_pad
+               and y0 >= fy0 - furn_pad and y1 <= fy1 + furn_pad
+               for fx0, fy0, fx1, fy1 in furn):
+            continue
+
+        flagged = is_furniture_geometry(
+            pts[0][0], pts[0][1], pts[-1][0], pts[-1][1], length, W, H
+        )
+        # Band 15.1% SIMETRIS: `is_furniture_geometry` memakai origin KIRI-ATAS sehingga
+        # aturan #2 (cy > 0.849*H) menangkap title block di DASAR lembar. Tabel
+        # NOTES/TAG di PUNCAK lembar (kasus pada lembar target) butuh cerminannya
+        # (cy < 0.151*H) — lihat catatan koordinat di docstring.
+        if not flagged and cy < band_frac * H:
+            flagged = True
+        if not flagged:
+            out.append(s)
+            continue
+
+        # Guard: pipa asli menembus simbol terdeteksi, berupa header, atau berlabel.
+        # Untuk garis 1-D (axis-aligned) irisan-bbox selalu nol pada satu sumbu, jadi
+        # pakai uji "segmen masuk ke dalam box": proyeksi irisan pada KEDUA sumbu harus
+        # punya panjang nyata. Garis tabel yang hanya BERIMPIT dengan tepi box memberi
+        # irisan ~0 pada satu sumbu -> tetap dibuang; pipa yang masuk ke simbol lolos.
+        crosses = False
+        for bx0, by0, bx1, by1 in boxes:
+            ix = min(x1, bx1) - max(x0, bx0)
+            iy = min(y1, by1) - max(y0, by0)
+            if ix >= -near and iy >= -near and (ix > near or iy > near):
+                # salah satu sumbu harus benar-benar berada di dalam box (bukan tepi)
+                if (x0 > bx0 + near and x1 < bx1 - near) or \
+                   (y0 > by0 + near and y1 < by1 - near) or \
+                   (ix > near and iy > near):
+                    crosses = True
+                    break
+        in_furniture = any(x0 >= fx0 - m and x1 <= fx1 + m and y0 >= fy0 - m and y1 <= fy1 + m
+                           for fx0, fy0, fx1, fy1 in furn)
+        if (crosses and not in_furniture) or length > header_len or _label_protects(x0, y0, x1, y1):
+            out.append(s)
+            continue
+
+        # sisanya: clutter drafting (garis tabel/border/tick pendek) -> buang
+    return out
+
+
 def suppress_revision_clouds(segs):
     """Buang polyline yang membentuk awan revisi (scalloped revision clouds) atau loop tertutup.
     Pipa proses adalah garis ortogonal (lurus / siku), sedangkan awan revisi berbentuk lengkungan bergelombang."""

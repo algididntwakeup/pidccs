@@ -1,5 +1,31 @@
 # P&ID Studio → Web Platform: Implementation Plan
 
+## Sprint Handover: Phase 1 — 5 Aturan Saklek Filter Geometri (Anti-Table & Frame Leak)
+
+**Status**: Implemented and locally verified on 2026-09-24.
+
+- New `pidcorr/lines.py::is_furniture_geometry(x0, y0, x1, y1, length, W, H)` — literal
+  implementation of the 5 golden-ratio rules (frame span > 80%, title-block band 15.1%,
+  top border 2.6%, left tick 2.4%, right tick 2.3%). Image origin is top-left, so the
+  title-block band is `cy > 0.849*H` and the top border is `cy < 0.026*H` (coordinate note
+  from the instruction honoured).
+- New `pidcorr/lines.py::suppress_furniture_geometry(...)` post-filter, wired into
+  `SkeletonLineTracer.trace()` (step 7). The 15.1% band is applied **symmetrically** because
+  the target sheet keeps its NOTES/tag tables at the *top* of the sheet
+  (`cy < 0.151*H`), not only the title block at the bottom.
+- Added rule #6 (frame-edge complement): frame segments hugging the outer ~3.2% of the sheet
+  with length > 10% of the side, evaluated **per segment** (rule #1 only catches the intact
+  frame; split frame fragments leaked through).
+- **Guard against main-pipe loss**: the band/edge rules never drop (a) runs with real area
+  overlap into a detected equipment/valve/instrument box, (b) long headers
+  (`length > 0.10 * max(W,H)`), or (c) runs carrying a piping-ID label located *outside*
+  furniture. Audit of 100 cached sheets showed the raw band rule alone would delete 66
+  labelled runs; with the guard, **0 real process pipes are lost** (8 remaining drops are all
+  label-underline/leader strokes, already classified as non-pipe by `_underline_idxs`).
+- **Verification**: target sheet `BCD3-605-42-PID-1-014-01 Rev.6-CCD2.png` → **44 → 22 runs**;
+  border, title block and NOTES area are 100% clean (per-run visual overlay). `pytest` green.
+- Frontend/tagging pipeline never receives the removed clutter runs.
+
 ## Sprint Handover: Canvas Stability, Single Sidebar Tab, Re-scan ROI, & Manual Pen
 
 **Status**: Implemented and locally verified on 2026-09-18.

@@ -117,3 +117,84 @@ def test_suppress_floating_stubs_noop_without_detections():
     g = PipeRun(points=[(10, 10), (30, 32)], axis="d")
     out = suppress_floating_stubs([g], detections=None, dpi=350)
     assert g in out, "must be a no-op when detections is empty/None"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — 5 golden-ratio geometry rules (anti table/frame leak)
+# ---------------------------------------------------------------------------
+from pidcorr.lines import is_furniture_geometry, suppress_furniture_geometry
+
+
+def test_is_furniture_geometry_five_rules():
+    """Each of the 5 rules flags furniture; a normal interior pipe is not flagged."""
+    W, H = 3300.0, 2340.0
+
+    # 1. frame span > 80% of longest side
+    assert is_furniture_geometry(100, 100, 3200, 100, 0.85 * W, W, H) is True
+    # 2. title block at the BOTTOM (15.1% from base, origin top-left)
+    assert is_furniture_geometry(1000, 0.90 * H, 1200, 0.90 * H, 200, W, H) is True
+    # 3. top border (2.6%)
+    assert is_furniture_geometry(1000, 10, 1200, 10, 200, W, H) is True
+    # 4. left tick grid (2.4%)
+    assert is_furniture_geometry(40, 1000, 40, 1200, 200, W, H) is True
+    # 5. right tick grid (2.3%)
+    assert is_furniture_geometry(0.99 * W, 1000, 0.99 * W, 1200, 200, W, H) is True
+    # a normal interior pipe is NOT furniture
+    assert is_furniture_geometry(1000, 1000, 1400, 1000, 400, W, H) is False
+
+
+def test_suppress_furniture_geometry_drops_border_keeps_pipe():
+    W, H = 3300, 2340
+    border = PipeRun(points=[(100, 1200), (100, 2000)], axis="v")      # left tick zone
+    title = PipeRun(points=[(1500, 2200), (1700, 2200)], axis="h")     # short title-block row
+    pipe = PipeRun(points=[(1000, 1200), (1600, 1200)], axis="h")      # interior
+    out = suppress_furniture_geometry([border, title, pipe], page_wh=(W, H), dpi=350)
+    assert border not in out, "left-edge furniture must be dropped"
+    assert title not in out, "short title-block band run must be dropped"
+    assert pipe in out, "interior pipe must survive"
+
+
+def test_suppress_furniture_geometry_span_always_dropped():
+    """Rule #1 (page frame) is unconditional — even a detection touch cannot save it."""
+    W, H = 3300, 2340
+    frame = PipeRun(points=[(50, 50), (3250, 50)], axis="h")           # ~97% span
+    det = [{"coarse": "equipment", "x1": 0, "y1": 0, "x2": 3300, "y2": 100}]
+    out = suppress_furniture_geometry([frame], page_wh=(W, H), detections=det, dpi=350)
+    assert frame not in out, "page-spanning frame must always be dropped"
+
+
+def test_suppress_furniture_geometry_guards_real_pipe():
+    """Band rule must NOT eat a real pipe that crosses equipment or carries a header length."""
+    W, H = 3300, 2340
+    # long header sitting inside the bottom band (length > 10% of max side = 330px)
+    header = PipeRun(points=[(300, 0.90 * H), (1200, 0.90 * H)], axis="h")
+    # short stub crossing an equipment box in the bottom band
+    stub = PipeRun(points=[(1200, 0.88 * H), (1400, 0.88 * H)], axis="h")
+    det = [{"coarse": "equipment", "x1": 1300, "y1": 0.88 * H - 60,
+            "x2": 1500, "y2": 0.88 * H + 60}]
+    out = suppress_furniture_geometry([header, stub], page_wh=(W, H), detections=det, dpi=350)
+    assert header in out, "long header must survive the band rule"
+    assert stub in out, "pipe crossing equipment must survive the band rule"
+
+
+def test_suppress_furniture_geometry_label_protects_pipe():
+    """A piping-ID label next to a run protects it; a label inside furniture does not."""
+    W, H = 3300, 2340
+    pipe = PipeRun(points=[(1000, 0.90 * H), (1400, 0.90 * H)], axis="h")
+    lab_outside = [(1000, 0.90 * H - 40, 1400, 0.90 * H - 8)]     # above the run, outside furniture
+    lab_inside = [(1000, 0.90 * H - 40, 1400, 0.90 * H - 8)]      # same box but inside furniture
+    furniture = [(900, 0.90 * H - 60, 1500, 0.95 * H)]
+    out_ok = suppress_furniture_geometry([pipe], page_wh=(W, H), label_boxes=lab_outside, dpi=350)
+    assert pipe in out_ok, "run carrying a real piping-ID label must survive"
+    out_no = suppress_furniture_geometry(
+        [pipe], page_wh=(W, H), furniture=furniture, label_boxes=lab_inside, dpi=350)
+    assert pipe not in out_no, "label inside furniture (table cell) must not protect"
+
+
+def test_suppress_furniture_geometry_drops_furniture_contained_run():
+    """A run fully inside a detected furniture box (+pad) is a table grid line -> dropped."""
+    W, H = 3300, 2340
+    grid = PipeRun(points=[(2700, 1300), (2700, 1500)], axis="v")   # inside title block box
+    furniture = [(2600, 1200, 3250, 2300)]
+    out = suppress_furniture_geometry([grid], page_wh=(W, H), furniture=furniture, dpi=350)
+    assert grid not in out, "table grid line inside furniture must be dropped"

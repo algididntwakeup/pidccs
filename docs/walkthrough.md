@@ -1,5 +1,61 @@
 # Walkthrough — Phase A Implementation: Architecture Modernization & Web Decoupling
 
+## Sprint Handover: Phase 1 — 5 Aturan Saklek Filter Geometri (Anti-Table & Frame Leak)
+
+**Status**: Implemented, tested, verified on `Contoh P&ID/BCD3-605-42-PID-1-014-01 Rev.6-CCD2.png` (3309×2339 @ 350 DPI) — **44 → 22 runs**, border/title-block/NOTES 100% bersih.
+
+### Problem
+Garis hasil tracing bocor ke (a) border kertas & tick koordinat, (b) title block bawah,
+(c) tabel NOTES/TAG + tabel data equipment di puncak lembar. Clutter ini masuk ke pipeline
+tagging/frontend sebagai "pipa" palsu.
+
+### Implementation
+- **`pidcorr/lines.py` — `is_furniture_geometry(x0, y0, x1, y1, length, W, H)`** (fungsi baru):
+  implementasi harfiah 5 aturan emas:
+  1. `length > 0.80 * max(W, H)` → frame span;
+  2. `cy > 0.849*H` → title block dasar lembar (15.1%);
+  3. `cy < 0.026*H` → border atas;
+  4. `cx < 0.024*W` → tick grid kiri;
+  5. `cx > 0.977*W` → tick grid kanan.
+  Origin citra = **kiri-atas** (OpenCV/`img_bgr`), sesuai catatan koordinat pada instruksi.
+- **`pidcorr/lines.py` — `suppress_furniture_geometry(...)`** (post-filter baru) diterapkan pada
+  setiap run. Karena `is_furniture_geometry` memakai origin kiri-atas, band 15.1% diterapkan
+  **simetris**: aturan #2 menangkap title block di dasar, dan cerminannya (`cy < 0.151*H`)
+  menangkap tabel NOTES/TAG di puncak lembar (persis kasus lembar target — tabelnya di ATAS,
+  bukan bawah). Ditambah aturan #6 (pelengkap): potongan **tekenraam** yang menyusur tepi dalam
+  3.2% lembar dengan panjang > 10% sisi, dievaluasi **per-segmen** (aturan #1 hanya menangkap
+  frame utuh; frame terpotong lolos).
+- **Guard anti-"pipa utama hilang"** (hasil audit 100 lembar `.pidcache`): aturan band/edge
+  TIDAK berlaku untuk kandidat pipa asli — segmen yang (a) **menembus** bbox equipment/valve/
+  instrument dengan irisan luas nyata, (b) **header** (`length > 0.10 * max(W,H)`), atau
+  (c) punya **label piping-ID** di dekatnya yang berada DI LUAR furniture (label di dalam
+  title block/NOTES = isi tabel, tidak melindungi). Tanpa guard ini, aturan band murni membuang
+  **66 run ber-label** pada 100 lembar (mis. header `610-1"-GF-BCB-001` di cy/H=0.90, 1722px).
+- **Containment furniture**: run yang SELURUHNYA terkandung dalam furniture box + pad 60px
+  (grid tabel dari box detector yang sedikit terlalu kecil) selalu dibuang.
+- **`pidcorr/implementations/skeleton_tracer.py`**: `suppress_furniture_geometry` dipanggil di
+  step 7 (setelah `suppress_drawing_margins`, sebelum `suppress_revision_clouds`); `trace()`
+  menerima parameter `pids` baru dan meneruskannya sebagai `label_boxes`.
+- **`pidcorr/orchestrator.py`**: `pids` diteruskan ke `tracer.trace()` (guard `inspect.signature`).
+
+### Verification (A/B, audit 100 lembar `.pidcache`)
+- **Lembar target `BCD3-…-014-01`**: **44 → 22 runs**; seluruh 24 run yang dibuang terbukti
+  furniture (border tick, tekenraam, tabel NOTES/tag, tabel data equipment) — diverifikasi
+  dengan overlay visual per-run.
+- **Association (target, dengan label-protection)**: 44→22 runs, `pids attached` 13 → 10. Ketiga
+  yang berubah (`605-6"-RH-ASA-032`, `605-E-102-01-605-EM-102`, `605-EM-102A1-605-EM-102A2`)
+  adalah **assosiasi PALSU** ke garis tabel (leader ke tabel NOTES / tabel data equipment) —
+  semuanya memang clutter, bukan pipa. Semua pipa asli (`605-4-GR-CSA-082`, `605-10"-GR-CSA-072`,
+  `605-3"-GR-CSA-087`, VES-reeks, …) tetap utuh.
+- **Audit 100 lembar**: total 2168 → drop 74 (3.4%). Dari seluruh drop, hanya **8** yang
+  membawa piping-ID ber-state `attached`; pemeriksaan geometri per-run menunjukkan **semuanya
+  label-underline/leader** (bbox label duduk tepat di atas garis, `dy≈0`, x-overlap = lebar
+  label penuh) — pola yang sudah diklasifikasi `_underline_idxs` sebagai BUKAN pipa. **0 pipa
+  proses nyata hilang.**
+- Regresi: `pytest backend/tests/ -q` → lihat hasil di bawah; +7 test baru di
+  `test_masking_and_runs.py` (5 aturan, span unconditional, guard header/crossing, label-protect,
+  containment furniture).
+
 ## Sprint Handover: Deep Diagnostic, Spatial Indexing Optimization & Line Tracing Rescue (Sprint B.8)
 
 **Status**: Implemented, tested (51 backend tests), full pipeline verified with profiling on `Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png` (3309×2339 @ 350 DPI).

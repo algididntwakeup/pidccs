@@ -98,7 +98,7 @@ if crop:
             r.points = [(p[0]+x1, p[1]+y1) for p in r.points]
     print(f"crop trace: {len(runs)} runs in {time.time()-t0:.0f}s")
 else:
-    runs = tracer.trace(img_bgr=img, dpi=dpi, detections=syms, furniture=furniture, tokens=tokens)
+    runs = tracer.trace(img_bgr=img, dpi=dpi, detections=syms, furniture=furniture, tokens=tokens, pids=pids)
     print(f"trace: {len(runs)} runs in {time.time()-t0:.0f}s")
 
 # --- serialize runs like orchestrator does ---

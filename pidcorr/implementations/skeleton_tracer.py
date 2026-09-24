@@ -14,6 +14,7 @@ from ..lines import (
     suppress_box_outlines,
     detect_boxes,
     suppress_drawing_margins,
+    suppress_furniture_geometry,
     suppress_revision_clouds,
     suppress_diagonal_artifacts,
     suppress_text_artifacts,
@@ -375,6 +376,7 @@ class SkeletonLineTracer(BaseLineTracer):
         detections: Optional[List[Dict[str, Any]]] = None,
         furniture: Optional[List[List[int]]] = None,
         tokens: Optional[List[Dict[str, Any]]] = None,
+        pids: Optional[List[Any]] = None,
         progress: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> List[PipeRun]:
@@ -482,6 +484,13 @@ class SkeletonLineTracer(BaseLineTracer):
 
         # Drafting suppressions & header continuity
         filtered = suppress_drawing_margins(filtered, page_wh=(W, H))
+        # Phase 1 — 5 golden-ratio geometry rules (anti table/frame leak).
+        # Removes paper border, title block, NOTES tables and coordinate ticks that
+        # survived into runs; real pipes (detection-attached or long headers) are guarded.
+        filtered = suppress_furniture_geometry(
+            filtered, page_wh=(W, H), detections=detections, furniture=furniture,
+            label_boxes=pids or kwargs.get("pids"), dpi=dpi
+        )
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
         filtered = bridge_collinear_headers(filtered, max_gap_px=55)

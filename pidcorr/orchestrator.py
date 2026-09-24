@@ -109,6 +109,8 @@ class PipelineOrchestrator:
         sig = inspect.signature(self.tracer.trace)
         if "tokens" in sig.parameters:
             trace_kwargs["tokens"] = tokens
+        if "pids" in sig.parameters:
+            trace_kwargs["pids"] = pids
         runs = self.tracer.trace(**trace_kwargs)
 
         # Association: link piping IDs to pipe runs
