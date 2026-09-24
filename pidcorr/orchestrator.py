@@ -122,8 +122,12 @@ class PipelineOrchestrator:
                 if tier in ("A1", "A2"):
                     if progress:
                         progress(f"PDF vektor (tier {tier}) — ekstraksi geometri vektor...")
+                    # VECTOR_ENGINE: `pdfplumber` (default — mengutamakan kualitas
+                    # hasil: /Rotate ditangani otomatis) atau `pymupdf` (~0.3 s,
+                    # tetapi `rotation_matrix` wajib diterapkan manual).
+                    engine = os.environ.get("VECTOR_ENGINE", "pdfplumber").lower()
                     vector_runs = extract_vector_runs(
-                        image_path, dpi=dpi, rot=rot, progress=progress,
+                        image_path, dpi=dpi, rot=rot, progress=progress, engine=engine,
                     )
                     if vector_runs:
                         runs = vector_runs

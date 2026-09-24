@@ -9,15 +9,30 @@
   file-level helper used by the orchestrator.
 - `extract_vector_runs(pdf_path, dpi, rot)` returns `PipeRun`s with a schema identical to the skeleton
   tracer (`points: list[tuple[int,int]]`, `axis ∈ {h,v,d,poly}`, `color="#2563EB"`, `manual=False`).
-- **Engine note**: the spec named `pdfplumber`, and it is now a declared dependency — but its
-  `page.lines`/`page.curves` access costs **6.4–11.0 s** on the reference sheet (path parsing), which
-  makes the <1 s target unreachable. Extraction therefore uses PyMuPDF `page.get_cdrawings()`
-  (**0.26 s**, same document, same geometry). Verified equivalent: `Point * page.rotation_matrix`
-  reproduces pdfplumber's display-space coordinates exactly (`(791.04, 381.60) → (381.60, 50.96)`).
-- **Coordinate space**: `get_cdrawings()` returns **un-rotated** coordinates, while the pipeline renders
-  with `/Rotate` applied. `page.rotation_matrix` is applied to every point, then manual `rot` is applied
-  with the same CW convention as `pipeline.rotate_bgr`. The reference sheet is `rotation: 270`, so this
-  correction is what keeps vector runs aligned with the raster canvas and the OCR boxes.
+- **Engine decision (final)**: `pdfplumber` is the **default** engine, chosen for *output quality and
+  rotation safety* over speed. `pymupdf` remains available via `VECTOR_ENGINE=pymupdf`.
+  An earlier version of this document claimed PyMuPDF was *more accurate* — **that was wrong**.
+  A nearest-neighbour equivalence test over 1500 sampled vertices shows both engines parse the same
+  PDF operators and agree exactly (median 0.0 pt, 98% within 0.01 pt). The real differences are:
+  * **Rotation handling** — pdfplumber returns **display-space** coordinates (`/Rotate` applied
+    automatically). PyMuPDF `get_cdrawings()` returns **un-rotated** coordinates, so
+    `page.rotation_matrix` **must** be applied; forgetting it drops ink coverage from 0.99 to 0.07.
+    This is a genuine PyMuPDF footgun, and the reason pdfplumber is the default.
+  * **Cleanliness** — on the reference sheet pdfplumber yields **72 runs** vs PyMuPDF's **74**; the two
+    extra PyMuPDF runs are the X-shaped internals of heat exchanger `605-E-102` and a label underline,
+    i.e. non-pipe geometry. pdfplumber is slightly *cleaner* here, not less accurate.
+  * **Speed** — PyMuPDF `get_cdrawings()` **0.26 s** vs pdfplumber `page.lines` **5.8–27.2 s**
+    (unstable across runs). Speed is explicitly **not** the priority for this project.
+  * **Accuracy** — equivalent: ink coverage 0.985 (pdfplumber) vs 0.990 (PyMuPDF) against the rendered
+    PNG. The earlier "pdfplumber 0.61" figure came from a bug in the diagnostic script itself
+    (reading bounding-box corners instead of `pts` endpoints for polyline/curve objects).
+- `page_segments_pdfplumber()` implements the pdfplumber path, taking endpoints from `pts` (not
+  `x0/y0/x1/y1`) so polylines and curves decompose correctly. If pdfplumber is missing at runtime the
+  extractor degrades to PyMuPDF rather than failing.
+- **Coordinate space (PyMuPDF path only)**: `get_cdrawings()` returns **un-rotated** coordinates, while
+  the pipeline renders with `/Rotate` applied. `page.rotation_matrix` is applied to every point, then
+  manual `rot` is applied with the same CW convention as `pipeline.rotate_bgr`. The reference sheet is
+  `rotation: 270`; a regression test (`test_pymupdf_requires_rotation_matrix`) locks this in.
 - **Closed-path exclusion**: bubbles, valve outlines, equipment boxes and text glyphs are closed paths
   and are skipped (`_is_closed_path`), matching the spec's `not _closed(cv)` requirement. This alone
   removed ~62 spurious runs.

@@ -33,6 +33,12 @@ def get_configured_orchestrator() -> PipelineOrchestrator:
     #    jatuh ke skeleton untuk scan raster. Orchestrator yang memilih jalurnya.
     #    `skeleton`/`morphology` memaksa tracer raster (dipakai untuk benchmark
     #    dan perbandingan A/B).
+    #    Engine vektor dipilih terpisah lewat `VECTOR_ENGINE`:
+    #      pdfplumber — DEFAULT, mengutamakan kualitas hasil: /Rotate ditangani
+    #                   otomatis oleh library sehingga tidak ada risiko salah
+    #                   orientasi (5.8-27 s)
+    #      pymupdf    — ~0.3 s, tetapi koordinat un-rotated sehingga
+    #                   `rotation_matrix` WAJIB diterapkan manual
     if tracer_type in ("hybrid", "vector", "auto"):
         tracer = SkeletonLineTracer()
     elif tracer_type == "skeleton":

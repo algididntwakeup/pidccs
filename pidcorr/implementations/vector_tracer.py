@@ -542,6 +542,50 @@ def _drop_inside_regions(runs: Sequence[Segment], axes: Sequence[str],
     return keep_runs, keep_axes
 
 
+def page_segments_pdfplumber(pdf_path: str, page_index: int = 0,
+                             include_closed: bool = False) -> Tuple[List[Segment], Tuple[float, float]]:
+    """Ruas lurus via pdfplumber (koordinat SUDAH display-space).
+
+    Keunggulan pdfplumber: `/Rotate` halaman diterapkan otomatis, jadi tidak ada
+    risiko lupa `rotation_matrix` seperti pada `page.get_cdrawings()` PyMuPDF.
+    Konsekuensinya lebih lambat (5.8–27 s vs 0.26 s pada lembar referensi) dan
+    waktu parsing-nya tidak stabil antar-run.
+
+    Titik ujung diambil dari `pts` (bukan `x0/y0/x1/y1`) supaya polyline dan
+    kurva terurai benar — memakai sudut bbox untuk path ber-`pts` hanya benar
+    untuk garis lurus tunggal.
+
+    Returns:
+        (segments, (page_width_pt, page_height_pt)) dalam ruang tampilan.
+    """
+    import pdfplumber
+
+    with pdfplumber.open(pdf_path) as pdf:
+        page = pdf.pages[page_index]
+        W_pt, H_pt = float(page.width), float(page.height)
+        objects = list(page.lines) + list(page.curves)
+
+    out: List[Segment] = []
+    for obj in objects:
+        if obj.get("stroke") is False:
+            continue
+        pts = obj.get("pts") or []
+        if not pts:
+            x0, y0 = obj.get("x0"), obj.get("y0")
+            x1, y1 = obj.get("x1"), obj.get("y1")
+            if None in (x0, y0, x1, y1):
+                continue
+            pts = [(x0, y0), (x1, y1)]
+        if not include_closed:
+            if obj.get("fill"):
+                continue
+            if len(pts) >= 3 and _dist((float(pts[0][0]), float(pts[0][1])),
+                                       (float(pts[-1][0]), float(pts[-1][1]))) <= CLOSE_TOL_PT:
+                continue
+        out.extend(_straight_segments([(float(p[0]), float(p[1])) for p in pts]))
+    return out, (W_pt, H_pt)
+
+
 def _rotate_point(x: float, y: float, rot: int, w: float, h: float) -> Tuple[float, float]:
     """Terapkan rotasi manual yang sama dengan `pipeline.rotate_bgr` (CW)."""
     rot = int(rot) % 360
@@ -556,7 +600,7 @@ def _rotate_point(x: float, y: float, rot: int, w: float, h: float) -> Tuple[flo
 
 def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
                         rot: int = 0, progress: Optional[Callable[[str], None]] = None,
-                        page=None) -> List[PipeRun]:
+                        page=None, engine: str = "pdfplumber") -> List[PipeRun]:
     """Ekstrak PipeRun dari geometri vektor PDF.
 
     Args:
@@ -566,10 +610,32 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
         rot: rotasi manual (CW, kelipatan 90) yang dipakai pipeline pada citra.
         progress: callback progres opsional.
         page: objek halaman PyMuPDF siap pakai (menghindari parsing ulang).
+        engine: `"pdfplumber"` (default — mengutamakan KUALITAS dan keamanan
+            rotasi: `/Rotate` ditangani otomatis oleh library sehingga tidak ada
+            risiko lupa `rotation_matrix`; waktu 5.8–27 s) atau `"pymupdf"`
+            (~0.3 s, tetapi koordinatnya un-rotated sehingga `rotation_matrix`
+            wajib diterapkan). Geometri keduanya identik (uji tetangga terdekat:
+            median 0.0 pt); pilihan ini murni soal kecepatan vs keamanan rotasi.
 
     Returns:
         list[PipeRun] dengan skema identik keluaran skeleton tracer.
     """
+    engine = (engine or "pdfplumber").lower()
+
+    if engine == "pdfplumber":
+        try:
+            segs, (W_pt, H_pt) = page_segments_pdfplumber(pdf_path, page_index)
+            if progress:
+                progress(f"vektor: {len(segs)} ruas garis (pdfplumber, display-space)")
+            # pdfplumber sudah display-space; rotasi manual tetap diterapkan bila ada.
+            return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress)
+        except ImportError:
+            # Engine opsional: jangan gagalkan tracing hanya karena paketnya tidak
+            # terpasang — jatuh ke PyMuPDF, bukan ke jalur raster.
+            if progress:
+                progress("pdfplumber tidak tersedia — memakai engine PyMuPDF...")
+            engine = "pymupdf"
+
     try:
         import pymupdf
     except ImportError:
@@ -590,47 +656,14 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
         if progress:
             progress(f"vektor: {len(drawings)} path vektor (tier {tier_of(page, drawings)})")
 
+        # `get_cdrawings()` mengembalikan koordinat UN-ROTATED; `rotation_matrix`
+        # halaman wajib diterapkan agar sejajar citra render (tanpa ini, ink
+        # coverage jatuh 0.99 -> 0.07 pada lembar ber-/Rotate).
         segs = page_segments(page, drawings=drawings,
                              rotation_matrix=page.rotation_matrix)
         if progress:
             progress(f"vektor: {len(segs)} ruas garis dari PDF")
-
-        runs_pt, axes = _to_runs(segs, min_seg_pt=GLYPH_MAX_SEG_PT)
-        # Buang sisa glyph/dash yang tidak tersambung ke jaringan mana pun.
-        runs_pt, axes = _drop_glyph_noise(runs_pt, axes)
-        # Buang baris/kolom TABEL (title block, TAG list, NOTES) berdasarkan
-        # struktur geometrisnya — jalur raster sudah mem-blackout area ini lebih
-        # dulu, sedangkan jalur vektor harus mengenalinya dari pola garis.
-        table_regions = _table_regions(runs_pt, axes)
-        if table_regions:
-            runs_pt, axes = _drop_inside_regions(runs_pt, axes, table_regions)
-        if progress:
-            progress(f"vektor: {len(runs_pt)} run setelah merge, filter glyph "
-                     f"& {len(table_regions)} region tabel")
-
-        scale = dpi / 72.0
-        out: List[PipeRun] = []
-        for (a, b), axis in zip(runs_pt, axes):
-            (x0, y0), (x1, y1) = a, b
-            length_pt = _dist(a, b)
-            # Filter Fase 1 (rasio, jadi sah dalam satuan pt): buang border frame,
-            # title block, tabel NOTES, dan tick koordinat.
-            if is_furniture_geometry(x0, y0, x1, y1, length_pt, W_pt, H_pt):
-                continue
-            px0, py0 = _rotate_point(x0 * scale, y0 * scale, rot, W_pt * scale, H_pt * scale)
-            px1, py1 = _rotate_point(x1 * scale, y1 * scale, rot, W_pt * scale, H_pt * scale)
-            pts = [(int(round(px0)), int(round(py0))), (int(round(px1)), int(round(py1)))]
-            if pts[0] == pts[1]:
-                continue
-            out.append(PipeRun(points=pts, axis=axis, color="#2563EB", manual=False))
-
-        # Post-filter Fase 1 (band 15.1% simetris + guard header/label/deteksi):
-        # di ruang PDF belum ada deteksi YOLO maupun bbox OCR, jadi guard-nya tidak
-        # aktif — yang bekerja adalah band simetris, aturan tepi, dan aturan span.
-        # Ini yang membuang tabel TAG/NOTES di puncak lembar dan title block bawah.
-        out = suppress_furniture_geometry(out, page_wh=(W_pt * scale, H_pt * scale),
-                                          dpi=dpi)
-        return out
+        return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress)
     finally:
         if own_doc is not None:
             try:
@@ -639,11 +672,60 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
                 pass
 
 
-class VectorLineTracer(BaseLineTracer):
-    """Vector-first tracer untuk PDF vektor, dengan fallback raster di orchestrator."""
+def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
+                  dpi: int = 350, rot: int = 0,
+                  progress: Optional[Callable[[str], None]] = None) -> List[PipeRun]:
+    """Ruas lurus (pt, display-space) -> PipeRun (px) — merge, filter, konversi."""
+    runs_pt, axes = _to_runs(segs, min_seg_pt=GLYPH_MAX_SEG_PT)
+    # Buang sisa glyph/dash yang tidak tersambung ke jaringan mana pun.
+    runs_pt, axes = _drop_glyph_noise(runs_pt, axes)
+    # Buang baris/kolom TABEL (title block, TAG list, NOTES) berdasarkan
+    # struktur geometrisnya — jalur raster sudah mem-blackout area ini lebih
+    # dulu, sedangkan jalur vektor harus mengenalinya dari pola garis.
+    table_regions = _table_regions(runs_pt, axes)
+    if table_regions:
+        runs_pt, axes = _drop_inside_regions(runs_pt, axes, table_regions)
+    if progress:
+        progress(f"vektor: {len(runs_pt)} run setelah merge, filter glyph "
+                 f"& {len(table_regions)} region tabel")
 
-    def __init__(self, page_index: int = 0):
+    scale = dpi / 72.0
+    out: List[PipeRun] = []
+    for (a, b), axis in zip(runs_pt, axes):
+        (x0, y0), (x1, y1) = a, b
+        length_pt = _dist(a, b)
+        # Filter Fase 1 (rasio, jadi sah dalam satuan pt): buang border frame,
+        # title block, tabel NOTES, dan tick koordinat.
+        if is_furniture_geometry(x0, y0, x1, y1, length_pt, W_pt, H_pt):
+            continue
+        px0, py0 = _rotate_point(x0 * scale, y0 * scale, rot, W_pt * scale, H_pt * scale)
+        px1, py1 = _rotate_point(x1 * scale, y1 * scale, rot, W_pt * scale, H_pt * scale)
+        pts = [(int(round(px0)), int(round(py0))), (int(round(px1)), int(round(py1)))]
+        if pts[0] == pts[1]:
+            continue
+        out.append(PipeRun(points=pts, axis=axis, color="#2563EB", manual=False))
+
+    # Post-filter Fase 1 (band 15.1% simetris + guard header/label/deteksi):
+    # di ruang PDF belum ada deteksi YOLO maupun bbox OCR, jadi guard-nya tidak
+    # aktif — yang bekerja adalah band simetris, aturan tepi, dan aturan span.
+    # Ini yang membuang tabel TAG/NOTES di puncak lembar dan title block bawah.
+    return suppress_furniture_geometry(out, page_wh=(W_pt * scale, H_pt * scale), dpi=dpi)
+
+
+class VectorLineTracer(BaseLineTracer):
+    """Vector-first tracer untuk PDF vektor, dengan fallback raster di orchestrator.
+
+    Args:
+        page_index: halaman yang diproses.
+        engine: `"pdfplumber"` (default — mengutamakan kualitas hasil: `/Rotate`
+            ditangani otomatis sehingga tidak ada risiko salah orientasi; 5.8–27 s)
+            atau `"pymupdf"` (~0.3 s, tetapi `rotation_matrix` wajib diterapkan
+            manual). Geometri kedua engine identik.
+    """
+
+    def __init__(self, page_index: int = 0, engine: str = "pdfplumber"):
         self.page_index = page_index
+        self.engine = engine
 
     # -- tier -----------------------------------------------------------------
     def tier(self, pdf_path: str, page_index: Optional[int] = None) -> str:
@@ -661,5 +743,5 @@ class VectorLineTracer(BaseLineTracer):
         return extract_vector_runs(
             pdf_path, dpi=dpi,
             page_index=self.page_index if page_index is None else page_index,
-            rot=rot, progress=progress,
+            rot=rot, progress=progress, engine=self.engine,
         )

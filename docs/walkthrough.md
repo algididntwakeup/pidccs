@@ -27,15 +27,32 @@ piksel) yang tidak pernah 100% lurus. Padahal koordinat garis pipa sudah tersimp
 - `pdfplumber>=0.11.0` ditambahkan ke `backend/requirements.txt` dan dipasang di `api` + `worker`.
 
 ### Temuan teknis penting
-1. **Engine**: spesifikasi menyebut `pdfplumber`, dan paketnya tetap dipasang — tetapi akses
-   `page.lines`/`page.curves` memakan **6.4–11.0 s** pada lembar referensi, sehingga target <1 s
-   mustahil. Ekstraksi memakai PyMuPDF `get_cdrawings()` (**0.26 s**, dokumen & geometri sama).
-   Kesetaraan diverifikasi: `Point * page.rotation_matrix` mereproduksi koordinat display-space
-   pdfplumber persis (`(791.04, 381.60) → (381.60, 50.96)`).
-2. **Ruang koordinat**: `get_cdrawings()` mengembalikan koordinat **un-rotated**, sedangkan pipeline
-   merender dengan `/Rotate` diterapkan. Tanpa `rotation_matrix`, seluruh hasil vektor meleset/tertukar
-   sumbu (lembar referensi `rotation: 270`). Setelah itu rotasi manual `rot` diterapkan dengan konvensi
-   CW yang sama seperti `pipeline.rotate_bgr`.
+1. **Engine — KEPUTUSAN AKHIR: pdfplumber sebagai DEFAULT.** Prioritas proyek ini adalah **kualitas
+   hasil tracing**, bukan kecepatan, sehingga engine default adalah `pdfplumber` (rotasi ditangani
+   library, tanpa footgun orientasi). `pymupdf` tetap tersedia via `VECTOR_ENGINE=pymupdf` bila
+   kecepatan dibutuhkan.
+   Versi awal dokumen ini menyebut PyMuPDF "lebih akurat"; **itu salah**. Uji ekivalensi tetangga
+   terdekat atas 1500 titik acak menunjukkan kedua library mem-parse operator PDF yang sama dan
+   hasilnya identik (median 0.0 pt, 98% dalam 0.01 pt). Perbedaan sesungguhnya:
+   - **Rotasi**: pdfplumber mengembalikan koordinat **display-space** (`/Rotate` otomatis).
+     PyMuPDF `get_cdrawings()` mengembalikan koordinat **un-rotated** sehingga
+     `page.rotation_matrix` **wajib** diterapkan — lupa satu langkah menjatuhkan ink coverage
+     0.99 → 0.07. Inilah footgun PyMuPDF yang membuat pdfplumber dipilih sebagai default.
+   - **Kebersihan hasil**: pada lembar referensi pdfplumber menghasilkan **72 run**, PyMuPDF **74**.
+     Dua run ekstra PyMuPDF adalah silang internal heat exchanger `605-E-102` dan garis bawah label —
+     keduanya **bukan pipa**. Jadi pdfplumber justru lebih bersih, bukan kurang akurat.
+   - **Kecepatan**: PyMuPDF `get_cdrawings()` **0.26 s** vs pdfplumber `page.lines` **5.8–27.2 s**
+     (tidak stabil antar-run). Kecepatan bukan prioritas di sini.
+   - **Akurasi**: setara — ink coverage 0.985 (pdfplumber) vs 0.990 (PyMuPDF). Angka "pdfplumber 0.61"
+     pada versi awal berasal dari bug skrip diagnostik sendiri: memakai sudut bounding box
+     (`x0/y0/x1/y1`) seolah titik ujung, padahal untuk polyline/kurva harus `pts`.
+   `page_segments_pdfplumber()` mengambil titik ujung dari `pts` agar polyline/kurva terurai benar,
+   dan bila pdfplumber tidak terpasang ekstraksi turun ke PyMuPDF (bukan gagal).
+2. **Ruang koordinat (khusus jalur PyMuPDF)**: `get_cdrawings()` mengembalikan koordinat
+   **un-rotated**, sedangkan pipeline merender dengan `/Rotate` diterapkan. Tanpa `rotation_matrix`,
+   seluruh hasil vektor meleset/tertukar sumbu (lembar referensi `rotation: 270`). Setelah itu rotasi
+   manual `rot` diterapkan dengan konvensi CW yang sama seperti `pipeline.rotate_bgr`. Regresi ini
+   dikunci oleh tes `test_pymupdf_requires_rotation_matrix`.
 3. **Closed path**: bubble instrumen, outline valve, kotak equipment, dan glyph huruf adalah path
    tertutup — dikecualikan (`_is_closed_path`), sesuai `not _closed(cv)` pada instruksi. Ini sendiri
    membuang ~62 run palsu.
@@ -54,9 +71,12 @@ piksel) yang tidak pernah 100% lurus. Padahal koordinat garis pipa sudah tersimp
 - Lembar referensi: **74 runs dalam 0.52 s** (target <1 s); semua run H/V eksak lurus
   (`y0 == y1`, `x0 == x1`); border kertas, title block, kedua tabel TAG, dan NOTES bersih dari garis
   (overlay visual per-run).
+- **Kedua engine setara**: `pymupdf` 74 runs / 0.56 s vs `pdfplumber` 72 runs / 9.88 s — bbox hasil
+  **identik** `(559, 421) → (5615, 3857)` px. Selisih 2 run berasal dari penguraian kurva, bukan
+  pergeseran koordinat.
 - Input PNG raster: `tier_of_pdf` -> `raster`, orchestrator memakai skeleton tracer tanpa error.
 - `pytest backend/tests/test_vector_tracer.py` — unit + integrasi (skema PipeRun, <1 s, kelurusan,
-  closed-path, dispatch hybrid).
+  closed-path, dispatch hybrid, footgun rotasi PyMuPDF, kesetaraan engine, pemilihan `VECTOR_ENGINE`).
 
 ## Audit Performa PyTorch/YOLO dan Progres Deteksi — 2026-09-24
 
