@@ -62,15 +62,56 @@ class PipelineOrchestrator:
         H, W = img_bgr.shape[:2]
         t0 = time.time()
 
+        # Stage 0: Early PDF tier detection — BEFORE any heavy computation.
+        #
+        # Deteksi tier PDF dipindah ke paling atas agar vektor CAD (tier A1/A2)
+        # bisa langsung diekstrak TANPA menunggu YOLO tiled (35 tiles, ~10-30s
+        # di CPU). OCR tetap jalan karena dibutuhkan untuk piping ID association.
+        # YOLO tiled hanya dijalankan pada alur raster.
+        pdf_tier = None
+        is_vector_pdf = False
+        if str(image_path).lower().endswith(".pdf"):
+            try:
+                from .implementations.vector_tracer import (
+                    tier_of_pdf, extract_vector_runs,
+                )
+                pdf_tier = tier_of_pdf(image_path)
+                is_vector_pdf = pdf_tier in ("A1", "A2")
+                if progress:
+                    if is_vector_pdf:
+                        progress(f"PDF vektor terdeteksi (tier {pdf_tier}) — bypass YOLO tiled...")
+                    else:
+                        progress(f"PDF raster (tier {pdf_tier}) — alur penuh (OCR + YOLO)...")
+            except Exception as e:
+                if progress:
+                    progress(f"Deteksi tier PDF gagal ({e}) — alur penuh...")
+
         # Stage 1: Piping ID OCR & candidate token extraction
         if progress:
             progress("Membaca teks line number (OCR)...")
         pids, tokens = self.extractor.extract(img_bgr=img_bgr, tile=1200, progress=progress)
 
         # Stage 2: Symbol Detection
-        if progress:
-            progress("Mendeteksi simbol equipment, valve, dan instrument...")
-        syms = self.detector.detect(img_bgr=img_bgr, conf=0.30, progress=progress)
+        # Untuk PDF vektor (A1/A2), YOLO tiled di-bypass karena deteksi simbol
+        # tidak diperlukan untuk ekstraksi geometri vektor. Ini menghemat ~10-30s
+        # CPU (35 tiles). Full-page detection ringan tetap bisa dijalankan nanti
+        # jika diperlukan untuk asosiasi, tetapi saat ini vektor sudah cukup.
+        if is_vector_pdf:
+            if progress:
+                progress("YOLO tiled di-bypass (vektor CAD) — deteksi simbol ringan...")
+            # Deteksi simbol ringan: single-pass full-page (bukan tiled 35x).
+            # Conf dinaikkan sedikit agar noise berkurang di mode full-page.
+            try:
+                syms = self.detector.detect(img_bgr=img_bgr, conf=0.40, progress=progress,
+                                             tile=0)
+            except TypeError:
+                # Fallback: detektor tidak mendukung parameter tile=0,
+                # lewati deteksi simbol untuk vektor CAD.
+                syms = []
+        else:
+            if progress:
+                progress("Mendeteksi simbol equipment, valve, dan instrument...")
+            syms = self.detector.detect(img_bgr=img_bgr, conf=0.30, progress=progress)
 
         # Furniture dan subtype tetap eksplisit di progres; tahap ini sebelumnya
         # terlihat macet di 65% walaupun YOLO tiled sudah selesai.
@@ -113,31 +154,24 @@ class PipelineOrchestrator:
             progress("Tracing jalur pipa...")
         runs = None
         tracer_used = "raster"
-        if str(image_path).lower().endswith(".pdf"):
+        if is_vector_pdf:
             try:
-                from .implementations.vector_tracer import (
-                    tier_of_pdf, extract_vector_runs,
+                if progress:
+                    progress(f"PDF vektor (tier {pdf_tier}) — ekstraksi geometri vektor...")
+                # VECTOR_ENGINE: `pdfplumber` (default — mengutamakan kualitas
+                # hasil: /Rotate ditangani otomatis) atau `pymupdf` (~0.3 s,
+                # tetapi `rotation_matrix` wajib diterapkan manual).
+                engine = os.environ.get("VECTOR_ENGINE", "pdfplumber").lower()
+                vector_runs = extract_vector_runs(
+                    image_path, dpi=dpi, rot=rot, progress=progress, engine=engine,
                 )
-                tier = tier_of_pdf(image_path)
-                if tier in ("A1", "A2"):
+                if vector_runs:
+                    runs = vector_runs
+                    tracer_used = f"vector:{pdf_tier}"
                     if progress:
-                        progress(f"PDF vektor (tier {tier}) — ekstraksi geometri vektor...")
-                    # VECTOR_ENGINE: `pdfplumber` (default — mengutamakan kualitas
-                    # hasil: /Rotate ditangani otomatis) atau `pymupdf` (~0.3 s,
-                    # tetapi `rotation_matrix` wajib diterapkan manual).
-                    engine = os.environ.get("VECTOR_ENGINE", "pdfplumber").lower()
-                    vector_runs = extract_vector_runs(
-                        image_path, dpi=dpi, rot=rot, progress=progress, engine=engine,
-                    )
-                    if vector_runs:
-                        runs = vector_runs
-                        tracer_used = f"vector:{tier}"
-                        if progress:
-                            progress(f"Tracing vektor selesai ({len(runs)} run)")
-                    elif progress:
-                        progress("Vektor tidak menghasilkan run — fallback ke raster...")
+                        progress(f"Tracing vektor selesai ({len(runs)} run)")
                 elif progress:
-                    progress(f"PDF raster (tier {tier}) — memakai skeleton tracer...")
+                    progress("Vektor tidak menghasilkan run — fallback ke raster...")
             except Exception as e:
                 if progress:
                     progress(f"Ekstraksi vektor dilewati ({e}) — fallback ke raster...")

@@ -1332,6 +1332,12 @@ def suppress_low_ink_diagonals(segs, img_bgr=None, min_ink_frac=0.5, min_len_px=
         for j, (c, d) in enumerate(ends):
             if j == idx:
                 continue
+            # Fast AABB reject: skip distant pairs before computing hypot.
+            if (abs(a[0] - c[0]) > junction_tol_px and abs(a[0] - d[0]) > junction_tol_px
+                    and abs(b[0] - c[0]) > junction_tol_px and abs(b[0] - d[0]) > junction_tol_px
+                    and abs(a[1] - c[1]) > junction_tol_px and abs(a[1] - d[1]) > junction_tol_px
+                    and abs(b[1] - c[1]) > junction_tol_px and abs(b[1] - d[1]) > junction_tol_px):
+                continue
             if (_dist(a, c) <= junction_tol_px or _dist(a, d) <= junction_tol_px
                     or _dist(b, c) <= junction_tol_px or _dist(b, d) <= junction_tol_px):
                 return True
@@ -1529,7 +1535,7 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
     if not runs or len(runs) < 2:
         return runs
 
-    valves = [d for d in (detections or []) if d.get("coarse") == "valve"]
+    valves = [d for d in (detections or []) if d.get("coarse") in ("valve", "instrument")]
     if not valves:
         return runs
 
@@ -1561,6 +1567,19 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
                 r2 = out[j]
                 pts2 = r2.points if hasattr(r2, "points") else r2.get("points", [])
                 if len(pts2) < 2:
+                    continue
+
+                # Fast AABB reject: skip pairs that are spatially too far apart
+                # on BOTH axes. Avoids expensive hypot/pairs computation for
+                # distant runs, reducing practical O(N^2) to near-linear.
+                if (abs(pts1[0][0] - pts2[0][0]) > max_gap_px * 2
+                        and abs(pts1[-1][0] - pts2[0][0]) > max_gap_px * 2
+                        and abs(pts1[0][0] - pts2[-1][0]) > max_gap_px * 2
+                        and abs(pts1[-1][0] - pts2[-1][0]) > max_gap_px * 2
+                        and abs(pts1[0][1] - pts2[0][1]) > max_gap_px * 2
+                        and abs(pts1[-1][1] - pts2[0][1]) > max_gap_px * 2
+                        and abs(pts1[0][1] - pts2[-1][1]) > max_gap_px * 2
+                        and abs(pts1[-1][1] - pts2[-1][1]) > max_gap_px * 2):
                     continue
 
                 pairs = [

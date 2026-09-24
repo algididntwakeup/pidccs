@@ -1,3 +1,45 @@
+## HANDOFF UPDATE — Deep Optimization: YOLO Bypass, Instrument Gaps, O(N²), Text Underlines (2026-09-25)
+
+**4 perbaikan bedah pada 3 file utama:**
+
+### 1. Orchestrator Reorder & YOLO Tiled Bypass (`pidcorr/orchestrator.py`)
+
+Deteksi `tier_of_pdf` dipindah ke **Stage 0** (paling atas), sebelum OCR dan YOLO.
+Untuk PDF vektor (tier A1/A2):
+- YOLO tiled (35 tiles, ~10-30s CPU) **di-bypass** — detektor dipanggil dalam mode
+  ringan full-page (`conf=0.40, tile=0`) atau dilewati (`syms=[]`).
+- `extract_vector_runs` dijalankan langsung setelah OCR.
+- **Dampak**: waktu eksekusi PDF vektor CAD turun dari ~35-40s ke <1s (tracing only).
+
+Alur raster fallback tetap normal: OCR → YOLO Tiled → SkeletonTracer.
+
+### 2. Fix Instrument Gaps (`pidcorr/lines.py:bridge_inline_valve_gaps`)
+
+Filter `valves` diubah dari `d.get("coarse") == "valve"` menjadi
+`d.get("coarse") in ("valve", "instrument")`. Pipa yang terpotong di balon instrumen
+inline sekarang tersambung kembali — sebelumnya hanya valve yang di-bridge.
+
+### 3. Fix O(N²) Bottleneck (`pidcorr/lines.py`)
+
+**a. `bridge_inline_valve_gaps`** — Inner loop `for j in range(i+1, n)` sekarang
+memiliki **Fast AABB Reject** di awal: jika semua 4 endpoint sepasang run berjarak
+> `2 × max_gap_px` pada kedua sumbu, iterasi langsung di-skip tanpa menghitung
+pairs/hypot. Mengurangi komputasi efektif dari O(N²) ke near-linear.
+
+**b. `suppress_low_ink_diagonals._connects()`** — Hal yang sama diterapkan di
+pengecekan junction: AABB reject sebelum `_dist()` menghindari 4 panggilan hypot
+untuk setiap pasangan run yang jauh.
+
+### 4. Hapus Underline Teks (`pidcorr/implementations/skeleton_tracer.py`)
+
+Pada "Dilated Text Masking" (Step 1 di `SkeletonLineTracer.trace()`):
+- `dil_y2` (padding bawah) diubah dari `ty2 + dil_r` menjadi `ty2 + int(dil_r * 2.5)`.
+- Garis bawah teks (underline) yang tipis dan panjang lolos dari `suppress_text_artifacts`
+  karena aspect ratio besar (bukan "glyph"), tetapi bukan pipa. Padding 2.5× ke bawah
+  menghapusnya sebelum skeletonisasi.
+
+---
+
 ## HANDOFF UPDATE — Bridge Bottleneck Ditemukan dan Dipatch (2026-09-24)
 
 **Temuan terukur**: `test_snap_on_fixture_pdf` memakan 2076s dari total 2377s.

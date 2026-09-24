@@ -611,8 +611,13 @@ class SkeletonLineTracer(BaseLineTracer):
         )
 
         # 1. Dilated Text Masking: Scaled with DPI (5px at 350 DPI)
-        # to blackout notes/underlines while avoiding false gap creation in dense areas
+        # to blackout notes/underlines while avoiding false gap creation in dense areas.
+        # Bottom padding (dil_r * 2.5) is intentionally larger to catch thin text
+        # underlines that survive suppress_text_artifacts (high aspect ratio → not
+        # a "glyph", but still not a pipe). Without this, underlines get skeletonized
+        # into false horizontal runs that pollute the pipe network.
         dil_r = max(3, int(5 * (dpi / 350.0)))
+        dil_r_bottom = int(dil_r * 2.5)
         text_tokens = tokens or kwargs.get("pids") or []
         for t in text_tokens:
             if isinstance(t, dict):
@@ -629,7 +634,7 @@ class SkeletonLineTracer(BaseLineTracer):
                 dil_x1 = max(0, tx1 - dil_r)
                 dil_y1 = max(0, ty1 - dil_r)
                 dil_x2 = min(W, tx2 + dil_r)
-                dil_y2 = min(H, ty2 + dil_r)
+                dil_y2 = min(H, ty2 + dil_r_bottom)
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
         # 2. Equipment Interior Masking: buang ISI equipment, PERTAHANKAN dinding + nozzle.

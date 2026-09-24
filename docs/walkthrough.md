@@ -1,3 +1,31 @@
+## Deep Optimization — 4 Surgical Fixes (2026-09-25)
+
+Vier structurele bugs opgelost in 3 bestanden:
+
+### 1. Orchestrator Reorder & YOLO Bypass (`pidcorr/orchestrator.py`)
+- `tier_of_pdf` verplaatst naar **Stage 0** (vóór OCR en YOLO).
+- Vector CAD PDFs (A1/A2): YOLO tiled (35 tiles) **wordt overgeslagen**.
+  Detector in lichtgewicht full-page modus (`conf=0.40, tile=0`) of `syms=[]`.
+- Vector extractie start direct na OCR → tracing <1s i.p.v. ~35-40s.
+- Raster fallback ongewijzigd: OCR → YOLO Tiled → SkeletonTracer.
+
+### 2. Instrument Gaps Fix (`pidcorr/lines.py:bridge_inline_valve_gaps`)
+- Filter `"coarse" == "valve"` → `"coarse" in ("valve", "instrument")`.
+- Pijpen die door instrumentballonnen worden onderbroken, worden nu gebridged.
+
+### 3. O(N²) AABB Fast Reject (`pidcorr/lines.py`)
+- **`bridge_inline_valve_gaps`**: AABB pre-check op alle 4 endpoint-paren
+  (`abs(x) > 2*max_gap_px AND abs(y) > 2*max_gap_px`) → skip pairs/hypot.
+- **`suppress_low_ink_diagonals._connects()`**: dezelfde AABB vóór `_dist()`.
+- Praktische complexiteit daalt van O(N²) naar near-linear.
+
+### 4. Text Underline Removal (`pidcorr/implementations/skeleton_tracer.py`)
+- Text masking bottom padding: `dil_r` → `int(dil_r * 2.5)`.
+- Dunne, lange underlines (hoge aspect ratio → overleeft `suppress_text_artifacts`)
+  worden nu vóór skeletonisatie verwijderd.
+
+---
+
 ## Bridge bottleneck opgelost — verificatie (2026-09-24)
 
 De fixture-test die eerder **2076s** duurde is geprofileerd. De oorzaak was
