@@ -17,10 +17,12 @@ from ..lines import (
     suppress_furniture_geometry,
     suppress_revision_clouds,
     suppress_diagonal_artifacts,
+    suppress_low_ink_diagonals,
     suppress_text_artifacts,
     suppress_floating_stubs,
     bridge_collinear_headers,
     bridge_inline_valve_gaps,
+    bridge_polyline_elbows,
 )
 
 
@@ -493,10 +495,18 @@ class SkeletonLineTracer(BaseLineTracer):
         )
         filtered = suppress_revision_clouds(filtered)
         filtered = suppress_diagonal_artifacts(filtered, page_wh=(W, H))
+        # Buang garis lurus PALSU hasil skeletonisasi yang melintasi kertas kosong
+        # (mayoritas titik sampelnya tidak menyentuh tinta). Terukur: satu run
+        # 1017 px di lembar referensi hanya 20% tinta — bukan pipa, bukan gambar.
+        filtered = suppress_low_ink_diagonals(filtered, img_bgr=img_bgr)
         filtered = bridge_collinear_headers(filtered, max_gap_px=55)
 
         # 7. Bridge pipe runs cut by inline valves
         filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=90)
+
+        # 7b. Rekonstruksi bengkokan: sambung potongan siku 45° kembali ke polyline
+        #     supaya satu pipa bengkok = satu run (klik-ID menyala penuh).
+        filtered = bridge_polyline_elbows(filtered)
 
         # 8. Post-filter: drop isolated short diagonal strokes (surviving text/hand scratches)
         #    that do not attach to any detected symbol. No-op when detections is empty.

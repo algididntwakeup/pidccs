@@ -315,7 +315,16 @@ def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=
     (pipa asli menuju nozzle) dipertahankan. Beda dari versi lama yg cuma buang segmen yg
     KEDUA ujungnya di dalam (pipa masuk equipment jadi masih ke-trace ke dalam).
     Efek: pipa berhenti di tepi equipment. Bila sebuah piping ID kehilangan pipanya karena
-    ini -> otomatis jadi 'pid_none' di panel Review (user yang memutuskan)."""
+    ini -> otomatis jadi 'pid_none' di panel Review (user yang memutuskan).
+
+    POLYLINE-AWARE: clipping dievaluasi PER SEGMEN (`zip(pts, pts[1:])`), bukan dari
+    titik ujung polyline. Versi lama memakai `points[0]` dan `points[-1]` sehingga
+    sebuah polyline bengkok (header horizontal yang menikung turun) diklasifikasikan
+    "horizontal" berdasarkan selisih ujungnya, lalu dipotong di `y` rata-rata —
+    koordinat yang tidak dilewati pipa sama sekali. Akibatnya header panjang +
+    turunan vertikalnya hilang total (terukur: 2 pipa utama lenyap di lembar
+    referensi, ink coverage 1.00 -> 0.00 pada kedua pipa).
+    """
     eqs = [d for d in (detections or []) if d.get("coarse") == "equipment"]
     if not eqs:
         return segs
@@ -325,23 +334,28 @@ def suppress_equipment_interior(segs, detections, dpi=350, margin_pt=3, page_wh=
     keep = 12 * dpi / 72.0
     out = []
     for s in segs:
-        (x0, y0), (x1, y1) = s.points[0], s.points[-1]
-        if abs(x1 - x0) >= abs(y1 - y0):                # horizontal
-            y = (y0 + y1) / 2.0; lo, hi = sorted((x0, x1))
-            ins = [(max(bx0, lo), min(bx1, hi)) for bx0, by0, bx1, by1 in boxes
-                   if by0 <= y <= by1 and max(bx0, lo) < min(bx1, hi)]
-            if not ins:
-                out.append(s); continue
-            for a, b in _subtract_intervals(lo, hi, ins, keep):
-                out.append(PipeRun([(a, y), (b, y)], s.axis))
-        else:                                           # vertical
-            x = (x0 + x1) / 2.0; lo, hi = sorted((y0, y1))
-            ins = [(max(by0, lo), min(by1, hi)) for bx0, by0, bx1, by1 in boxes
-                   if bx0 <= x <= bx1 and max(by0, lo) < min(by1, hi)]
-            if not ins:
-                out.append(s); continue
-            for a, b in _subtract_intervals(lo, hi, ins, keep):
-                out.append(PipeRun([(x, a), (x, b)], s.axis))
+        pts = s.points
+        if len(pts) < 2:
+            continue
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            if abs(bx - ax) >= abs(by - ay):            # segmen horizontal
+                y = (ay + by) / 2.0; lo, hi = sorted((ax, bx))
+                ins = [(max(bx0, lo), min(bx1, hi)) for bx0, by0, bx1, by1 in boxes
+                       if by0 <= y <= by1 and max(bx0, lo) < min(bx1, hi)]
+                if not ins:
+                    out.append(PipeRun([(ax, ay), (bx, by)], s.axis))
+                else:
+                    for a, b in _subtract_intervals(lo, hi, ins, keep):
+                        out.append(PipeRun([(a, y), (b, y)], s.axis))
+            else:                                       # segmen vertikal
+                x = (ax + bx) / 2.0; lo, hi = sorted((ay, by))
+                ins = [(max(by0, lo), min(by1, hi)) for bx0, by0, bx1, by1 in boxes
+                       if bx0 <= x <= bx1 and max(by0, lo) < min(by1, hi)]
+                if not ins:
+                    out.append(PipeRun([(ax, ay), (bx, by)], s.axis))
+                else:
+                    for a, b in _subtract_intervals(lo, hi, ins, keep):
+                        out.append(PipeRun([(x, a), (x, b)], s.axis))
     return out
 
 
@@ -1075,7 +1089,17 @@ def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
     """Buang garis diagonal artifak drafting (bukan pipa proses).
     Pipa proses dalam standar P&ID selalu ortogonal (horizontal/vertikal).
     Garis miring/diagonal yang membentang sangat panjang (> 300px atau > 0.08 dari dimensi lembar)
-    atau berada di area margin/title block adalah artifak noise/drawing frame/border."""
+    atau berada di area margin/title block adalah artifak noise/drawing frame/border.
+
+    POLYLINE-AWARE: diagonalitas dievaluasi PER SEGMEN (`zip(pts, pts[1:])`). Versi lama
+    menghitung `dx`/`dy` dari titik ujung polyline, sehingga polyline ORTOGONAL yang
+    menikung (header horizontal lalu turun vertikal) terlihat "diagonal" dengan rasio
+    0.65 > 0.3 dan langsung dibuang karena rentangnya lebar. Terukur pada lembar
+    referensi: 2 pipa utama lenyap di tahap ini setelah clipping diperbaiki.
+
+    Polyline dibuang hanya bila ADA segmen yang benar-benar diagonal DAN melanggar
+    batas; polyline ortogonal murni selalu lolos berapa pun panjang totalnya.
+    """
     if not segs:
         return []
     W, H = page_wh
@@ -1086,18 +1110,26 @@ def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
     out = []
     for s in segs:
         pts = s.points
-        p0, p1 = pts[0], pts[-1]
-        dx = abs(p1[0] - p0[0])
-        dy = abs(p1[1] - p0[1])
-        is_diagonal = (s.axis == "d") or (dx > 50 and dy > 50 and min(dx, dy) / max(dx, dy) > 0.3)
-        if is_diagonal:
-            if s.length > max_len or dx > 0.08 * W or dy > 0.08 * H:
-                continue
+        if len(pts) < 2:
+            continue
+        keep_run = True
+        for p0, p1 in zip(pts, pts[1:]):
+            dx = abs(p1[0] - p0[0])
+            dy = abs(p1[1] - p0[1])
+            if not (dx > 50 and dy > 50 and min(dx, dy) / max(dx, dy) > 0.3):
+                continue                                # segmen ini ortogonal -> aman
+            seg_len = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2) ** 0.5
+            if seg_len > max_len or dx > 0.08 * W or dy > 0.08 * H:
+                keep_run = False
+                break
             if min(p0[1], p1[1]) >= 0.85 * H:
-                continue
+                keep_run = False
+                break
             if min(p0[0], p1[0]) <= 0.05 * W and max(p0[0], p1[0]) >= 0.20 * W:
-                continue
-        out.append(s)
+                keep_run = False
+                break
+        if keep_run:
+            out.append(s)
     return out
 
 
@@ -1168,6 +1200,238 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
                 label = getattr(base_s, "label", "")
         out.append(PipeRun([(curr_x, curr_min), (curr_x, curr_max)], axis="v", color=color, label=label))
 
+    return out
+
+
+def suppress_low_ink_diagonals(segs, img_bgr=None, min_ink_frac=0.5, min_len_px=40,
+                               tol_px=3, samples=32, junction_tol_px=25.0):
+    """Buang run yang mayoritas jalurnya TIDAK ada tinta di gambar (artefak skeleton).
+
+    Skeletonisasi kadang menyambung dua titik terpisah menjadi garis lurus palsu:
+    sebuah run terukur di lembar referensi membentang 1017 px dari `[89,1045]` ke
+    `[357,64]` padahal hanya **20%** titik sampelnya yang menyentuh tinta — sisanya
+    melintasi kertas kosong. Garis seperti ini bukan pipa, bukan pula bagian gambar,
+    dan lolos dari semua filter geometri karena panjangnya masuk akal.
+
+    PENGAMAN (penting): potongan SIKU pada pipa bengkok juga punya tinta rendah
+    (terukur 15%) karena skeleton memangkas sudutnya. Potongan seperti itu JANGAN
+    dibuang — ia menyambung ke run lain di kedua ujungnya. Karena itu run yang
+    salah satu ujungnya berimpit dengan ujung run lain (<= `junction_tol_px`)
+    selalu dipertahankan; hanya diagonal yang benar-benar MENYENDIRI yang dibuang.
+
+    Hanya segmen DIAGONAL yang diperiksa: pipa ortogonal pendek yang terpotong
+    masking teks/valve tetap dipertahankan (dan memang sering benar-benar ada).
+
+    Args:
+        img_bgr: citra sumber; bila None -> no-op (filter dilewati).
+        min_ink_frac: fraksi minimum titik sampel yang harus menyentuh tinta.
+        min_len_px: hanya segmen lebih panjang dari ini yang diperiksa.
+        tol_px: radius toleransi pencarian tinta di sekitar titik sampel.
+        junction_tol_px: jarak ujung untuk menganggap run menyambung ke run lain.
+    """
+    if not segs or img_bgr is None:
+        return segs
+    import cv2
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
+    ink = gray < 128
+    H, W = ink.shape
+
+    def _ink_fraction(p0, p1):
+        hits = tot = 0
+        for t in np.linspace(0.05, 0.95, samples):
+            x = int(round(p0[0] + (p1[0] - p0[0]) * t))
+            y = int(round(p0[1] + (p1[1] - p0[1]) * t))
+            if not (0 <= x < W and 0 <= y < H):
+                continue
+            tot += 1
+            if ink[max(0, y - tol_px):y + tol_px + 1,
+                    max(0, x - tol_px):x + tol_px + 1].any():
+                hits += 1
+        return hits / tot if tot else 1.0
+
+    def _dist(a, b):
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    ends = []
+    for s in segs:
+        pts = s.points
+        if len(pts) >= 2:
+            ends.append((tuple(pts[0]), tuple(pts[-1])))
+
+    def _connects(idx):
+        """True bila salah satu ujung run ini berimpit dengan ujung run LAIN."""
+        a, b = ends[idx]
+        for j, (c, d) in enumerate(ends):
+            if j == idx:
+                continue
+            if (_dist(a, c) <= junction_tol_px or _dist(a, d) <= junction_tol_px
+                    or _dist(b, c) <= junction_tol_px or _dist(b, d) <= junction_tol_px):
+                return True
+        return False
+
+    out = []
+    for idx, s in enumerate(segs):
+        pts = s.points
+        if len(pts) < 2:
+            continue
+        keep = True
+        for p0, p1 in zip(pts, pts[1:]):
+            dx = abs(p1[0] - p0[0]); dy = abs(p1[1] - p0[1])
+            seg_len = (dx * dx + dy * dy) ** 0.5
+            if seg_len < min_len_px:
+                continue
+            if not (dx > 30 and dy > 30 and min(dx, dy) / max(dx, dy) > 0.25):
+                continue                            # ortogonal -> bukan kandidat
+            if _ink_fraction(p0, p1) < min_ink_frac and not _connects(idx):
+                keep = False
+                break
+        if keep:
+            out.append(s)
+    return out
+
+
+def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
+                           max_turn_deg=75.0):
+    """Sambung potongan SIKU 45° kembali ke polyline pipa (rekonstruksi bengkokan).
+
+    Saat pipa menikung, skeletonisasi memecahnya menjadi tiga run: horizontal,
+    potongan diagonal pendek di sudut, lalu vertikal. Contoh terukur pada lembar
+    referensi — header `[320,472]→[1738,472]`, siku `[1738,472]→[1813,515]`, dan
+    turunan `[1813,515]→[1813,1450]`. Ketiganya satu pipa fisik; tanpa disambung,
+    user melihat tiga "pipa" dan klik-ID hanya menyala sebagian.
+
+    Syarat penggabungan (KETAT, supaya pipa berbeda tidak saling menelan):
+      1. salah satu run harus PENDEK (<= `max_len_px`) — kandidat potongan siku;
+      2. ujung-ujungnya berimpit (<= `max_gap_px`);
+      3. sambungannya membentuk bengkokan wajar: sudut antara arah-datang dan
+         arah-lanjut <= `max_turn_deg`. Ini mencegah dua run yang kebetulan
+         ujungnya berdekatan tetapi arahnya berlawanan/tegak tak wajar ikut
+         tergabung menjadi polyline zig-zag.
+
+    Titik hasil gabungan diurutkan mengikuti arah perjalanan, bukan sekadar
+    disambung apa adanya.
+
+    Returns:
+        list[PipeRun] dengan polyline gabungan.
+    """
+    if not runs or len(runs) < 2:
+        return runs
+
+    def _pts(r):
+        return [tuple(p) for p in (r.points if hasattr(r, "points") else r.get("points", []))]
+
+    def _dist(a, b):
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    def _ang(u, v):
+        """Sudut antara dua vektor (derajat)."""
+        nu = (u[0] ** 2 + u[1] ** 2) ** 0.5
+        nv = (v[0] ** 2 + v[1] ** 2) ** 0.5
+        if nu < 1e-9 or nv < 1e-9:
+            return 0.0
+        cos = max(-1.0, min(1.0, (u[0] * v[0] + u[1] * v[1]) / (nu * nv)))
+        return math.degrees(math.acos(cos))
+
+    items = []
+    for r in runs:
+        pts = _pts(r)
+        if len(pts) < 2:
+            continue
+        length = sum(_dist(a, b) for a, b in zip(pts, pts[1:]))
+        items.append({"pts": pts, "len": length, "axis": getattr(r, "axis", "poly")})
+
+    def _join(pa, pb, ai, bi):
+        """Gabung dua polyline pada ujung yang dipilih; kembalikan titik urut.
+
+        Hasilnya harus selalu berupa jalur menerus dari ujung-luar a -> titik
+        sambung -> ujung-luar b:
+          * ai == -1, bi == 0  : a sudah menuju sambung, b berangkat dari sambung
+                                 -> pa + pb
+          * ai == -1, bi == -1 : keduanya menuju sambung; b harus dibalik dulu
+                                 -> pa + reversed(pb)
+          * ai == 0,  bi == 0  : keduanya berangkat dari sambung; a harus dibalik
+                                 -> reversed(pa) + pb
+          * ai == 0,  bi == -1 : a dibalik agar menuju sambung, b sudah menuju
+                                 sambung lalu dibalik agar berangkat darinya
+                                 -> reversed(pa) + reversed(pb)
+        """
+        if ai == -1 and bi == 0:
+            return pa + pb
+        if ai == -1 and bi == -1:
+            return pa + list(reversed(pb))
+        if ai == 0 and bi == 0:
+            return list(reversed(pa)) + pb
+        return list(reversed(pa)) + list(reversed(pb))     # ai == 0 and bi == -1
+
+    merged = True
+    while merged:
+        merged = False
+        n = len(items)
+        for i in range(n):
+            if merged or i >= len(items):
+                break
+            for j in range(n):
+                if i == j or i >= len(items) or j >= len(items):
+                    continue
+                a, b = items[i], items[j]
+                # Aturan penggabungan:
+                #   * dua pipa PANJANG yang belum pernah bergabung -> TOLAK
+                #     (itu dua pipa berbeda, bukan satu bengkokan);
+                #   * sisanya boleh, asalkan ujung yang disambung belum pernah
+                #     dipakai (`used_ends`) sehingga tidak terbentuk zig-zag;
+                #   * sudut sambungan harus wajar (dicek di bawah).
+                # Item hasil gabungan (`grew`) tetap boleh menyerap potongan
+                # berikutnya — inilah yang membuat rantai
+                # header -> siku -> vertikal tersambung utuh.
+                a_open = a.get("grew") or a["len"] <= max_len_px
+                b_open = b.get("grew") or b["len"] <= max_len_px
+                if not (a_open or b_open):
+                    continue
+                pa, pb = a["pts"], b["pts"]
+                for ai, ap in ((0, pa[0]), (-1, pa[-1])):
+                    for bi, bp in ((0, pb[0]), (-1, pb[-1])):
+                        if _dist(ap, bp) > max_gap_px:
+                            continue
+                        # arah datang (menuju titik sambung pada a) dan arah
+                        # lanjut (meninggalkan titik sambung pada b)
+                        if ai == -1:
+                            va = (pa[-1][0] - pa[-2][0], pa[-1][1] - pa[-2][1])
+                        else:
+                            va = (pa[0][0] - pa[1][0], pa[0][1] - pa[1][1])
+                        if bi == 0:
+                            vb = (pb[1][0] - pb[0][0], pb[1][1] - pb[0][1])
+                        else:
+                            vb = (pb[-2][0] - pb[-1][0], pb[-2][1] - pb[-1][1])
+                        turn = _ang(va, vb)
+                        if turn > max_turn_deg:
+                            continue                    # bengkokan tak wajar -> tolak
+                        new_pts = _join(pa, pb, ai, bi)
+                        dedup = [new_pts[0]]
+                        for p in new_pts[1:]:
+                            if _dist(p, dedup[-1]) > 1e-6:
+                                dedup.append(p)
+                        # Rapikan hanya "ekor" di UJUNG: bila titik terakhir kembali
+                        # ke titik sebelumnya (A->B->A), buang titik terakhir itu.
+                        # Pembersihan di TENGAH dilarang — titik tengah yang berimpit
+                        # adalah sambungan siku yang sah (header -> siku -> vertikal).
+                        while len(dedup) >= 3 and _dist(dedup[-1], dedup[-3]) <= 1e-6:
+                            dedup.pop(-1)
+                            dedup.pop(-1)
+                        if len(dedup) < 2:
+                            continue
+                        new_len = sum(_dist(x, y) for x, y in zip(dedup, dedup[1:]))
+                        axis = a["axis"] if a["axis"] == b["axis"] else "poly"
+                        items[i] = {"pts": dedup, "len": new_len, "axis": axis,
+                                    "grew": True}
+                        items.pop(j)
+                        merged = True
+                        break
+                    if merged:
+                        break
+
+    out = []
+    for it in items:
+        out.append(PipeRun([tuple(p) for p in it["pts"]], it["axis"]))
     return out
 
 

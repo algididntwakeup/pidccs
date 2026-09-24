@@ -166,27 +166,47 @@ def test_paddleocr_extractor_single_pass():
 
 
 def test_skeleton_tracer_extracts_graph_edges():
-    """Verify B.08 extracts graph edges for a line, T-junction, and diagonal."""
+    """Verify B.08 extracts graph edges for a line, T-junction, and diagonal.
+
+    Sejak `bridge_polyline_elbows` aktif, cabang yang MENEMPEL pada ujung run lain
+    digabung menjadi satu polyline (pipa bercabang = satu jaringan, supaya klik-ID
+    menyala sepanjang pipa). Karena itu jumlah run tidak lagi sama dengan jumlah
+    goresan di gambar; yang diperiksa adalah ARAH yang terwakili.
+    """
     import cv2
 
     img = np.full((240, 320, 3), 255, dtype=np.uint8)
-    cv2.line(img, (30, 120), (290, 120), (0, 0, 0), 5)
-    cv2.line(img, (160, 120), (160, 45), (0, 0, 0), 5)
-    cv2.line(img, (35, 205), (125, 150), (0, 0, 0), 5)
+    cv2.line(img, (30, 120), (290, 120), (0, 0, 0), 5)      # horizontal utama
+    cv2.line(img, (160, 120), (160, 45), (0, 0, 0), 5)      # cabang vertikal (T)
+    cv2.line(img, (35, 205), (125, 150), (0, 0, 0), 5)      # diagonal
 
     runs = SkeletonLineTracer(min_length_px=25).trace(img, dpi=350)
 
-    assert len(runs) >= 3
-    assert any(run["axis"] == "h" for run in runs)
-    assert any(run["axis"] == "v" for run in runs)
-    assert any(run["axis"] == "d" for run in runs)
+    # Goresan boleh tergabung menjadi polyline; yang penting SEMUA arah terwakili.
+    axes = set()
+    for run in runs:
+        axes.add(run["axis"])
+        pts = run["points"]
+        for a, b in zip(pts, pts[1:]):
+            dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+            if dx > dy * 1.5:
+                axes.add("h")
+            elif dy > dx * 1.5:
+                axes.add("v")
+            elif dx > 0 and dy > 0:
+                axes.add("d")
+    assert "h" in axes, f"horizontal run missing (axes={axes})"
+    assert "v" in axes, f"vertical/T-branch missing (axes={axes})"
+    assert "d" in axes, f"diagonal missing (axes={axes})"
+
+    assert len(runs) >= 1
     for run in runs:
         assert len(run["points"]) >= 2
         assert run["x1"] <= run["x2"]
         assert run["y1"] <= run["y2"]
         assert run["underline"] is False
 
-    print(f"[PASS] Skeleton graph tracer extracted {len(runs)} runs with H/V/diagonal axes!")
+    print(f"[PASS] Skeleton graph tracer extracted {len(runs)} runs covering axes {sorted(axes)}!")
 
 
 def test_crossover_and_t_junction_classification():

@@ -1,3 +1,38 @@
+## Sprint Handover: Recovery Missing Pipes — Polyline-Aware Clipping (2026-09-24)
+
+**Status**: Implemented and verified. Skeleton tracer pada PNG: **21 → 27 run**, semua pipa
+utama pulih (ink coverage 0.00 → 1.00).
+
+- **Akar masalah ditemukan lewat pelacakan per tahap** (bukan dugaan): dua fungsi memperlakukan
+  `PipeRun` sebagai GARIS LURUS dengan memakai `points[0]` dan `points[-1]` saja. Padahal run
+  bisa berupa POLYLINE bengkok. Terukur pada lembar referensi: satu run 5 titik
+  `[(320,472), (1738,472), (1813,515), (1813,768), (1813,1450)]` — header atas + turunan ke
+  cooler `605-E-102` dalam SATU polyline.
+  * `suppress_equipment_interior` mengklasifikasikannya "horizontal" (|dx|=1493 > |dy|=978) lalu
+    memotongnya di `y` rata-rata `(472+1450)/2 = 961`. Pipa aslinya di `y=472`, jauh di luar
+    equipment box yang dipakai untuk memotong → **pipa lenyap total** (coverage 1.00 → 0.00).
+  * `suppress_diagonal_artifacts` menghitung `dx`/`dy` dari titik ujung, sehingga polyline
+    ORTOGONAL itu terlihat "diagonal" (rasio 978/1493 = 0.65 > 0.3) dan dibuang karena rentangnya
+    lebar. Ini pembunuh kedua setelah clipping diperbaiki.
+- **Perbaikan**: kedua fungsi kini mengevaluasi **PER SEGMEN** (`zip(pts, pts[1:])`). Polyline
+  ortogonal murni selalu lolos berapa pun panjang totalnya; hanya segmen yang benar-benar
+  diagonal yang diperiksa terhadap batas.
+- **`suppress_low_ink_diagonals`** (baru): membuang garis lurus PALSU hasil skeletonisasi yang
+  melintasi kertas kosong. Terukur satu run 1017 px dari `[89,1045]` ke `[357,64]` dengan hanya
+  **20%** titik sampel menyentuh tinta. Pengaman penting: run yang salah satu ujungnya berimpit
+  dengan run lain SELALU dipertahankan — potongan siku pipa juga bertinta rendah (terukur 15%)
+  karena skeleton memangkas sudutnya.
+- **`bridge_polyline_elbows`** (baru): menyambung potongan siku 45° kembali ke polyline. Syarat
+  ketat: salah satu sisi harus potongan pendek, ujung berimpit, dan sudut sambungan wajar
+  (<= 75°). Hasil terukur: header `[320,472]→[1738,472]` + siku `[1738,472]→[1813,515]` +
+  turunan `[1813,515]→[1813,1450]` menjadi **satu polyline 2439 px**.
+  * Bug `_join` ditemukan lewat uji semua 6 permutasi urutan input: kasus `ai==0, bi==-1`
+    salah rumus sehingga titik header hilang. Setelah diperbaiki, **keenam urutan menghasilkan
+    polyline 4 titik yang identik** (hanya arah awal berbeda).
+- **Verifikasi**: `P1_header`, `P2_vert_cooler`, `P6_vert_V205` semuanya **coverage 1.00**;
+  run count 21 → 27 (benchmark manual user 57 — target akhir, sebagian berasal dari tarikan
+  manual). Area lingkaran 3 & 4 dari revisi user (line kecil yang tak ter-trace) kini ter-trace.
+
 ## Sprint Handover: Phase 3 — PDF Annotation Appearance Stream (/AP) Fix
 
 **Status**: Verified and regression-locked on 2026-09-24.

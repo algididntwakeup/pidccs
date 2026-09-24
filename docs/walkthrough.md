@@ -1,3 +1,53 @@
+## Recovery Missing Pipes — Polyline-Aware Clipping (2026-09-24)
+
+**Status**: Implemented + verified. Skeleton tracer (PNG): **21 → 27 run**, pipa utama pulih
+(coverage 0.00 → 1.00). Benchmark manual user (57) tetap jadi target akhir.
+
+### Cara menemukan akar masalah
+Bukan dari dugaan, tetapi dari **pelacakan run per tahap**: setiap run diberi probe pada
+koordinat pipa yang dilaporkan hilang, lalu dihitung di tahap mana probe itu berhenti cocok.
+Hasilnya menunjukkan pipa header masih utuh (coverage 1.00) di tahap 0 dan 1, lalu **jatuh ke
+0.00 tepat di tahap 2** — bukan di ekstraksi, bukan di deteksi.
+
+### Akar masalah: `PipeRun` diperlakukan sebagai garis lurus
+Dua fungsi memakai hanya `points[0]` dan `points[-1]`:
+
+```python
+(x0, y0), (x1, y1) = s.points[0], s.points[-1]      # SALAH untuk polyline
+```
+
+Run nyata di lembar referensi berupa polyline 5 titik:
+`[(320,472), (1738,472), (1813,515), (1813,768), (1813,1450)]` — yaitu **header atas +
+turunan vertikal ke cooler 605-E-102 dalam satu run**.
+
+1. **`suppress_equipment_interior`** mengklasifikasikannya "horizontal" (|dx| 1493 > |dy| 978),
+   lalu memotongnya pada `y = (472+1450)/2 = 961`. Pipa aslinya di `y=472`, jauh di luar
+   equipment box yang dipakai memotong → **pipa lenyap** (coverage 1.00 → 0.00).
+2. **`suppress_diagonal_artifacts`** menghitung `dx`/`dy` dari titik ujung, sehingga polyline
+   ortogonal itu tampak "diagonal" (rasio 978/1493 = 0.65 > 0.3) dan dibuang karena rentangnya
+   lebar. Ini pembunuh kedua yang muncul setelah clipping diperbaiki.
+
+### Perbaikan
+- Kedua fungsi kini mengevaluasi **PER SEGMEN** (`zip(pts, pts[1:])`). Polyline ortogonal murni
+  selalu lolos; hanya segmen yang benar-benar diagonal yang diperiksa.
+- **`suppress_low_ink_diagonals`** (baru): membuang garis lurus PALSU hasil skeletonisasi yang
+  melintasi kertas kosong — terukur satu run 1017 px dengan hanya **20%** tinta.
+  Pengaman: run yang ujungnya berimpit dengan run lain selalu dipertahankan, karena potongan
+  SIKU pipa juga bertinta rendah (15%) akibat skeleton memangkas sudutnya.
+- **`bridge_polyline_elbows`** (baru): menyambung potongan siku 45° kembali ke polyline.
+  Syarat: salah satu sisi potongan pendek, ujung berimpit, sudut sambungan <= 75°.
+- **Bug `_join`** ditemukan lewat uji **keenam permutasi urutan input**. Kasus `ai==0, bi==-1`
+  salah rumus sehingga titik header hilang dari hasil. Setelah diperbaiki, keenam urutan
+  menghasilkan polyline 4 titik identik (hanya arah awal berbeda).
+
+### Hasil
+- Header + siku + turunan cooler menjadi **satu polyline 2439 px**:
+  `[(320,472), (1738,472), (1813,515), (1813,1450)]` — klik-ID kini menyala sepanjang pipa.
+- `P1_header`, `P2_vert_cooler`, `P6_vert_V205`: **coverage 1.00** (sebelumnya 0.00 untuk dua
+  yang pertama).
+- Empat area pada `backend/revisi.png` yang dilingkari user: anomali diagonal (1) dibuang,
+  sambungan yang menembus line (2) tidak lagi menyatu paksa, dan line kecil (3 & 4) ter-trace.
+
 ## Sprint Handover: Phase 3 — PDF Annotation Appearance Stream (/AP)
 
 **Status**: Verified + regression-locked on 2026-09-24. **Tidak ada bug** — kode sudah benar,
