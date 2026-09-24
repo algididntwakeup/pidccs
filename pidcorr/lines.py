@@ -1431,14 +1431,33 @@ def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
             return list(reversed(pa)) + pb
         return list(reversed(pa)) + list(reversed(pb))     # ai == 0 and bi == -1
 
+    cell = max(1.0, float(max_gap_px))
+    def _cell(p): return (int(p[0] // cell), int(p[1] // cell))
+    def _grid():
+        g = defaultdict(list)
+        for k, it in enumerate(items):
+            if it is None: continue
+            for ep in (it["pts"][0], it["pts"][-1]): g[_cell(ep)].append(k)
+        return g
+    def _cands(k, n, g):
+        it = items[k]
+        if it is None: return ()
+        out = set()
+        for ep in (it["pts"][0], it["pts"][-1]):
+            cx, cy = _cell(ep)
+            for dx in (-1,0,1):
+                for dy in (-1,0,1): out.update(g.get((cx+dx,cy+dy), ()))
+        return sorted(j for j in out if j != k and j < n)
+
     merged = True
     while merged:
         merged = False
         n = len(items)
+        grid = _grid()
         for i in range(n):
             if merged or i >= len(items):
                 break
-            for j in range(n):
+            for j in _cands(i, n, grid):
                 if i == j or i >= len(items) or j >= len(items):
                     continue
                 a, b = items[i], items[j]
@@ -1493,6 +1512,7 @@ def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
                                     "grew": True}
                         items.pop(j)
                         merged = True
+                        grid = _grid()
                         break
                     if merged:
                         break

@@ -1,3 +1,21 @@
+## HANDOFF UPDATE — Bridge Bottleneck Ditemukan dan Dipatch (2026-09-24)
+
+**Temuan terukur**: `test_snap_on_fixture_pdf` memakan 2076s dari total 2377s.
+Fixture berukuran 4967×3509. Profil tahap menunjukkan Zhang-Suen 20.1s,
+`graph_segments` 12.0s, `suppress_box_outlines` 5.4s; tahap setelahnya berjalan,
+lalu `bridge_polyline_elbows` menjadi bottleneck karena struktur `while merged` +
+loop pasangan `i/j` yang secara efektif O(N³) pada ~1.611 runs.
+
+**Perbaikan yang sekarang diterapkan**: `bridge_polyline_elbows` memakai spatial grid
+pada endpoint, sehingga hanya pasangan dalam `max_gap_px` yang diuji; grid direbuild
+setelah merge. Permutasi keenam input elbow tetap menghasilkan satu polyline 4 titik,
+dan trace referensi tetap menghasilkan **38 runs** dalam ~9s. Full test suite belum
+dijalankan ulang setelah patch ini; jangan mengulang suite penuh sebelum ada waktu.
+
+Sisa: ukur test tunggal `test_snap_on_fixture_pdf` dengan timeout pendek, lalu
+jalankan suite penuh hanya jika bottleneck sudah terbukti turun.
+
+## CATATAN HANDOFF SESI 2026-09-24 (baca ini dulu sebelum lanjut)
 ## CATATAN HANDOFF SESI 2026-09-24 (baca ini dulu sebelum lanjut)
 
 **Commit**: `47406ba` — sudah masuk, test suite 72 passed.
