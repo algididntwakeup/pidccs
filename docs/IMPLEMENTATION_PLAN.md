@@ -1,3 +1,90 @@
+## Sprint Handover: Zhang-Suen Skeleton + Nozzle Recovery (2026-09-24, lanjutan)
+
+**Status**: Implemented and verified. Ink coverage 6 area revisi user: **23.8% → 39.6%**
+(+15.9%), run count 27 → 38. Semua temuan datang dari **pengukuran**, bukan dugaan.
+
+### Bug #1 — Skeletonizer menghasilkan rantai 2px (akar masalah terbesar)
+`_morphological_skeleton` memakai `MORPH_OPEN` dengan elemen **3×3**. Garis setebal 2px
+TIDAK BISA di-open oleh elemen 3×3, sehingga `img - open(img)` selalu kosong: skeleton
+berhenti bertambah dan sisa garis ditelan erode **tanpa pernah masuk skeleton**.
+Terukur: **90%** piksel skeleton hasil cara lama BUKAN rantai-2 (degenerat), dan
+`_graph_segments` — yang mengharapkan degree-2 chain — menganggap hampir semua piksel
+sebagai NODE → nol edge → nol run.
+
+**Bukti terukur** (garis yang dilaporkan user, coverage sebelum → sesudah):
+
+| Garis | Cara lama | Zhang-Suen |
+|---|---|---|
+| R5 x=2162 (bentuk Π) | 0.00 | **1.00** |
+| R1 y=607 | 0.03 | **1.00** |
+| R6 y=2247 | 0.07 | **1.00** |
+| R6 y=2274 | 0.07 | **1.00** |
+| R4 y=990 | 0.23 | **0.97** |
+| R5 y=1448 | 0.12 | **1.00** |
+
+**Perbaikan**: ganti ke **Zhang-Suen thinning** (berhenti lebih awal saat tidak ada
+perubahan; buffer padding di-alokasi sekali). Biaya 0.3s → ~10s per lembar; **diterima
+atas permintaan user** ("ganti langsung, terima 10s"). Cara lama tetap disimpan sebagai
+`_morphological_skeleton_legacy` untuk referensi/benchmark.
+Efek: piksel degenerat 90% → **2.1%**, run 27 → 35 (dengan fix lain: 38).
+
+### Bug #2 — Chaining menyisipkan titik mundur (zig-zag di UI)
+Dua perbaikan pada `_graph_segments`:
+- **`_order_edge_pixels`** (baru): urutan piksel sebuah edge dulu dihitung dari
+  proyeksi dot-product ke sumbu `p0→p1`. Untuk edge diagonal/tangga banyak piksel
+  berbagi skalar proyeksi sama sehingga urutannya **sembarang** dan polyline bisa
+  mundur-maju. Sekarang memakai **path walk 8-connected** yang sesungguhnya.
+- **`_prune_chain`** (baru): buang titik berdekatan (< 3px) dan titik yang membalik
+  arah (cos < −0.5). Pipa proses tidak pernah berbalik; siku 90° punya cos 0 sehingga
+  aman.
+- **Anti-loop chaining**: `walked_nodes` mencegah rantai masuk kembali ke junction yang
+  sudah dilewati. Terukur: run dengan backtrack **7 → 3**.
+
+### Bug #3 — `suppress_box_outlines` menilai polyline dari 2 titik ujung
+Sama seperti bug polyline-clipping sebelumnya: run dinilai dari `points[0]` dan
+`points[-1]` saja, lalu **seluruh run** dibuang begitu satu sisi terlihat menempel tepi
+kotak. Terukur: pipa `605-2"-GR-CSA-077` (277px) dan pipa 2" dengan vlinderklep +
+cabang 3/4" (240px) lenyap total.
+**Perbaikan**: penilaian **PER SEGMEN**; hanya segmen yang benar-benar berimpit tepi
+kotak dibuang, sisa polyline dipertahankan. Ditambah **guard**: segmen yang menyentuh
+simbol terdeteksi (valve/instrument/equipment) tidak pernah dibuang — pipa yang
+tersambung ke vlinderklep bukan garis outline kotak.
+
+### Bug #4 — Equipment blackout memakan dinding + nozzle
+Versi lama mem-blackout **seluruh** bbox equipment (inset 4px saja), padahal bbox
+detektor jauh lebih longgar daripada badan alat: bbox `605-E-102` (674,769)-(999,1238)
+juga mencakup pipa 10" di atasnya dan instrumentasi di bawahnya. Terukur: pipa nozzle
+ber-label 10" (249px), 4" (249px), 2" (240px) lenyap sebelum skeletonisasi.
+**Perbaikan** (sesuai keputusan user "trace nozzle saja, jangan isi vessel"): di dalam
+bbox, **pertahankan hanya garis H/V panjang yang MENYENTUH tepi bbox** (dinding alat +
+nozzle yang menembus dinding), buang sisanya (label, simbol instrumen, pengaduk). Cara
+ini tidak bergantung pada bentuk alat sehingga tetap benar walau bbox longgar.
+
+### Verifikasi yang membuktikan filter lain BENAR
+Audit per-lini memisahkan bug nyata dari perilaku yang memang diinginkan:
+
+| Garis | Apa itu sebenarnya | Filter | Oordeel |
+|---|---|---|---|
+| R6 y=2247, y=2274 | **tekenraam grid** (kolom 6,7,8,9) | furngeo/margin | ✅ benar dibuang |
+| R3 x=1435 | **wand vat 605-V-205** | equip | ✅ benar dibuang |
+| R6 y=2053 | pipa `605-2"-GR-CSA-077` | boxout | ❌ bug — diperbaiki |
+| R4 y=1144 | pipa 2" + vlinderklep + 3/4" tak | boxout | ❌ bug — diperbaiki |
+| R1 y=799 | nozzle 10" vat 605-E-102 | equip | ❌ bug — diperbaiki |
+
+### Hasil
+| Area | Sebelum | Sesudah | Delta |
+|---|---|---|---|
+| R1 | 11.9% | 34.0% | +22.1% |
+| R2 | 88.1% | 100.0% | +11.9% |
+| R3 | 54.5% | 54.5% | ±0 |
+| R4 | 17.8% | 35.7% | +17.9% |
+| R5 | 19.3% | 60.4% | +41.0% |
+| R6 | 14.5% | 29.0% | +14.5% |
+| **TOTAL** | **23.8%** | **39.6%** | **+15.9%** |
+
+Catatan: sisa persentase bukan pipa (teks label, simbol instrumen, dinding vat, grid
+tekenraam) — terverifikasi lewat crop visual per-lini.
+
 ## Sprint Handover: Recovery Missing Pipes — Polyline-Aware Clipping (2026-09-24)
 
 **Status**: Implemented and verified. Skeleton tracer pada PNG: **21 → 27 run**, semua pipa

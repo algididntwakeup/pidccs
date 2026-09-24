@@ -794,33 +794,101 @@ def detect_boxes(img_bgr, dpi=350, min_side_pt=7, max_area_frac=0.35):
     return boxes
 
 
-def suppress_box_outlines(segs, boxes, dpi=350, band_pt=7):
+def suppress_box_outlines(segs, boxes, dpi=350, band_pt=7, detections=None):
     """Buang segmen yang BERIMPIT tepi kotak (dari detect_boxes) — garis outline kotak,
-    BUKAN pipa. Ketat: segmen sejajar tepi (H utk tepi atas/bawah, V utk kiri/kanan),
-    berada dalam pita tipis di tepi itu, DAN span-nya TERKANDUNG dalam sisi kotak. Pipa yg
-    MENEMBUS kotak (tegak lurus tepi, atau menjulur keluar span) tetap aman."""
+    BUKAN pipa.
+
+    POLYLINE-AWARE + GUARD (bug yang diperbaiki 2026-09-24):
+    Versi lama menilai sebuah run dari DUA TITIK UJUNG saja
+    (``points[0]`` dan ``points[-1]``). Untuk polyline bengkok itu salah dua kali:
+      1. run yang menikung bisa tampak "sejajar tepi kotak" padahal badan
+         polyline-nya sama sekali bukan garis kotak;
+      2. begitu satu sisi polyline dinilai menempel tepi, SELURUH run dibuang —
+         termasuk sisi lain yang pipa asli.
+    Terukur pada lembar referensi: pipa ``605-2"-GR-CSA-077`` (277 px) dan pipa 2"
+    dengan vlinderklep + cabang 3/4" (240 px) lenyap total (coverage 1.00 -> 0.00).
+
+    Sekarang penilaian dilakukan PER SEGMEN (``zip(pts, pts[1:])``) dan hanya
+    segmen yang benar-benar berimpit tepi kotak yang dibuang; sisa polyline
+    dipertahankan sebagai run terpisah.
+
+    Tambahan GUARD: segmen yang MENYENTUH simbol terdeteksi (valve/instrument/
+    equipment) TIDAK PERNAH dibuang — pipa yang tersambung ke vlinderklep tidak
+    mungkin garis outline kotak. Tanpa guard ini, pipa yang kebetulan sejajar tepi
+    kotak detektor ikut terbuang.
+    """
     if not boxes:
         return segs
     b = band_pt * dpi / 72.0
-    out = []
-    for s in segs:
-        (x0, y0), (x1, y1) = s.points[0], s.points[-1]
-        horiz = abs(y1 - y0) <= b
-        vert = abs(x1 - x0) <= b
-        on_edge = False
+
+    # Kotak pelindung dari simbol terdeteksi (valve/instrument/equipment).
+    guards = []
+    for d in (detections or []):
+        if d.get("coarse") in ("equipment", "valve", "instrument"):
+            gx0, gy0 = float(d.get("x1", 0)), float(d.get("y1", 0))
+            gx1, gy1 = float(d.get("x2", 0)), float(d.get("y2", 0))
+            if gx1 > gx0 and gy1 > gy0:
+                guards.append((gx0 - b, gy0 - b, gx1 + b, gy1 + b))
+
+    def _touches_guard(ax, ay, bx, by):
+        sx0, sy0 = min(ax, bx), min(ay, by)
+        sx1, sy1 = max(ax, bx), max(ay, by)
+        for gx0, gy0, gx1, gy1 in guards:
+            if sx1 >= gx0 and sx0 <= gx1 and sy1 >= gy0 and sy0 <= gy1:
+                return True
+        return False
+
+    def _on_box_edge(ax, ay, bx, by):
+        """Apakah segmen tunggal ini berimpit tepi salah satu kotak?"""
+        horiz = abs(by - ay) <= b
+        vert = abs(bx - ax) <= b
+        if not (horiz or vert):
+            return False
         for bx0, by0, bx1, by1 in boxes:
             if horiz:
-                ym = (y0 + y1) / 2
+                ym = (ay + by) / 2
                 if ((abs(ym - by0) <= b or abs(ym - by1) <= b)
-                        and min(x0, x1) >= bx0 - b and max(x0, x1) <= bx1 + b):
-                    on_edge = True; break
+                        and min(ax, bx) >= bx0 - b and max(ax, bx) <= bx1 + b):
+                    return True
             if vert:
-                xm = (x0 + x1) / 2
+                xm = (ax + bx) / 2
                 if ((abs(xm - bx0) <= b or abs(xm - bx1) <= b)
-                        and min(y0, y1) >= by0 - b and max(y0, y1) <= by1 + b):
-                    on_edge = True; break
-        if not on_edge:
-            out.append(s)
+                        and min(ay, by) >= by0 - b and max(ay, by) <= by1 + b):
+                    return True
+        return False
+
+    out = []
+    for s in segs:
+        pts = [tuple(p) for p in s.points]
+        if len(pts) < 2:
+            continue
+        # Cari bagian (segmen) yang TIDAK berimpit tepi kotak, lalu rakit ulang
+        # menjadi polyline. Pipa yang menembus kotak akan tetap utuh; outline
+        # kotak yang benar-benar sejajar tepi tetap terbuang.
+        keep_runs = []
+        cur = [pts[0]]
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            if _on_box_edge(ax, ay, bx, by) and not _touches_guard(ax, ay, bx, by):
+                if len(cur) >= 2:
+                    keep_runs.append(cur)
+                cur = [(bx, by)]
+            else:
+                if cur[-1] != (ax, ay):
+                    cur.append((ax, ay))
+                cur.append((bx, by))
+        if len(cur) >= 2:
+            keep_runs.append(cur)
+
+        for kp in keep_runs:
+            if len(kp) < 2:
+                continue
+            L = sum(math.hypot(b2[0] - a2[0], b2[1] - a2[1]) for a2, b2 in zip(kp, kp[1:]))
+            if L < 1.0:
+                continue
+            dx = abs(kp[-1][0] - kp[0][0])
+            dy = abs(kp[-1][1] - kp[0][1])
+            axis = "h" if dx >= 3 * dy else ("v" if dy >= 3 * dx else "d")
+            out.append(PipeRun(kp, axis))
     return out
 
 

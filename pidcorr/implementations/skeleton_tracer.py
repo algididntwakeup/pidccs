@@ -26,8 +26,113 @@ from ..lines import (
 )
 
 
+# Kernel pembobot bit untuk kode 8-tetangga Zhang-Suen.
+# Urutan bit mengikuti P2..P9 (searah jarum jam mulai dari atas):
+#   P2=kiri-atas, P3=atas, P4=kanan-atas, P5=kanan,
+#   P6=kanan-bawah, P7=bawah, P8=kiri-bawah, P9=kiri
+_NEIGHBOUR_CODE_KERNEL = np.array([[128, 1, 2],
+                                   [64, 0, 4],
+                                   [32, 16, 8]], dtype=np.float32)
+
+_ZS_LUT_CACHE = None
+
+
+def _zhang_suen_luts():
+    """Bangun 2 lookup-table (step 0 & 1) untuk Zhang-Suen; cache sekali per proses.
+
+    Semua kondisi Zhang-Suen (2 <= B <= 6, A == 1, dan dua kondisi penghapusan
+    per step) hanya bergantung pada 8 bit tetangga, jadi bisa dipra-hitung untuk
+    256 kemungkinan. Saat runtime tinggal `lut[code]` — jauh lebih murah daripada
+    mengevaluasi ~14 operasi numpy per piksel per iterasi.
+    """
+    global _ZS_LUT_CACHE
+    if _ZS_LUT_CACHE is not None:
+        return _ZS_LUT_CACHE
+    luts = []
+    for step in (0, 1):
+        lut = np.zeros(256, dtype=bool)
+        for code in range(256):
+            p = [(code >> i) & 1 for i in range(8)]
+            B = sum(p)
+            if B < 2 or B > 6:
+                continue
+            seq = p + [p[0]]
+            A = sum(1 for i in range(8) if seq[i] == 0 and seq[i + 1] == 1)
+            if A != 1:
+                continue
+            P2, P3, P4, P5, P6, P7, P8, P9 = p
+            if step == 0:
+                if P2 * P4 * P6:
+                    continue
+                if P4 * P6 * P8:
+                    continue
+            else:
+                if P2 * P4 * P8:
+                    continue
+                if P2 * P6 * P8:
+                    continue
+            lut[code] = True
+        luts.append(lut)
+    _ZS_LUT_CACHE = luts
+    return luts
+
 def _morphological_skeleton(binary_img: np.ndarray) -> np.ndarray:
-    """Fast morphological skeletonization using an 8-connected kernel."""
+    """Skeletonisasi Zhang-Suen -- menghasilkan rantai 1px yang bersih.
+
+    LATAR BELAKANG (bug yang diperbaiki 2026-09-24):
+    Implementasi lama memakai morphological opening dengan elemen 3x3::
+
+        while True:
+            cv2.morphologyEx(img, MORPH_OPEN, element_3x3, temp)
+            skel |= img - temp
+            img = erode(img, element_3x3)
+
+    Cara itu HANYA benar untuk objek yang lebih tebal dari elemen structuring-nya.
+    Garis setebal 2px TIDAK BISA di-open oleh elemen 3x3, sehingga ``img - open(img)``
+    selalu kosong dan ``skel`` berhenti bertambah; sisa garis 2px lalu ditelan erode
+    dan hilang tanpa pernah masuk skeleton. Terukur pada lembar referensi: 90% piksel
+    skeleton hasil cara lama BUKAN rantai-2 (degenerat), dan ``_graph_segments`` yang
+    mengharapkan degree-2 chain menganggap hampir semua piksel sebagai NODE -> nol edge
+    -> nol run. Akibatnya garis pipa yang jelas-jelas ada di gambar tidak pernah
+    muncul sebagai run (terukur: garis 209-896px dengan coverage 0.00).
+
+    Zhang-Suen thinning bekerja dari tepi ke dalam dan menjamin rantai 1px untuk
+    SEMUA ketebalan (1px..Npx), sehingga ``_graph_segments`` menerima graf yang benar.
+    Terukur: piksel degenerat turun 90% -> 2.1%, dan garis target 0.00 -> 1.00.
+
+    Biaya: ~10s untuk lembar 3309x2339 (vs 0.3s cara lama). Diterima karena akurasi
+    jauh lebih penting bagi user; loop berhenti lebih awal saat tidak ada perubahan.
+    """
+    img = (binary_img > 0).astype(np.uint8)
+    if not img.any():
+        return (img * 255).astype(np.uint8)
+
+    luts = _zhang_suen_luts()
+    padded = np.pad(img, 1)
+    center = padded[1:-1, 1:-1]
+    max_iter = max(img.shape) + 8
+    for _ in range(max_iter):
+        changed = False
+        for lut in luts:
+            # filter2D menghitung kode 8-tetangga (bit P2..P9) dalam SATU call C++,
+            # menggantikan 8 pergeseran + 7 penjumlahan numpy per iterasi.
+            code = cv2.filter2D(padded, cv2.CV_8U, _NEIGHBOUR_CODE_KERNEL,
+                                borderType=cv2.BORDER_CONSTANT)[1:-1, 1:-1]
+            cond = lut[code] & (center > 0)
+            if cond.any():
+                center[cond] = 0
+                changed = True
+        if not changed:
+            break
+
+    return (center * 255).astype(np.uint8)
+
+def _morphological_skeleton_legacy(binary_img: np.ndarray) -> np.ndarray:
+    """Skeletonisasi morphological lama (elemen 3x3) -- DISIMPAN untuk referensi/benchmark.
+
+    JANGAN dipakai di pipeline: hanya benar untuk objek > 2px dan menghasilkan
+    skeleton degenerat (lihat penjelasan di ``_morphological_skeleton``).
+    """
     skel = np.zeros(binary_img.shape, dtype=np.uint8)
     element = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     temp = np.empty(binary_img.shape, dtype=np.uint8)
@@ -43,7 +148,6 @@ def _morphological_skeleton(binary_img: np.ndarray) -> np.ndarray:
             break
 
     return skel
-
 
 def _find_junctions_and_endpoints(skel: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Classify skeleton pixels by 8-connected degree."""
@@ -143,6 +247,99 @@ def _classify_junction_geometry(
     return "complex", [], edges
 
 
+def _order_edge_pixels(pts, p0, p1):
+    """Urutkan piksel sebuah edge menjadi jalur kontinu p0 -> p1 (8-connected walk).
+
+    Mengapa perlu: urutan berbasis proyeksi sumbu (dot product) tidak menentukan
+    urutan yang unik untuk edge diagonal/tangga - banyak piksel punya skalar
+    proyeksi yang sama, dan urutan antar-piksel itu menjadi sembarang. Akibatnya
+    polyline yang dibentuk bisa melompat dan berbalik arah (backtracking), yang
+    lalu tampak di UI sebagai garis zig-zag.
+
+    Walk ini selalu memilih tetangga 8-connected yang belum dikunjungi, dengan
+    prioritas yang paling dekat ke tujuan p1. Kalau tidak ada tetangga tersisa
+    (edge terputus karena skeleton bertingkat), lompat ke piksel belum dikunjungi
+    terdekat agar semua piksel tetap terwakili.
+    """
+    if not pts:
+        return []
+    remaining = set((int(x), int(y)) for x, y in pts)
+    if not remaining:
+        return []
+
+    def _nearest_to(target, candidates):
+        tx, ty = target
+        return min(candidates, key=lambda p: (p[0] - tx) ** 2 + (p[1] - ty) ** 2)
+
+    cur = _nearest_to(p0, remaining)
+    order = [cur]
+    remaining.discard(cur)
+    while remaining:
+        nbrs = [q for q in ((cur[0] + dx, cur[1] + dy)
+                            for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy)
+                if q in remaining]
+        nxt = _nearest_to(p1, nbrs) if nbrs else _nearest_to(cur, remaining)
+        order.append(nxt)
+        remaining.discard(nxt)
+        cur = nxt
+    return order
+
+def _prune_chain(points, min_step=3.0, cos_thresh=-0.5):
+    """Bersihkan polyline dari lompatan/zig-zag hasil chaining di junction.
+
+    Setelah skeletonisasi Zhang-Suen, tiap piksel jalur punya tepat 2 tetangga,
+    sehingga `_graph_segments` bisa mengurai graf dengan benar. Namun pada
+    junction, pasangan "through" hasil `_classify_junction_geometry` kadang
+    menyambung edge yang arahnya berbalik. Akibatnya polyline hasil chaining
+    berisi titik yang mundur-maju, yang di UI tampak sebagai garis zig-zag.
+
+    Terukur sebelum prune (lembar referensi): 7 dari 35 run punya backtrack,
+    contoh nyata
+        [(1712,1838), (1962,1838), (1960,1838), (1712,1802)]
+    -- titik ketiga mundur 2px lalu titik keempat melompat balik ke kiri.
+
+    Dua pembersihan, diulang sampai stabil:
+      1. buang titik yang jaraknya < `min_step` dari titik sebelumnya
+         (node cluster selebar 2-3px menghasilkan titik nyaris kembar),
+      2. buang titik yang membuat arah BERBALIK (cosinus sudut < `cos_thresh`).
+
+    Pipa proses TIDAK PERNAH berbalik arah, jadi ambang -0.5 aman: siku 90
+    derajat punya cos 0 dan tetap dipertahankan.
+    """
+    if len(points) < 3:
+        return points
+    out = list(points)
+    changed = True
+    while changed and len(out) >= 3:
+        changed = False
+        # 1) buang titik berdekatan
+        dedup = [out[0]]
+        for p in out[1:]:
+            if math.hypot(p[0] - dedup[-1][0], p[1] - dedup[-1][1]) >= min_step:
+                dedup.append(p)
+        if len(dedup) != len(out):
+            out = dedup
+            changed = True
+        # 2) buang titik yg membalik arah
+        i = 1
+        while i < len(out) - 1:
+            a, b, c = out[i - 1], out[i], out[i + 1]
+            v1 = (b[0] - a[0], b[1] - a[1])
+            v2 = (c[0] - b[0], c[1] - b[1])
+            d1 = math.hypot(v1[0], v1[1])
+            d2 = math.hypot(v2[0], v2[1])
+            if d1 < 1e-9 or d2 < 1e-9:
+                out.pop(i)
+                changed = True
+                continue
+            cos = (v1[0] * v2[0] + v1[1] * v2[1]) / (d1 * d2)
+            if cos < cos_thresh:
+                out.pop(i)
+                changed = True
+                continue
+            i += 1
+    return out if len(out) >= 2 else points
+
 def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
     """Extract and chain skeleton graph edges into continuous PipeRun polylines (Task B.08 + B.09).
 
@@ -205,13 +402,14 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
         sub_ys, sub_xs = np.where(edge_labels[by:by + bh, bx:bx + bw] == edge_id)
         pts = list(zip((sub_xs + bx).tolist(), (sub_ys + by).tolist()))
 
-        # Order edge pixels from p0 to p1
-        vx, vy = p1[0] - p0[0], p1[1] - p0[1]
-        vlen = math.hypot(vx, vy)
-        if vlen > 0:
-            nx, ny = vx / vlen, vy / vlen
-            pts.sort(key=lambda pt: (pt[0] - p0[0]) * nx + (pt[1] - p0[1]) * ny)
-        ordered_points = [p0] + [(int(x), int(y)) for x, y in pts[::max(1, len(pts)//15)]] + [p1]
+        # Order edge pixels from p0 to p1 dengan PATH WALK 8-connected.
+        # Proyeksi ke sumbu p0->p1 (cara lama) salah untuk edge diagonal/tangga:
+        # banyak piksel berbagi skalar proyeksi yang sama sehingga urutannya acak
+        # dan polyline hasilnya bisa mundur-maju (backtracking). Terukur: satu run
+        # berisi 18 titik dengan lompatan (832,646)->(932,665)->(939,656)->(900,661)
+        # ->(895,646) -> jalur tidak kontinu.
+        walk = _order_edge_pixels(pts, p0, p1)
+        ordered_points = [p0] + [(int(x), int(y)) for x, y in walk] + [p1]
 
         # Simplify collinear points along edge
         pts_arr = np.array(ordered_points, dtype=np.int32).reshape((-1, 1, 2))
@@ -273,6 +471,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
         # Extend forward from second_node
         curr_e_id = edge_id
         curr_node = curr_edge["second_node"]
+        walked_nodes = {curr_edge["first_node"], curr_edge["second_node"]}
         while (curr_node, curr_e_id) in through_map:
             next_e_id = through_map[(curr_node, curr_e_id)]
             if next_e_id in visited_edges:
@@ -285,6 +484,12 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
             chain.extend(next_pts[1:])
             curr_node = next_edge["second_node"] if next_edge["first_node"] == curr_node else next_edge["first_node"]
             curr_e_id = next_e_id
+            # Anti-loop: pipa proses tidak pernah mengelilingi simpul yang sama.
+            # Tanpa ini, chaining bisa masuk kembali ke junction yang sudah
+            # dilewati dan menyisipkan titik mundur (zig-zag di UI).
+            if curr_node in walked_nodes:
+                break
+            walked_nodes.add(curr_node)
 
         # Extend backward from first_node
         curr_e_id = edge_id
@@ -301,6 +506,12 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
             chain = prev_pts[:-1] + chain
             curr_node = prev_edge["first_node"] if prev_edge["second_node"] == curr_node else prev_edge["second_node"]
             curr_e_id = prev_e_id
+            # Anti-loop (lihat penjelasan di arah forward).
+            if curr_node in walked_nodes:
+                break
+            walked_nodes.add(curr_node)
+
+        chain = _prune_chain(chain)
 
         tot_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(chain, chain[1:]))
         if tot_len < min_length:
@@ -421,17 +632,57 @@ class SkeletonLineTracer(BaseLineTracer):
                 dil_y2 = min(H, ty2 + dil_r)
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
-        # 2. Equipment Interior Masking: Blackout total interior of equipment boxes (vessels, tanks, etc.)
-        # Keep an inset of 4px so the outer physical perimeter remains for snapping (snap-to-edge)
+        # 2. Equipment Interior Masking: buang ISI equipment, PERTAHANKAN dinding + nozzle.
+        #
+        # Bug yang diperbaiki 2026-09-24: versi lama mem-blackout SELURUH bbox equipment
+        # (hanya menyisakan inset 4px), padahal bbox detektor jauh lebih longgar daripada
+        # badan alat - bbox 605-E-102 (674,769)-(999,1238) misalnya juga mencakup pipa
+        # 10" di atasnya (y=799) dan instrumentasi di bawahnya. Akibatnya pipa nozzle
+        # yang NYATA dan ber-label (terukur: pipa 10" 249px, 4" 249px, 2" 240px) lenyap
+        # sebelum skeletonisasi - coverage 1.00 -> 0.00.
+        #
+        # Ganti pendekatan: di dalam bbox equipment, PERTAHANKAN hanya garis H/V panjang
+        # yang MENYENTUH tepi bbox (dinding alat + nozzle yang menembus dinding), dan
+        # buang sisanya (teks label, simbol instrumen, pengaduk). Cara ini tidak
+        # bergantung pada bentuk alat (silinder, kubus, heat exchanger) sehingga tetap
+        # benar walau bbox longgar.
         eq_margin = max(3, int(4 * (dpi / 350.0)))
+        min_struct = max(24, int(60 * (dpi / 350.0)))   # ~7.6mm pada lembar 420mm
         for d in (detections or []):
-            if d.get("coarse") == "equipment":
-                ex1 = int(d.get("x1", 0)) + eq_margin
-                ey1 = int(d.get("y1", 0)) + eq_margin
-                ex2 = int(d.get("x2", 0)) - eq_margin
-                ey2 = int(d.get("y2", 0)) - eq_margin
-                if ex2 > ex1 and ey2 > ey1:
-                    clean_binary[ey1:ey2, ex1:ex2] = 0
+            if d.get("coarse") != "equipment":
+                continue
+            ex1 = int(d.get("x1", 0)) + eq_margin
+            ey1 = int(d.get("y1", 0)) + eq_margin
+            ex2 = int(d.get("x2", 0)) - eq_margin
+            ey2 = int(d.get("y2", 0)) - eq_margin
+            if ex2 <= ex1 or ey2 <= ey1:
+                continue
+            roi = clean_binary[ey1:ey2, ex1:ex2]
+            if not roi.any():
+                continue
+            # Garis panjang H/V (kandidat dinding / nozzle)
+            horiz = cv2.morphologyEx(
+                roi, cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (min_struct, 1)))
+            vert = cv2.morphologyEx(
+                roi, cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_struct)))
+            keep = cv2.bitwise_or(horiz, vert)
+            if not keep.any():
+                roi[:] = 0
+                continue
+            # Hanya simpan yang MENYENTUH tepi bbox -> dinding & nozzle.
+            # (Garis panjang di TENGAH alat, mis. batang pengaduk, tidak menyentuh
+            #  tepi sehingga ikut terbuang - sesuai permintaan: jangan isi vessel.)
+            n_lab, lab = cv2.connectedComponents((keep > 0).astype(np.uint8), 8)
+            border_ids = set(lab[0, :].tolist()) | set(lab[-1, :].tolist())
+            border_ids |= set(lab[:, 0].tolist()) | set(lab[:, -1].tolist())
+            border_ids.discard(0)
+            if border_ids:
+                mask = np.isin(lab, list(border_ids))
+            else:
+                mask = np.zeros_like(keep, bool)
+            roi[~mask] = 0
 
         # 3. Furniture Masking (title block, drawing border, notes tables)
         if furniture:
@@ -482,7 +733,9 @@ class SkeletonLineTracer(BaseLineTracer):
 
         boxes = detect_boxes(img_bgr)
         if boxes:
-            filtered = suppress_box_outlines(filtered, boxes)
+            # detections diperlukan agar pipa yang tersambung ke valve/instrument
+            # TIDAK ikut terbuang (guard di dalam suppress_box_outlines).
+            filtered = suppress_box_outlines(filtered, boxes, detections=detections)
 
         # Drafting suppressions & header continuity
         filtered = suppress_drawing_margins(filtered, page_wh=(W, H))

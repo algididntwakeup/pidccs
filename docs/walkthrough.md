@@ -1,3 +1,86 @@
+## Zhang-Suen Skeleton + Nozzle Recovery (2026-09-24)
+
+**Status**: Implemented + verified. Ink coverage 6 area revisi user: **23.8% → 39.6%**
+(+15.9%), run count 27 → 38.
+
+### Cara menemukan akar masalah
+Bukan dari dugaan, tetapi dari **pengukuran berlapis**: (1) deteksi piksel merah tanda
+tangan user di screenshot untuk mendapat koordinat 6 lingkaran yang tepat, (2) pisahkan
+piksel biru (hasil trace) dari hitam (garis asli) untuk mendapat daftar garis yang belum
+ter-trace secara kuantitatif, (3) lacak tiap garis **per tahap filter** untuk tahu filter
+mana yang membunuhnya, (4) crop visual per-lini untuk memutuskan apakah filter itu benar.
+
+### Bug #1 — Skeletonizer menghasilkan rantai 2px (paling besar)
+`_morphological_skeleton` memakai `MORPH_OPEN` elemen **3×3**. Garis setebal 2px TIDAK
+BISA di-open oleh elemen 3×3, jadi `img - open(img)` selalu kosong: skeleton berhenti
+bertambah dan sisa garis ditelan erode **tanpa pernah masuk skeleton**. Terukur: **90%**
+piksel skeleton BUKAN rantai-2, dan `_graph_segments` yang mengharapkan degree-2 chain
+menganggap hampir semua piksel sebagai NODE → nol edge → nol run.
+
+```python
+# CARA LAMA (salah untuk garis 2px)
+while True:
+    cv2.morphologyEx(img, MORPH_OPEN, element_3x3, temp)
+    skel |= img - temp          # <-- selalu kosong utk garis 2px
+    img = erode(img, element_3x3)
+
+# CARA BARU: Zhang-Suen thinning (bekerja dari tepi ke dalam, 1px utk semua ketebalan)
+```
+
+Bukti terukur (coverage garis yang dilaporkan user):
+
+| Garis | Cara lama | Zhang-Suen |
+|---|---|---|
+| R5 x=2162 (Π) | 0.00 | **1.00** |
+| R1 y=607 | 0.03 | **1.00** |
+| R6 y=2247 / y=2274 | 0.07 | **1.00** |
+| R4 y=990 | 0.23 | **0.97** |
+
+Piksel degenerat 90% → **2.1%**. Biaya 0.3s → ~10s/lembar (diterima atas keputusan user).
+Cara lama disimpan sebagai `_morphological_skeleton_legacy` untuk benchmark.
+
+### Bug #2 — Zig-zag dari chaining
+- **`_order_edge_pixels`** (baru): dulu urutan piksel edge dihitung dari proyeksi
+  dot-product ke `p0→p1`; untuk edge diagonal banyak piksel punya skalar sama sehingga
+  urutannya sembarang → polyline mundur-maju. Sekarang **path walk 8-connected**.
+- **`_prune_chain`** (baru): buang titik berdekatan (<3px) dan titik yang membalik arah
+  (cos < −0.5). Siku 90° punya cos 0 → aman.
+- **Anti-loop**: `walked_nodes` mencegah rantai kembali ke junction yang sudah dilewati.
+  Terukur: run dengan backtrack **7 → 3**.
+
+### Bug #3 — `suppress_box_outlines` menilai dari 2 titik ujung
+Bug yang sama seperti polyline-clipping: run dinilai dari `points[0]`/`points[-1]`, lalu
+**seluruh run** dibuang begitu satu sisi tampak menempel tepi kotak. Terukur: pipa
+`605-2"-GR-CSA-077` (277px) dan pipa 2" + vlinderklep + cabang 3/4" (240px) lenyap.
+**Perbaikan**: per-segmen; sisa polyline dipertahankan. Ditambah guard: segmen yang
+menyentuh valve/instrument/equipment tidak pernah dibuang.
+
+### Bug #4 — Equipment blackout memakan dinding + nozzle
+Blackout seluruh bbox equipment (inset 4px) memakan nozzle ber-label karena bbox detektor
+jauh lebih longgar dari badan alat. Terukur: pipa 10"/4"/2" (249/249/240px) lenyap.
+**Perbaikan** (keputusan user: "trace nozzle saja, jangan isi vessel"): pertahankan hanya
+garis H/V panjang yang **menyentuh tepi bbox** (dinding + nozzle), buang sisanya.
+
+### Filter yang terbukti BENAR (bukan bug)
+| Garis | Apa sebenarnya | Filter | Oordeel |
+|---|---|---|---|
+| R6 y=2247, y=2274 | tekenraam grid (kolom 6-9) | furngeo/margin | ✅ benar |
+| R3 x=1435 | wand vat 605-V-205 | equip | ✅ benar |
+| R6 y=2053 | pipa `605-2"-GR-CSA-077` | boxout | ❌ bug → fix |
+| R4 y=1144 | pipa 2" + klep + 3/4" tak | boxout | ❌ bug → fix |
+| R1 y=799 | nozzle 10" vat 605-E-102 | equip | ❌ bug → fix |
+
+### Hasil
+| Area | Sebelum | Sesudah | Delta |
+|---|---|---|---|
+| R1 | 11.9% | 34.0% | +22.1% |
+| R2 | 88.1% | 100.0% | +11.9% |
+| R3 | 54.5% | 54.5% | ±0 |
+| R4 | 17.8% | 35.7% | +17.9% |
+| R5 | 19.3% | 60.4% | +41.0% |
+| R6 | 14.5% | 29.0% | +14.5% |
+| **TOTAL** | **23.8%** | **39.6%** | **+15.9%** |
+
 ## Recovery Missing Pipes — Polyline-Aware Clipping (2026-09-24)
 
 **Status**: Implemented + verified. Skeleton tracer (PNG): **21 → 27 run**, pipa utama pulih
