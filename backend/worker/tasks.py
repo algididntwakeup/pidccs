@@ -39,13 +39,40 @@ def publish_progress(redis_client, job_id: str, step: str, current: int, total: 
         pass
 
 
+from contextlib import asynccontextmanager
+from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+
+
+@asynccontextmanager
+async def get_worker_session():
+    """Scoped async DB session using NullPool for Celery worker tasks.
+
+    NullPool guarantees connections are closed cleanly per session and never
+    recycled across different event loops, preventing asyncpg 'Future attached
+    to a different loop' / 'Event loop is closed' errors.
+    """
+    worker_engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+    worker_session_maker = async_sessionmaker(
+        bind=worker_engine,
+        class_=AsyncSession,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    try:
+        async with worker_session_maker() as session:
+            yield session
+    finally:
+        await worker_engine.dispose()
+
+
 async def _save_detection_to_db(job_id: str, sheet_id: str, result: dict, systems: list):
     """Persist completed detection and API RP 970 circuits to database."""
-    from app.db.session import AsyncSessionLocal
     from app.models.sheet import Sheet
     from app.models.job import Job
 
-    async with AsyncSessionLocal() as session:
+    async with get_worker_session() as session:
         sheet = await session.get(Sheet, sheet_id)
         if sheet:
             sheet.result_json = result
@@ -65,11 +92,10 @@ async def _save_detection_to_db(job_id: str, sheet_id: str, result: dict, system
 
 async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: dict):
     """Persist completed enrichment results to database without overwriting original run geometries."""
-    from app.db.session import AsyncSessionLocal
     from app.models.sheet import Sheet
     from app.models.job import Job
 
-    async with AsyncSessionLocal() as session:
+    async with get_worker_session() as session:
         sheet = await session.get(Sheet, sheet_id)
         if sheet:
             res = dict(sheet.result_json or {})
@@ -96,12 +122,11 @@ async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: 
 
 async def _save_error_to_db(job_id: str, sheet_id: str, err_msg: str):
     """Persist job failure to database."""
-    from app.db.session import AsyncSessionLocal
     from app.models.sheet import Sheet
     from app.models.job import Job
 
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_worker_session() as session:
             sheet = await session.get(Sheet, sheet_id)
             if sheet:
                 sheet.status = "error"
@@ -210,9 +235,8 @@ def enrich_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
         publish_progress(r_client, job_id, "starting", 0, 100, "Starting sheet enrichment (OCR & YOLO)...")
 
         async def _get_existing_runs():
-            from app.db.session import AsyncSessionLocal
             from app.models.sheet import Sheet
-            async with AsyncSessionLocal() as session:
+            async with get_worker_session() as session:
                 sheet = await session.get(Sheet, sheet_id)
                 if sheet and sheet.result_json:
                     return sheet.result_json.get("runs", [])
