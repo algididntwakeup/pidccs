@@ -68,6 +68,7 @@ pnpm-debug.log*
 data/storage/
 data/uploads/
 /storage/
+Contoh P&ID/
 
 # ==========================================
 # Environment Variables & Secrets

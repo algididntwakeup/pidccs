@@ -1643,8 +1643,8 @@ export default function ProjectWorkspace() {
             title="Pindai OCR line number dan simbol YOLO pada sheet yang sudah di-trace"
           >
             <Sparkles className="w-3.5 h-3.5 fill-current text-amber-300" />
-            <span className="hidden sm:inline">🤖 Pindai Simbol & Teks (Enrich)</span>
-            <span className="sm:hidden">🤖 Enrich</span>
+            <span className="hidden sm:inline"> Pindai Simbol & Teks (Enrich)</span>
+            <span className="sm:hidden"> Enrich</span>
           </button>
         )}
 
@@ -1691,7 +1691,7 @@ export default function ProjectWorkspace() {
                     <Zap className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
                     <div>
                       <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                        <span>⚡ Trace Lines Only</span>
+                        <span> Trace Lines Only</span>
                         <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-1.5 py-0.5 rounded">Cepat &lt;5s</span>
                       </div>
                       <div className="text-[11px] text-slate-500 mt-0.5">Ekstrak garis pipa saja. Lewati OCR & YOLO.</div>
@@ -1708,7 +1708,7 @@ export default function ProjectWorkspace() {
                     <Bot className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
                     <div>
                       <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                        <span>🤖 Trace Full</span>
+                        <span> Trace Full</span>
                         <span className="bg-indigo-100 text-indigo-800 text-[10px] font-bold px-1.5 py-0.5 rounded">AI & OCR</span>
                       </div>
                       <div className="text-[11px] text-slate-500 mt-0.5">Lengkap: Tracing pipa + OCR 3-angle + Simbol YOLO.</div>
