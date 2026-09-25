@@ -923,8 +923,10 @@ export default function ProjectWorkspace() {
   // the persisted sheet status says a job is running. The persisted-status branch
   // is what guarantees a spinner is shown after a Back-and-reopen remount (the
   // local `detecting` flag is lost on navigation, but server `status` is not).
+  // The top progress bar always shows when detecting; the full-page overlay
+  // only shows on the first detection (when no result exists yet).
   const showDetectionProgress =
-    (detecting || activeSheet?.status === 'detecting') && !result;
+    detecting || activeSheet?.status === 'detecting';
   useEffect(() => {
     if (!viewerRef.current || !activeSheet || !projectId) return;
     const viewer = viewerRef.current;
