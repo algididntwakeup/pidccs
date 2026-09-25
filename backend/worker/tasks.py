@@ -14,7 +14,7 @@ if _ROOT_DIR not in sys.path:
 
 from worker.celery_app import celery_app
 from app.config import settings
-from app.services.detection_service import execute_sheet_detection
+from app.services.detection_service import execute_sheet_detection, execute_sheet_enrichment
 from app.services.grouping_service import GroupingService
 from app.services.tile_service import TileService
 
@@ -63,6 +63,37 @@ async def _save_detection_to_db(job_id: str, sheet_id: str, result: dict, system
         await session.commit()
 
 
+async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: dict):
+    """Persist completed enrichment results to database without overwriting original run geometries."""
+    from app.db.session import AsyncSessionLocal
+    from app.models.sheet import Sheet
+    from app.models.job import Job
+
+    async with AsyncSessionLocal() as session:
+        sheet = await session.get(Sheet, sheet_id)
+        if sheet:
+            res = dict(sheet.result_json or {})
+            res["symbols"] = enrichment_result.get("symbols", [])
+            res["piping_ids"] = enrichment_result.get("piping_ids", [])
+            res["runs"] = enrichment_result.get("runs", res.get("runs", []))
+            if "furniture" in enrichment_result:
+                res["furniture"] = enrichment_result["furniture"]
+            if "conn_points" in enrichment_result:
+                res["conn_points"] = enrichment_result["conn_points"]
+            if "opcs" in enrichment_result:
+                res["opcs"] = enrichment_result["opcs"]
+            sheet.result_json = res
+            sheet.status = "detected"
+        job = await session.get(Job, job_id)
+        if job:
+            job.status = "completed"
+            job.progress_pct = 100
+            job.step = "completed"
+            job.message = "Pindai simbol dan teks (Enrich) selesai."
+            job.completed_at = datetime.utcnow()
+        await session.commit()
+
+
 async def _save_error_to_db(job_id: str, sheet_id: str, err_msg: str):
     """Persist job failure to database."""
     from app.db.session import AsyncSessionLocal
@@ -86,7 +117,7 @@ async def _save_error_to_db(job_id: str, sheet_id: str, err_msg: str):
 
 
 @celery_app.task(bind=True, name="detect_sheet_task")
-def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi: int = 350, rot: int = 0):
+def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi: int = 350, rot: int = 0, mode: str = "full"):
     """Celery background task for P&ID digitization & systemization."""
     r_client = None
     try:
@@ -99,17 +130,16 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
 
     try:
         # 1. Execute CV / ML detection pipeline
-        publish_progress(r_client, job_id, "starting", 0, 100, "Starting P&ID pipeline...")
+        publish_progress(r_client, job_id, "starting", 0, 100, f"Starting P&ID pipeline (mode: {mode})...")
         result = execute_sheet_detection(
             file_rel_path=file_rel_path,
             dpi=dpi,
             rot=rot,
             progress_callback=_progress_cb,
+            mode=mode,
         )
 
         # 2. API RP 970 Systems & Circuits (Temporarily disabled in Phase B.5 pivot)
-        # publish_progress(r_client, job_id, "grouping", 92, 100, "Pengelompokan Corrosion System & Circuit...")
-        # systems = GroupingService.compute_circuits(result)
         systems = []
 
         # 3. Generate DZI pyramid tiles in background
@@ -122,8 +152,7 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
                 dpi=dpi,
                 rot=rot,
             )
-        except Exception as e:
-            # Tiling failure is non-fatal to detection results
+        except Exception:
             pass
 
         # 4. Save results to PostgreSQL database
@@ -133,7 +162,7 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
         except Exception as db_err:
             print(f"[Worker] DB commit error: {db_err}")
 
-        publish_progress(r_client, job_id, "completed", 100, 100, "Digitasi & Sistemisasi selesai.")
+        publish_progress(r_client, job_id, "completed", 100, 100, "Digitasi selesai.")
 
         return {
             "status": "completed",
@@ -151,3 +180,63 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
             pass
         publish_progress(r_client, job_id, "failed", 0, 100, f"Error: {err_msg}")
         raise exc
+
+
+@celery_app.task(bind=True, name="enrich_sheet_task")
+def enrich_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi: int = 350, rot: int = 0):
+    """Celery background task for sheet enrichment (AI OCR & YOLO symbols)."""
+    r_client = None
+    try:
+        r_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    except Exception:
+        r_client = None
+
+    def _progress_cb(step: str, current: int, total: int, msg: str):
+        publish_progress(r_client, job_id, step, current, total, msg)
+
+    try:
+        publish_progress(r_client, job_id, "starting", 0, 100, "Starting sheet enrichment (OCR & YOLO)...")
+
+        async def _get_existing_runs():
+            from app.db.session import AsyncSessionLocal
+            from app.models.sheet import Sheet
+            async with AsyncSessionLocal() as session:
+                sheet = await session.get(Sheet, sheet_id)
+                if sheet and sheet.result_json:
+                    return sheet.result_json.get("runs", [])
+                return []
+
+        existing_runs = asyncio.run(_get_existing_runs())
+
+        enrichment_result = execute_sheet_enrichment(
+            file_rel_path=file_rel_path,
+            existing_runs=existing_runs,
+            dpi=dpi,
+            rot=rot,
+            progress_callback=_progress_cb,
+        )
+
+        publish_progress(r_client, job_id, "saving", 98, 100, "Menyimpan hasil enrichment ke database...")
+        try:
+            asyncio.run(_save_enrichment_to_db(job_id, sheet_id, enrichment_result))
+        except Exception as db_err:
+            print(f"[Worker] DB commit error in enrichment: {db_err}")
+
+        publish_progress(r_client, job_id, "completed", 100, 100, "Pindai simbol dan teks (Enrich) selesai.")
+
+        return {
+            "status": "completed",
+            "job_id": job_id,
+            "sheet_id": sheet_id,
+            "enrichment": enrichment_result,
+        }
+
+    except Exception as exc:
+        err_msg = str(exc)
+        try:
+            asyncio.run(_save_error_to_db(job_id, sheet_id, err_msg))
+        except Exception:
+            pass
+        publish_progress(r_client, job_id, "failed", 0, 100, f"Error: {err_msg}")
+        raise exc
+

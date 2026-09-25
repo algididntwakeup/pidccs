@@ -51,17 +51,50 @@ export async function uploadSheet(projectId: string, file: File, dpi: number = 3
   return res.json();
 }
 
-export async function triggerDetection(projectId: string, sheetId: string, dpi?: number, rot?: number) {
+export async function triggerDetection(
+  projectId: string,
+  sheetId: string,
+  dpi?: number,
+  rot?: number,
+  mode: 'full' | 'lines_only' = 'full'
+): Promise<JobResponse> {
+  const params = new URLSearchParams();
+  if (dpi) params.append('dpi', dpi.toString());
+  if (rot !== undefined) params.append('rot', rot.toString());
+  params.append('mode', mode);
+
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/detect?${params}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, dpi, rot }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to trigger detection');
+  }
+  return res.json();
+}
+
+export async function triggerEnrichment(
+  projectId: string,
+  sheetId: string,
+  dpi?: number,
+  rot?: number
+): Promise<JobResponse> {
   const params = new URLSearchParams();
   if (dpi) params.append('dpi', dpi.toString());
   if (rot !== undefined) params.append('rot', rot.toString());
 
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/detect?${params}`, {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/enrich?${params}`, {
     method: 'POST',
   });
-  if (!res.ok) throw new Error('Failed to trigger detection');
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to trigger enrichment');
+  }
   return res.json();
 }
+
 
 export async function fetchJob(jobId: string): Promise<JobResponse> {
   const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`);

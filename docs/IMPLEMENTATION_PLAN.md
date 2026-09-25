@@ -1,3 +1,53 @@
+## HANDOFF UPDATE — Decoupled AI Pipeline: Fast Lines-Only Mode & On-Demand Enrichment (2026-09-25)
+
+**Pemisahan Pipeline Deteksi menjadi Dua Tahap:**
+Pengguna kini tidak lagi dipaksa menunggu proses OCR 3-sudut dan YOLO Tiled (memakan waktu > 60 detik) saat hanya membutuhkan tracing jalur pipa. Pipeline didecouple menjadi:
+1. **Fast Mode ("Line Only"):** Hanya mengekstrak garis (Vector CAD atau Skeleton Raster). OCR dan YOLO di-bypass total (< 5 detik).
+2. **Enrich Mode ("Run AI OCR & Symbols"):** On-demand execution di navbar untuk menjalankan OCR + YOLO pada sheet yang sudah di-trace, menghubungkan tag line number ke pipa eksisting, dan mengidentifikasi simbol tanpa merusak ID run atau editan manual user.
+
+### 1. Orchestrator Updates (`pidcorr/orchestrator.py`)
+- Modifikasi `PipelineOrchestrator.run(mode: Literal["full", "lines_only"] = "full")`:
+  - Jika `mode == "lines_only"`: bypass Stage 1 (OCR), Stage 2 (YOLO), Furniture detection, dan Association. Langsung menjalankan Stage 4 (Line Tracing — Vector CAD / Morphology Raster).
+  - Mengembalikan `runs` dengan `symbols: []`, `piping_ids: []`, `conn_points: []`, `furniture: []`.
+- Metode baru `PipelineOrchestrator.run_enrichment(img_bgr, existing_runs, image_path, dpi, rot, progress)`:
+  - Menjalankan OCR (PipingID + candidate tokens).
+  - Menjalankan YOLO Symbol Detection & classification (valve subtype & ISA instrument function/loop).
+  - Melakukan `associate(pids, run_objs, img_bgr, dpi)`.
+  - Meng-update atribut label pada run eksisting dengan menjaga ID run (`run.id`) tetap identik serta **menjaga label editan manual user** (`manual: true` tidak ditimpa).
+  - Menjalankan deteksi connection points (spec break) dan Off-Page Connectors (OPCs).
+  - Mengembalikan `symbols`, `furniture`, `piping_ids`, `runs`, `conn_points`, dan `opcs`.
+
+### 2. Backend REST API & Background Workers (`backend/app/routers/detection.py`, `backend/worker/tasks.py`)
+- Schema `DetectRequest` diperbarui untuk menerima field opsional `mode: Literal["full", "lines_only"] = "full"`.
+- Endpoint `POST /api/v1/projects/{project_id}/sheets/{sheet_id}/detect` dan alias `POST /api/v1/projects/{project_id}/detect` meneruskan parameter `mode` ke Celery worker atau fallback background thread.
+- Endpoint baru `POST /api/v1/projects/{project_id}/sheets/{sheet_id}/enrich` dan alias `POST /api/v1/projects/{project_id}/enrich`:
+  - Membaca `result_json` sheet saat ini (yang berisi data `runs` hasil tracing sebelumnya).
+  - Memanggil Celery task baru `enrich_sheet_task` atau thread background `_run_enrichment_in_background`.
+  - Worker memanggil `detection_service.execute_sheet_enrichment()` yang memicu `orchestrator.run_enrichment()`.
+  - Hasil enrichment digabungkan dan disimpan kembali ke database sheet via `_save_enrichment_to_db()`, memicu websocket broadcast / redis pubsub.
+
+### 3. Frontend UI (`frontend/src/app/project/[id]/page.tsx`, `frontend/src/lib/api.ts`)
+- `api.ts`:
+  - `triggerDetection(projectId, sheetId, dpi, rot, mode)` mendukung pengiriman `mode: 'full' | 'lines_only'`.
+  - `triggerEnrichment(projectId, sheetId, dpi, rot)` memanggil endpoint `/enrich`.
+- Top Navbar / Controls:
+  - Tombol **"Detect P&ID"** dilengkapi split dropdown:
+    * ⚡ **Trace Lines Only (Cepat):** Tracing garis instan tanpa OCR / YOLO.
+    * 🤖 **Trace Full (AI & OCR):** Tracing lengkap sekaligus simbol dan OCR.
+  - Tombol baru di navbar atas: **"🤖 Pindai Simbol & Teks (Enrich)"**
+    * Tombol ini aktif saat sheet telah memiliki runs.
+    * Menampilkan live progress banner & percent saat proses enrichment berjalan.
+    * Memuat ulang data sheet secara dinamis setelah selesai tanpa me-reset viewport atau ID garis.
+
+### 4. Verifikasi & Pengujian
+- Unit test terpadu di `backend/tests/test_decoupled_pipeline.py`:
+  - `test_orchestrator_lines_only_mode`: memastikan OCR & YOLO tidak dipanggil saat `mode="lines_only"`.
+  - `test_orchestrator_run_enrichment_preserves_runs`: memvalidasi run ID dan manual edits tetap persisten saat enrichment berjalan.
+  - `test_api_detect_mode_and_enrich_endpoints`: memverifikasi HTTP payload dan background execution untuk endpoint detect (mode) dan enrich.
+- Seluruh 3 test lulus (PASSED).
+
+---
+
 ## HANDOFF UPDATE — ROI Localized OCR & Smart Box-Trace Stitching (2026-09-25)
 
 **Alur Box Trace kini otomatis: tidak ada lagi modal "Replace vs Append".** Saat user melepas

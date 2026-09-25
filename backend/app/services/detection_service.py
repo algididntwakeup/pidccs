@@ -30,16 +30,8 @@ def get_orchestrator():
     return _ORCHESTRATOR
 
 
-def execute_sheet_detection(
-    file_rel_path: str,
-    dpi: int = 350,
-    rot: int = 0,
-    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
-) -> Dict[str, Any]:
-    """Execute the full P&ID digitization pipeline on a sheet.
-
-    progress_callback signature: (step: str, current: int, total: int, message: str)
-    """
+def _resolve_drawing_abs_path(file_rel_path: str) -> str:
+    """Resolve file relative or absolute path to an existing absolute filesystem path."""
     abs_path = storage.get_file_path(file_rel_path)
     if not os.path.exists(abs_path):
         if os.path.isabs(file_rel_path) and os.path.exists(file_rel_path):
@@ -48,7 +40,10 @@ def execute_sheet_detection(
             abs_path = os.path.join(_ROOT, file_rel_path)
         else:
             raise FileNotFoundError(f"Drawing file not found at: {abs_path}")
+    return abs_path
 
+
+def _create_progress_reporter(progress_callback: Optional[Callable[[str, int, int, str], None]]):
     def _say(*args, **kwargs):
         if not progress_callback:
             return
@@ -93,6 +88,23 @@ def execute_sheet_detection(
             step, current = "completed", 100
         progress_callback(step, current, total, msg)
 
+    return _say
+
+
+def execute_sheet_detection(
+    file_rel_path: str,
+    dpi: int = 350,
+    rot: int = 0,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+    mode: str = "full",
+) -> Dict[str, Any]:
+    """Execute the P&ID digitization pipeline on a sheet (mode='full' or 'lines_only').
+
+    progress_callback signature: (step: str, current: int, total: int, message: str)
+    """
+    abs_path = _resolve_drawing_abs_path(file_rel_path)
+    _say = _create_progress_reporter(progress_callback)
+
     _say("Memuat citra P&ID...")
     img = load_drawing_image(abs_path, dpi=dpi)
     if rot != 0:
@@ -107,5 +119,38 @@ def execute_sheet_detection(
         dpi=dpi,
         rot=rot,
         progress=_say,
+        mode=mode,
     )
     return result
+
+
+def execute_sheet_enrichment(
+    file_rel_path: str,
+    existing_runs: list,
+    dpi: int = 350,
+    rot: int = 0,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+) -> Dict[str, Any]:
+    """Execute AI enrichment (OCR, YOLO symbol detection, association) on previously traced sheet runs.
+
+    progress_callback signature: (step: str, current: int, total: int, message: str)
+    """
+    abs_path = _resolve_drawing_abs_path(file_rel_path)
+    _say = _create_progress_reporter(progress_callback)
+
+    _say("Memuat citra P&ID untuk enrichment...")
+    img = load_drawing_image(abs_path, dpi=dpi)
+    if rot != 0:
+        img = pipeline.rotate_bgr(img, rot)
+
+    orchestrator = get_orchestrator()
+
+    enrichment_result = orchestrator.run_enrichment(
+        img_bgr=img,
+        existing_runs=existing_runs,
+        image_path=abs_path,
+        dpi=dpi,
+        rot=rot,
+        progress=_say,
+    )
+    return enrichment_result

@@ -86,8 +86,13 @@ def _dedup_tokens(tokens, tol=14.0):
     """Token yang sama muncul berkali-kali (tile overlap x 3 sudut) -> satukan.
     Ambil median bbox tiap klaster supaya koordinat stabil."""
     out = []
-    for tk in sorted(tokens, key=lambda t: (t["t"], t["x1"], t["y1"])):
-        cx, cy = (tk["x1"] + tk["x2"]) / 2, (tk["y1"] + tk["y2"]) / 2
+    safe_tokens = []
+    for tk in tokens:
+        if isinstance(tk, dict):
+            t_val = tk.get("t", tk.get("text", ""))
+            safe_tokens.append({**tk, "t": t_val})
+    for tk in sorted(safe_tokens, key=lambda t: (t.get("t", ""), t.get("x1", 0), t.get("y1", 0))):
+        cx, cy = (tk.get("x1", 0) + tk.get("x2", 0)) / 2, (tk.get("y1", 0) + tk.get("y2", 0)) / 2
         hit = None
         for o in out:
             if o["t"] == tk["t"] and abs(o["cx"] - cx) < tol and abs(o["cy"] - cy) < tol:

@@ -39,6 +39,10 @@ import {
   Palette,
   CheckSquare,
   Square,
+  ChevronDown,
+  Zap,
+  Bot,
+  Sparkles,
 } from 'lucide-react';
 import InteractivePipeCanvas from '@/components/InteractivePipeCanvas';
 import {
@@ -60,6 +64,7 @@ import {
   fetchSystems,
   fetchValidation,
   triggerDetection,
+  triggerEnrichment,
   fetchLatestJobForSheet,
   fetchJob,
   getRawImageUrl,
@@ -126,6 +131,18 @@ export default function ProjectWorkspace() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showDeleteSheetModal, setShowDeleteSheetModal] = useState(false);
   const [deletingSheet, setDeletingSheet] = useState(false);
+  const [detectDropdownOpen, setDetectDropdownOpen] = useState(false);
+  const detectDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (detectDropdownRef.current && !detectDropdownRef.current.contains(event.target as Node)) {
+        setDetectDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // Interactive Pipe Canvas & Tooling state (Phase B.5)
   //
@@ -1240,8 +1257,8 @@ export default function ProjectWorkspace() {
     }
   };
 
-  // Trigger Detection Pipeline
-  const handleRunDetection = async () => {
+  // Trigger Detection Pipeline (fast "lines_only" mode or "full" mode)
+  const handleRunDetection = async (detectionMode: 'full' | 'lines_only' = 'full') => {
     if (!projectId || !activeSheet) return;
     try {
       // Ensure any previous job's resources are torn down first.
@@ -1249,9 +1266,13 @@ export default function ProjectWorkspace() {
 
       setDetecting(true);
       setProgressPct(0);
-      setProgressMsg('Initializing P&ID pipeline...');
+      setProgressMsg(
+        detectionMode === 'lines_only'
+          ? 'Tracing jalur pipa (Fast Line Only)...'
+          : 'Initializing P&ID pipeline...'
+      );
 
-      const job = await triggerDetection(projectId, activeSheet.id);
+      const job = await triggerDetection(projectId, activeSheet.id, undefined, undefined, detectionMode);
 
       // Mark this sheet as locally-attached so the resume effect below does not
       // re-attach to the same in-flight job (it would otherwise create a second
@@ -1271,7 +1292,11 @@ export default function ProjectWorkspace() {
         stopDetectionResources();
         setDetecting(false);
         setProgressPct(100);
-        setProgressMsg('Digitasi & Sistemisasi selesai.');
+        setProgressMsg(
+          detectionMode === 'lines_only'
+            ? 'Tracing garis selesai.'
+            : 'Digitasi & Sistemisasi selesai.'
+        );
         resumedJobRef.current = null;
 
         // Refresh project and active sheet state
@@ -1304,7 +1329,7 @@ export default function ProjectWorkspace() {
           const data = JSON.parse(event.data);
           if (data.pct !== undefined) setProgressPct(data.pct);
           if (data.message) setProgressMsg(data.message);
-          if (data.step === 'completed') {
+          if (data.step === 'completed' || data.pct === 100) {
             onCompleted();
           } else if (data.step === 'failed') {
             stopDetectionResources();
@@ -1317,11 +1342,85 @@ export default function ProjectWorkspace() {
       ws.onerror = () => {
         // WebSocket error, fallback polling continues to monitor progress
       };
-    } catch (err) {
+    } catch (err: any) {
       stopDetectionResources();
       setDetecting(false);
       resumedJobRef.current = null;
-      alert('Failed to trigger detection: ' + err);
+      alert('Failed to trigger detection: ' + (err.message || err));
+    }
+  };
+
+  // Trigger On-Demand AI Enrichment (OCR line numbers & YOLO symbols) on existing runs
+  const handleRunEnrichment = async () => {
+    if (!projectId || !activeSheet) return;
+    try {
+      stopDetectionResources();
+
+      setDetecting(true);
+      setProgressPct(0);
+      setProgressMsg('Memulai pindai AI OCR & Simbol (Enrich)...');
+
+      const job = await triggerEnrichment(projectId, activeSheet.id);
+      resumedJobRef.current = activeSheet.id;
+
+      const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${job.job_id}`;
+      const ws = new WebSocket(wsUrl);
+      detectionWsRef.current = ws;
+
+      let completedHandled = false;
+
+      const onCompleted = () => {
+        if (completedHandled) return;
+        completedHandled = true;
+        stopDetectionResources();
+        setDetecting(false);
+        setProgressPct(100);
+        setProgressMsg('Pindai simbol & teks selesai.');
+        resumedJobRef.current = null;
+
+        fetchProject(projectId).then((p) => {
+          setProject(p);
+          const updatedSheet = p.sheets?.find((sh) => sh.id === activeSheet.id);
+          if (updatedSheet) {
+            setActiveSheet(updatedSheet);
+          }
+        });
+        fetchResult(projectId, activeSheet.id).then(setResult).catch(console.error);
+        fetchSystems(projectId, activeSheet.id).then(setSystems).catch(console.error);
+        fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
+      };
+
+      pollIntervalRef.current = setInterval(async () => {
+        try {
+          const res = await fetchProject(projectId);
+          const s = res.sheets?.find((sh) => sh.id === activeSheet.id);
+          if (s && s.status === 'detected') {
+            onCompleted();
+          }
+        } catch (e) {}
+      }, 3000);
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.pct !== undefined) setProgressPct(data.pct);
+          if (data.message) setProgressMsg(data.message);
+          if (data.step === 'completed' || data.pct === 100) {
+            onCompleted();
+          } else if (data.step === 'failed') {
+            stopDetectionResources();
+            setDetecting(false);
+            alert('Enrichment error: ' + data.message);
+          }
+        } catch (err) {}
+      };
+
+      ws.onerror = () => {};
+    } catch (err: any) {
+      stopDetectionResources();
+      setDetecting(false);
+      resumedJobRef.current = null;
+      alert('Failed to trigger enrichment: ' + (err.message || err));
     }
   };
 
@@ -1529,6 +1628,24 @@ export default function ProjectWorkspace() {
           </button>
         </div>
 
+        {/* Enrich Button (On-Demand AI) right next to Digitize / System mode switcher */}
+        {activeSheet && (
+          <button
+            onClick={handleRunEnrichment}
+            disabled={showDetectionProgress}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition border ${
+              showDetectionProgress
+                ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white shadow-sm hover:shadow'
+            }`}
+            title="Pindai OCR line number dan simbol YOLO pada sheet yang sudah di-trace"
+          >
+            <Sparkles className="w-3.5 h-3.5 fill-current text-amber-300" />
+            <span className="hidden sm:inline">🤖 Pindai Simbol & Teks (Enrich)</span>
+            <span className="sm:hidden">🤖 Enrich</span>
+          </button>
+        )}
+
         {/* Action Controls */}
         <div className="flex items-center space-x-2">
           {/* Import Line List Button */}
@@ -1542,18 +1659,62 @@ export default function ProjectWorkspace() {
           </button>
 
           {activeSheet && (
-            <button
-              onClick={handleRunDetection}
-              disabled={showDetectionProgress}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition ${
-                showDetectionProgress
-                  ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-              }`}
-            >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              <span className="hidden xl:inline">{showDetectionProgress ? 'Detecting...' : 'Detect P&ID'}</span>
-            </button>
+            <div className="relative inline-block text-left" ref={detectDropdownRef}>
+              <button
+                onClick={() => setDetectDropdownOpen(!detectDropdownOpen)}
+                disabled={showDetectionProgress}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition ${
+                  showDetectionProgress
+                    ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                    : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                }`}
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span className="hidden xl:inline">{showDetectionProgress ? 'Detecting...' : 'Detect P&ID'}</span>
+                <ChevronDown className="w-3.5 h-3.5 opacity-80" />
+              </button>
+
+              {detectDropdownOpen && !showDetectionProgress && (
+                <div className="absolute right-0 mt-1.5 w-64 rounded-xl bg-white shadow-xl border border-slate-200 z-50 py-1.5 text-xs animate-in fade-in slide-in-from-top-1 duration-150">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                    Pilih Mode Deteksi
+                  </div>
+                  <button
+                    onClick={() => {
+                      setDetectDropdownOpen(false);
+                      handleRunDetection('lines_only');
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-amber-50/80 text-slate-800 flex items-start space-x-2.5 transition"
+                  >
+                    <Zap className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                        <span>⚡ Trace Lines Only</span>
+                        <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-1.5 py-0.5 rounded">Cepat &lt;5s</span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">Ekstrak garis pipa saja. Lewati OCR & YOLO.</div>
+                    </div>
+                  </button>
+                  <div className="h-px bg-slate-100 my-1" />
+                  <button
+                    onClick={() => {
+                      setDetectDropdownOpen(false);
+                      handleRunDetection('full');
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-indigo-50/80 text-slate-800 flex items-start space-x-2.5 transition"
+                  >
+                    <Bot className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                        <span>🤖 Trace Full</span>
+                        <span className="bg-indigo-100 text-indigo-800 text-[10px] font-bold px-1.5 py-0.5 rounded">AI & OCR</span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">Lengkap: Tracing pipa + OCR 3-angle + Simbol YOLO.</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
           )}
 
           {/* Circuit Overlay Toggle Button in Header Bar */}
