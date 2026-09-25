@@ -94,6 +94,8 @@ async def _run_enrichment_in_background(job_id: str, sheet_id: str, file_path: s
             await session.commit()
 
             existing_runs = sheet.result_json.get("runs", []) if sheet.result_json else []
+            existing_pids = sheet.result_json.get("piping_ids", []) if sheet.result_json else []
+            existing_symbols = sheet.result_json.get("symbols", []) if sheet.result_json else []
 
             loop = asyncio.get_event_loop()
             enrichment_result = await loop.run_in_executor(
@@ -101,6 +103,8 @@ async def _run_enrichment_in_background(job_id: str, sheet_id: str, file_path: s
                 execute_sheet_enrichment,
                 file_path,
                 existing_runs,
+                existing_pids,
+                existing_symbols,
                 dpi,
                 rot,
             )

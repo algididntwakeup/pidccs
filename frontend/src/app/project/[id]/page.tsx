@@ -81,6 +81,7 @@ import {
   updateRunPoints,
   traceRegion,
 } from '@/lib/api';
+import { parsePipingIdTag } from '@/lib/tagParser';
 
 type ViewMode = 'digitize' | 'system' | 'circuit' | 'report' | 'topology';
 
@@ -432,29 +433,116 @@ export default function ProjectWorkspace() {
 
     try {
       const prevRuns = [...result.runs];
-      const prevPids = [...result.piping_ids];
+      const prevPids = [...(result.piping_ids || [])];
+      const targetRun = result.runs[runIdx];
+
       const nextRuns = result.runs.map((r, i) =>
-        i === runIdx ? { ...r, label: trimmed, manual: true } : r
+        i === runIdx ? { ...r, label: trimmed, pid: trimmed, manual: true } : r
       );
-      const nextPids = (result.piping_ids || []).map((p) =>
-        p.run_idx === runIdx && (p.pid || '').toLowerCase() === trimmed.toLowerCase()
-          ? { ...p, pid: trimmed }
-          : p
-      );
+
+      let nextPids = [...prevPids];
+
+      if (!trimmed) {
+        // Tag was cleared by user: detach/unlink piping_id
+        nextPids = nextPids
+          .map((p) => {
+            if (p.run_idx === runIdx) {
+              return { ...p, run_idx: -1, state: 'none' as const };
+            }
+            if (p.extra_runs && p.extra_runs.includes(runIdx)) {
+              return { ...p, extra_runs: p.extra_runs.filter((ri) => ri !== runIdx) };
+            }
+            return p;
+          })
+          .filter((p) => p.run_idx >= 0 || (p.extra_runs && p.extra_runs.length > 0) || !p.manual);
+      } else {
+        const parsed = parsePipingIdTag(trimmed);
+        const existingPidIdx = nextPids.findIndex(
+          (p) => p.run_idx === runIdx || (p.extra_runs && p.extra_runs.includes(runIdx))
+        );
+
+        if (existingPidIdx >= 0) {
+          // Update the already attached PipingID
+          const cur = nextPids[existingPidIdx];
+          nextPids[existingPidIdx] = {
+            ...cur,
+            pid: trimmed,
+            unit: parsed.unit || cur.unit || '',
+            size: parsed.size || cur.size || '',
+            fluid: parsed.fluid || cur.fluid || '',
+            pclass: parsed.pclass || cur.pclass || '',
+            seq: parsed.seq || cur.seq || '',
+            manual: true,
+            state: cur.state === 'none' ? 'attached' : cur.state,
+          };
+        } else {
+          // Check if there is already a PipingID with this exact tag name
+          const sameTagIdx = nextPids.findIndex(
+            (p) => (p.pid || '').trim().toLowerCase() === trimmed.toLowerCase()
+          );
+          if (sameTagIdx >= 0) {
+            const cur = nextPids[sameTagIdx];
+            if (cur.run_idx < 0) {
+              nextPids[sameTagIdx] = {
+                ...cur,
+                run_idx: runIdx,
+                state: 'attached',
+                manual: true,
+                unit: parsed.unit || cur.unit || '',
+                size: parsed.size || cur.size || '',
+                fluid: parsed.fluid || cur.fluid || '',
+                pclass: parsed.pclass || cur.pclass || '',
+                seq: parsed.seq || cur.seq || '',
+              };
+            } else {
+              const extra = new Set(cur.extra_runs || []);
+              extra.add(runIdx);
+              nextPids[sameTagIdx] = {
+                ...cur,
+                extra_runs: Array.from(extra).filter((ri) => ri !== cur.run_idx),
+                manual: true,
+              };
+            }
+          } else {
+            // Create a brand new PipingID
+            const newPid: PipingID = {
+              pid: trimmed,
+              x1: targetRun.x1 ?? 0,
+              y1: targetRun.y1 ?? 0,
+              x2: targetRun.x2 ?? 0,
+              y2: targetRun.y2 ?? 0,
+              unit: parsed.unit,
+              size: parsed.size,
+              fluid: parsed.fluid,
+              pclass: parsed.pclass,
+              seq: parsed.seq,
+              conf: 100,
+              run_idx: runIdx,
+              extra_runs: [],
+              state: 'manual',
+              manual: true,
+            };
+            nextPids.push(newPid);
+          }
+        }
+      }
+
       const updated = await patchResult(projectId, activeSheet.id, {
         ...result,
         runs: nextRuns,
         piping_ids: nextPids,
       });
       pushHistory(
-        `Ubah tag pipa #${runIdx}`,
+        `Ubah tag pipa #${runIdx} (${trimmed || 'kosong'})`,
         prevRuns,
         updated.runs,
         prevPids,
         updated.piping_ids || prevPids
       );
       setResult(updated);
+      setEditingRunLabel(trimmed);
       setHasUnsavedChanges(true);
+      fetchSystems(projectId, activeSheet.id).then(setSystems).catch(() => {});
       showToast(`Tag pipa diperbarui: ${trimmed || '(dikosongkan)'}`, 2500);
     } catch (err: any) {
       alert(err.message || 'Gagal memperbarui tag pipa');
@@ -1100,6 +1188,19 @@ export default function ProjectWorkspace() {
   const handleSelectPipingId = (p: PipingID, idx: number) => {
     setSelectedPidIdx(idx);
     if (!result) return;
+
+    const runIndicesToSelect: number[] = [];
+    if (p.run_idx >= 0) runIndicesToSelect.push(p.run_idx);
+    if (p.extra_runs && p.extra_runs.length > 0) {
+      runIndicesToSelect.push(...p.extra_runs);
+    }
+    if (runIndicesToSelect.length > 0) {
+      setSelectedRunIndices(new Set(runIndicesToSelect));
+      if (p.run_idx >= 0 && result.runs?.[p.run_idx]) {
+        setEditingRunLabel(result.runs[p.run_idx].label || p.pid || '');
+      }
+    }
+
     const allXs = [p.x1, p.x2];
     const allYs = [p.y1, p.y2];
 

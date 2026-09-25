@@ -127,6 +127,8 @@ def execute_sheet_detection(
 def execute_sheet_enrichment(
     file_rel_path: str,
     existing_runs: list,
+    existing_pids: Optional[list] = None,
+    existing_symbols: Optional[list] = None,
     dpi: int = 350,
     rot: int = 0,
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
@@ -148,6 +150,8 @@ def execute_sheet_enrichment(
     enrichment_result = orchestrator.run_enrichment(
         img_bgr=img,
         existing_runs=existing_runs,
+        existing_pids=existing_pids,
+        existing_symbols=existing_symbols,
         image_path=abs_path,
         dpi=dpi,
         rot=rot,

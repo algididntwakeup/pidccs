@@ -345,6 +345,8 @@ class PipelineOrchestrator:
         self,
         img_bgr: np.ndarray,
         existing_runs: List[Any],
+        existing_pids: Optional[List[Dict[str, Any]]] = None,
+        existing_symbols: Optional[List[Dict[str, Any]]] = None,
         image_path: str = "",
         dpi: int = 350,
         rot: int = 0,
@@ -438,6 +440,20 @@ class PipelineOrchestrator:
                 except Exception:
                     pass
 
+        # Preserve existing manual symbols
+        if existing_symbols:
+            manual_syms = [copy.deepcopy(s) for s in existing_symbols if s.get("manual")]
+            if manual_syms:
+                syms = manual_syms + [
+                    s for s in syms
+                    if not any(
+                        s.get("cls") == ms.get("cls") and
+                        abs(s.get("x1", 0) - ms.get("x1", 0)) < 30 and
+                        abs(s.get("y1", 0) - ms.get("y1", 0)) < 30
+                        for ms in manual_syms
+                    )
+                ]
+
         # 4. Normalize existing runs to PipeRun objects for association
         run_objs = []
         for i, r in enumerate(existing_runs):
@@ -467,14 +483,67 @@ class PipelineOrchestrator:
         assoc = associate(pids, run_objs, img_bgr, dpi=dpi) if (pids and run_objs) else []
         run_index = {id(r): i for i, r in enumerate(run_objs)}
 
-        pid_recs = []
+        # Identify which runs have manual labels from user
+        manual_run_idxs = set()
+        for i, r in enumerate(existing_runs):
+            is_man = r.get("manual") if isinstance(r, dict) else getattr(r, "manual", False)
+            lab = r.get("label") if isinstance(r, dict) else getattr(r, "label", "")
+            if is_man and lab:
+                manual_run_idxs.add(i)
+
+        # Preserve existing user manual PipingIDs
+        user_manual_pids = []
+        for ep in (existing_pids or []):
+            is_man = ep.get("manual") or ep.get("run_idx") in manual_run_idxs
+            if is_man:
+                user_manual_pids.append(copy.deepcopy(ep))
+
+        new_pid_recs = []
         run_label_map = {}
         for a in assoc:
             p = pids[a["pid_idx"]]
             ri = run_index.get(id(a["run"]), -1) if a["run"] is not None else -1
             pid_str = getattr(p, "pid", None) if not isinstance(p, dict) else p.get("pid", "")
+
+            # Check if this OCR detection matches an existing manual PID (by run_idx or identical tag)
+            matched_user_pid = None
+            for up in user_manual_pids:
+                if ri >= 0 and up.get("run_idx") == ri:
+                    matched_user_pid = up
+                    break
+                if pid_str and (up.get("pid") or "").strip().lower() == pid_str.strip().lower():
+                    matched_user_pid = up
+                    break
+
+            if matched_user_pid is not None:
+                # OCR read text for a line the user already registered!
+                # Attach the detected bounding box coordinates so the user gets
+                # precise text box highlights on canvas, but KEEP user's manual flags & metadata.
+                px1 = float(getattr(p, "x1", 0) if not isinstance(p, dict) else p.get("x1", 0))
+                px2 = float(getattr(p, "x2", 0) if not isinstance(p, dict) else p.get("x2", 0))
+                py1 = float(getattr(p, "y1", 0) if not isinstance(p, dict) else p.get("y1", 0))
+                py2 = float(getattr(p, "y2", 0) if not isinstance(p, dict) else p.get("y2", 0))
+                if px2 > px1 and py2 > py1:
+                    matched_user_pid["x1"] = px1
+                    matched_user_pid["y1"] = py1
+                    matched_user_pid["x2"] = px2
+                    matched_user_pid["y2"] = py2
+                matched_user_pid["conf"] = max(
+                    int(matched_user_pid.get("conf", 0)),
+                    int(getattr(p, "conf", 100) if not isinstance(p, dict) else p.get("conf", 100))
+                )
+                matched_user_pid["manual"] = True
+                # Do NOT add as duplicate new record
+                continue
+
+            # If this run was already manually labelled by the user with a different tag,
+            # user manual label is Ground Truth: DO NOT overwrite
+            if ri in manual_run_idxs:
+                continue
+
             if ri >= 0 and pid_str:
                 run_label_map[ri] = pid_str
+
             rec = {
                 "pid": pid_str,
                 "x1": float(getattr(p, "x1", 0) if not isinstance(p, dict) else p.get("x1", 0)),
@@ -492,9 +561,11 @@ class PipelineOrchestrator:
                 "manual": False,
                 "extra_runs": [],
             }
-            pid_recs.append(rec)
+            new_pid_recs.append(rec)
 
-        pid_recs = _dedup_pid_recs(pid_recs)
+        # Merge user manual PIDs (first) and newly detected PIDs
+        combined_pids = user_manual_pids + new_pid_recs
+        pid_recs = _dedup_pid_recs(combined_pids)
 
         # 6. Update existing runs with new labels WITHOUT changing run IDs or structure
         updated_runs = copy.deepcopy(existing_runs)
@@ -506,9 +577,11 @@ class PipelineOrchestrator:
                 # Don't overwrite if manual user edit already assigned a custom label
                 if not r.get("manual") or not r.get("label"):
                     r["label"] = new_label
+                    r["pid"] = new_label
             else:
                 if not getattr(r, "manual", False) or not getattr(r, "label", ""):
                     r.label = new_label
+                    r.pid = new_label
 
         # 7. Connection points & OPCs
         if progress:

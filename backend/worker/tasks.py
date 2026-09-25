@@ -94,6 +94,7 @@ async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: 
     """Persist completed enrichment results to database without overwriting original run geometries."""
     from app.models.sheet import Sheet
     from app.models.job import Job
+    from app.services.grouping_service import GroupingService
 
     async with get_worker_session() as session:
         sheet = await session.get(Sheet, sheet_id)
@@ -108,6 +109,12 @@ async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: 
                 res["conn_points"] = enrichment_result["conn_points"]
             if "opcs" in enrichment_result:
                 res["opcs"] = enrichment_result["opcs"]
+
+            try:
+                sheet.systems_json = GroupingService.compute_circuits(res)
+            except Exception:
+                pass
+
             sheet.result_json = res
             sheet.status = "detected"
         job = await session.get(Job, job_id)
@@ -234,19 +241,25 @@ def enrich_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
     try:
         publish_progress(r_client, job_id, "starting", 0, 100, "Starting sheet enrichment (OCR & YOLO)...")
 
-        async def _get_existing_runs():
+        async def _get_existing_data():
             from app.models.sheet import Sheet
             async with get_worker_session() as session:
                 sheet = await session.get(Sheet, sheet_id)
                 if sheet and sheet.result_json:
-                    return sheet.result_json.get("runs", [])
-                return []
+                    return (
+                        sheet.result_json.get("runs", []),
+                        sheet.result_json.get("piping_ids", []),
+                        sheet.result_json.get("symbols", []),
+                    )
+                return [], [], []
 
-        existing_runs = loop.run_until_complete(_get_existing_runs())
+        existing_runs, existing_pids, existing_symbols = loop.run_until_complete(_get_existing_data())
 
         enrichment_result = execute_sheet_enrichment(
             file_rel_path=file_rel_path,
             existing_runs=existing_runs,
+            existing_pids=existing_pids,
+            existing_symbols=existing_symbols,
             dpi=dpi,
             rot=rot,
             progress_callback=_progress_cb,

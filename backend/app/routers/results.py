@@ -448,16 +448,93 @@ async def update_run_label(
     if run_idx < 0 or run_idx >= len(runs):
         raise HTTPException(status_code=400, detail=f"Run index {run_idx} out of range")
 
-    runs[run_idx]["label"] = payload.label
+    trimmed = (payload.label or "").strip()
+    runs[run_idx]["label"] = trimmed
+    runs[run_idx]["pid"] = trimmed
     runs[run_idx]["manual"] = True
     res["runs"] = runs
+
+    pids = list(res.get("piping_ids", []))
+    if not trimmed:
+        for p in pids:
+            if p.get("run_idx") == run_idx:
+                p["run_idx"] = -1
+                p["state"] = "none"
+            extra = p.get("extra_runs", [])
+            if run_idx in extra:
+                p["extra_runs"] = [er for er in extra if er != run_idx]
+    else:
+        try:
+            from pidcorr.piping_id import parse_tokens
+            toks = parse_tokens(trimmed)
+        except Exception:
+            toks = {}
+
+        target_run = runs[run_idx]
+        found = False
+        for p in pids:
+            if p.get("run_idx") == run_idx:
+                p["pid"] = trimmed
+                p["manual"] = True
+                p["state"] = "manual"
+                for k, v in toks.items():
+                    if v:
+                        p[k] = v
+                found = True
+                break
+
+        if not found:
+            for p in pids:
+                if (p.get("pid") or "").strip().lower() == trimmed.lower():
+                    if p.get("run_idx", -1) < 0:
+                        p["run_idx"] = run_idx
+                        p["state"] = "attached"
+                        p["manual"] = True
+                        found = True
+                        break
+                    else:
+                        extra = set(p.get("extra_runs", []))
+                        extra.add(run_idx)
+                        p["extra_runs"] = [er for er in extra if er != p.get("run_idx")]
+                        p["manual"] = True
+                        found = True
+                        break
+
+        if not found:
+            new_pid = {
+                "pid": trimmed,
+                "x1": float(target_run.get("x1", 0)),
+                "y1": float(target_run.get("y1", 0)),
+                "x2": float(target_run.get("x2", 0)),
+                "y2": float(target_run.get("y2", 0)),
+                "unit": toks.get("unit", ""),
+                "size": toks.get("size", ""),
+                "fluid": toks.get("fluid", ""),
+                "pclass": toks.get("pclass", ""),
+                "seq": toks.get("seq", ""),
+                "conf": 100,
+                "run_idx": run_idx,
+                "extra_runs": [],
+                "state": "manual",
+                "manual": True,
+            }
+            pids.append(new_pid)
+
+    res["piping_ids"] = pids
     sheet.result_json = res
+
+    try:
+        updated_circuits = GroupingService.compute_circuits(res)
+        sheet.systems_json = updated_circuits
+    except Exception:
+        pass
+
     await db.commit()
 
     return {
         "status": "success",
         "run_idx": run_idx,
-        "label": payload.label,
+        "label": trimmed,
         "result": sheet.result_json,
     }
 
