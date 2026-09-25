@@ -1036,6 +1036,97 @@ export default function InteractivePipeCanvas({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [traceTool, manualPoints, toolBusy, onSetTraceTool]);
 
+  // Render an individual pipe run (polyline + hit area + halo)
+  const renderPipeRun = (run: PipeRun, idx: number, isSelected: boolean) => {
+    if (!run.points || run.points.length < 2) return null;
+    const isHovered = hoveredRunIdx === idx;
+    const isEquipOutline = Boolean(run.equipment_outline);
+    const overrideColor = colorOverrideMap?.get(idx);
+    const strokeColor = overrideColor || run.color || (isEquipOutline ? '#F97316' : '#2563EB');
+    const isDimmed = Boolean(dimUncolored && colorOverrideMap && !overrideColor);
+
+    // If dragging vertices of this run, use the live drag points
+    const basePoints =
+      draggingVertex?.runIdx === idx && liveDragPoints ? liveDragPoints : run.points;
+    // Apply any in-flight arrow-key nudge offset for instant feedback.
+    const nudge = nudgeOffsets.get(idx);
+    const activePoints =
+      nudge && (nudge[0] !== 0 || nudge[1] !== 0)
+        ? basePoints.map((p) => [p[0] + nudge[0], p[1] + nudge[1]] as [number, number])
+        : basePoints;
+    const ptsStr = activePoints.map((p) => `${p[0]},${p[1]}`).join(' ');
+
+    return (
+      <g key={run.id || `run-${idx}`} className="group">
+        {/* Invisible wide stroke for easy clicking & hovering (pointerEvents: stroke).
+            In Multi-Select mode the lines yield pointer events to the SVG surface so a
+            drag anywhere (even over a line) paints the selection marquee instead. */}
+        <polyline
+          points={ptsStr}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={isSelected ? 26 : 22}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
+            cursor: splitMode ? 'crosshair' : 'pointer',
+          }}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            pointerDownRecordRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
+          }}
+          onPointerUp={(e) => {
+            e.stopPropagation();
+            if (pointerDownRecordRef.current) {
+              const dist = Math.hypot(
+                e.clientX - pointerDownRecordRef.current.x,
+                e.clientY - pointerDownRecordRef.current.y
+              );
+              if (dist < 6) {
+                handleLineClick(idx, e);
+              }
+            }
+          }}
+          onClick={(e) => handleLineClick(idx, e)}
+          onMouseEnter={() => setHoveredRunIdx(idx)}
+          onMouseLeave={() => setHoveredRunIdx(null)}
+        />
+
+        {/* Selection Background Halo */}
+        {isSelected && (
+          <polyline
+            points={ptsStr}
+            fill="none"
+            stroke="#FBBF24"
+            strokeWidth={8}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            filter="url(#select-halo)"
+            style={{ pointerEvents: 'none' }}
+          />
+        )}
+
+        {/* Visible Pipe Run Stroke */}
+        <polyline
+          points={ptsStr}
+          fill="none"
+          stroke={isSelected ? '#F59E0B' : strokeColor}
+          strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : isEquipOutline ? 2.5 : 3.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeDasharray={isSelected ? '10 5' : isEquipOutline ? '7 4' : undefined}
+          filter={isHovered && !isSelected ? 'url(#hover-glow)' : undefined}
+          opacity={isDimmed ? 0.18 : isEquipOutline ? 0.95 : 1}
+          style={{
+            pointerEvents: 'none',
+            transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',
+          }}
+        />
+      </g>
+    );
+  };
+
   return (
     <>
       {/* 1. Interactive SVG Overlay inside OpenSeadragon Canvas */}
@@ -1098,125 +1189,71 @@ export default function InteractivePipeCanvas({
               </filter>
             </defs>
 
-            {/* Polyline Pipe Runs */}
+            {/* 1. Unselected Pipe Runs (background layer) */}
             {runs.map((run, idx) => {
-              if (!run.points || run.points.length < 2) return null;
-              const isSelected = selectedRunIndices.has(idx);
-              const isHovered = hoveredRunIdx === idx;
-              const isEquipOutline = Boolean(run.equipment_outline);
-              const overrideColor = colorOverrideMap?.get(idx);
-              const strokeColor = overrideColor || run.color || (isEquipOutline ? '#F97316' : '#2563EB');
-              const isDimmed = Boolean(dimUncolored && colorOverrideMap && !overrideColor);
+              if (selectedRunIndices.has(idx)) return null;
+              return renderPipeRun(run, idx, false);
+            })}
 
-              // If dragging vertices of this run, use the live drag points
+            {/* 2. Selected Pipe Runs (elevated above unselected runs so halo and stroke take priority) */}
+            {runs.map((run, idx) => {
+              if (!selectedRunIndices.has(idx)) return null;
+              return renderPipeRun(run, idx, true);
+            })}
+
+            {/* 3. Draggable Vertex Control Points for Selected Lines (ALWAYS on top of all pipe runs) */}
+            {runs.map((run, idx) => {
+              if (!selectedRunIndices.has(idx) || !run.points || run.points.length < 2) return null;
               const basePoints =
                 draggingVertex?.runIdx === idx && liveDragPoints ? liveDragPoints : run.points;
-              // Apply any in-flight arrow-key nudge offset for instant feedback.
               const nudge = nudgeOffsets.get(idx);
               const activePoints =
                 nudge && (nudge[0] !== 0 || nudge[1] !== 0)
                   ? basePoints.map((p) => [p[0] + nudge[0], p[1] + nudge[1]] as [number, number])
                   : basePoints;
-              const ptsStr = activePoints.map((p) => `${p[0]},${p[1]}`).join(' ');
 
               return (
-                <g key={run.id || `run-${idx}`} className="group">
-                  {/* Invisible wide stroke for easy clicking & hovering (pointerEvents: stroke).
-                      In Multi-Select mode the lines yield pointer events to the SVG surface so a
-                      drag anywhere (even over a line) paints the selection marquee instead. */}
-                  <polyline
-                    points={ptsStr}
-                    fill="none"
-                    stroke="transparent"
-                    strokeWidth={22}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    style={{
-                      pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
-                      cursor: splitMode ? 'crosshair' : 'pointer',
-                    }}
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                      pointerDownRecordRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
-                    }}
-                    onPointerUp={(e) => {
-                      e.stopPropagation();
-                      if (pointerDownRecordRef.current) {
-                        const dist = Math.hypot(
-                          e.clientX - pointerDownRecordRef.current.x,
-                          e.clientY - pointerDownRecordRef.current.y
-                        );
-                        if (dist < 6) {
-                          handleLineClick(idx, e);
-                        }
-                      }
-                    }}
-                    onClick={(e) => handleLineClick(idx, e)}
-                    onMouseEnter={() => setHoveredRunIdx(idx)}
-                    onMouseLeave={() => setHoveredRunIdx(null)}
-                  />
+                <g key={`control-points-${run.id || idx}`} className="control-points">
+                  {activePoints.map((pt, ptIdx) => {
+                    const isEndpoint = ptIdx === 0 || ptIdx === activePoints.length - 1;
+                    const isCurrentDrag =
+                      draggingVertex?.runIdx === idx && draggingVertex?.ptIdx === ptIdx;
 
-                  {/* Selection Background Halo */}
-                  {isSelected && (
-                    <polyline
-                      points={ptsStr}
-                      fill="none"
-                      stroke="#FBBF24"
-                      strokeWidth={8}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      filter="url(#select-halo)"
-                      style={{ pointerEvents: 'none' }}
-                    />
-                  )}
-
-                  {/* Visible Pipe Run Stroke */}
-                  <polyline
-                    points={ptsStr}
-                    fill="none"
-                    stroke={isSelected ? '#F59E0B' : strokeColor}
-                    strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : isEquipOutline ? 2.5 : 3.5}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeDasharray={isSelected ? '10 5' : isEquipOutline ? '7 4' : undefined}
-                    filter={isHovered && !isSelected ? 'url(#hover-glow)' : undefined}
-                    opacity={isDimmed ? 0.18 : isEquipOutline ? 0.95 : 1}
-                    style={{
-                      pointerEvents: 'none',
-                      transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',
-                    }}
-                  />
-
-                  {/* Draggable Vertex Control Points for Selected Lines */}
-                  {isSelected && (
-                    <g className="control-points">
-                      {activePoints.map((pt, ptIdx) => {
-                        const isEndpoint = ptIdx === 0 || ptIdx === activePoints.length - 1;
-                        const isCurrentDrag =
-                          draggingVertex?.runIdx === idx && draggingVertex?.ptIdx === ptIdx;
-
-                        return (
-                          <circle
-                            key={`vertex-${idx}-${ptIdx}`}
-                            cx={pt[0]}
-                            cy={pt[1]}
-                            r={isCurrentDrag ? 9 : isEndpoint ? 7.5 : 5.5}
-                            fill={isCurrentDrag ? '#EF4444' : isEndpoint ? '#F59E0B' : '#3B82F6'}
-                            stroke="#FFFFFF"
-                            strokeWidth={2.5}
-                            style={{
-                              pointerEvents: 'all',
-                              cursor: isCurrentDrag ? 'grabbing' : 'grab',
-                              transition: isCurrentDrag ? 'none' : 'r 0.12s ease',
-                            }}
-                            onPointerDown={(e) => {
-                              handleStartVertexDrag(idx, ptIdx, e);
-                            }}
-                          />
-                        );
-                      })}
-                    </g>
-                  )}
+                    return (
+                      <g
+                        key={`vertex-${idx}-${ptIdx}`}
+                        style={{ cursor: isCurrentDrag ? 'grabbing' : 'grab' }}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                          handleStartVertexDrag(idx, ptIdx, e);
+                        }}
+                      >
+                        {/* Generous invisible hit target circle (radius 18) so clicking near the endpoint
+                            ALWAYS grabs this vertex handle, preventing clicks from leaking to adjacent/touching lines */}
+                        <circle
+                          cx={pt[0]}
+                          cy={pt[1]}
+                          r={18}
+                          fill="transparent"
+                          style={{ pointerEvents: 'all' }}
+                        />
+                        {/* Visible styled handle circle */}
+                        <circle
+                          cx={pt[0]}
+                          cy={pt[1]}
+                          r={isCurrentDrag ? 9 : isEndpoint ? 7.5 : 5.5}
+                          fill={isCurrentDrag ? '#EF4444' : isEndpoint ? '#F59E0B' : '#3B82F6'}
+                          stroke="#FFFFFF"
+                          strokeWidth={2.5}
+                          style={{
+                            pointerEvents: 'none',
+                            transition: isCurrentDrag ? 'none' : 'r 0.12s ease',
+                          }}
+                        />
+                      </g>
+                    );
+                  })}
                 </g>
               );
             })}
