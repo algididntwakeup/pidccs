@@ -12,6 +12,7 @@ websockets>=13.0
 
 # Database & ORM (PostgreSQL)
 SQLAlchemy>=2.0.35
+greenlet>=3.0.0
 asyncpg>=0.30.0
 alembic>=1.14.0
 
