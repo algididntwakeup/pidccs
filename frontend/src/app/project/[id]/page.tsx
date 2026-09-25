@@ -605,13 +605,14 @@ export default function ProjectWorkspace() {
   );
 
   const handleRescan = useCallback(
-    async (bounds: { x1: number; y1: number; x2: number; y2: number }, replaceExisting: boolean = false) => {
+    async (bounds: { x1: number; y1: number; x2: number; y2: number }) => {
       if (!projectId || !activeSheet || !result) return;
       try {
-        const data = await traceRegion(projectId, activeSheet.id, bounds, replaceExisting);
+        const data = await traceRegion(projectId, activeSheet.id, bounds);
         const nextRuns = data.result?.runs || [...result.runs, ...(data.new_runs || [])];
+        const stitched = data.stitched_runs_count ?? data.stitched ?? 0;
         pushHistory(
-          replaceExisting ? 'Re-scan area pipa (ganti)' : 'Re-scan area pipa (tambah)',
+          'Re-scan area pipa',
           result.runs,
           nextRuns,
           result.piping_ids,
@@ -619,10 +620,11 @@ export default function ProjectWorkspace() {
         );
         setResult(data.result || { ...result, runs: nextRuns });
         setHasUnsavedChanges(true);
+        const added = data.new_runs?.length || 0;
         showToast(
-          replaceExisting
-            ? `Re-scan selesai! Pipa di area telah diganti (${data.new_runs?.length || 0} pipa baru)`
-            : `Re-scan selesai! Menambahkan ${data.new_runs?.length || 0} pipa baru`,
+          stitched > 0
+            ? `Re-scan selesai! ${stitched} pipa tersambung otomatis${added > 0 ? `, ${added} pipa baru` : ''}`
+            : `Re-scan selesai! Menambahkan ${added} pipa baru`,
           3000
         );
         setTraceTool('pan');

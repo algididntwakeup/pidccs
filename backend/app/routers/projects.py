@@ -19,7 +19,6 @@ class TraceRegionRequest(BaseModel):
     x2: float = Field(..., ge=0)
     y2: float = Field(..., ge=0)
     sheet_id: Optional[str] = None
-    replace_existing: bool = False
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -113,7 +112,7 @@ async def trace_region(
     try:
         from pidcorr.lines import stitch_region_runs
     except ImportError:
-        def stitch_region_runs(new_runs, existing_runs, bbox, snap_px=18):
+        def stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0):
             return existing_runs, new_runs, []
 
     project = await ProjectService.get_project(db, project_id)
@@ -293,29 +292,16 @@ async def trace_region(
 
     current_runs = list(result.get("runs", []))
 
-    if payload.replace_existing:
-        # Option C: Replace existing runs that fall predominantly within the ROI box
-        retained_runs = []
-        for r in current_runs:
-            rx1 = r.get("x1", 0)
-            ry1 = r.get("y1", 0)
-            rx2 = r.get("x2", 0)
-            ry2 = r.get("y2", 0)
-            # Check if run center falls within ROI
-            rcx = (rx1 + rx2) / 2
-            rcy = (ry1 + ry2) / 2
-            if x1 <= rcx <= x2 and y1 <= rcy <= y2:
-                continue
-            retained_runs.append(r)
-        current_runs = retained_runs
-
-    # --- Box Trace stitching ---------------------------------------------------------
-    # Try to absorb the freshly traced region path into existing runs instead of always
-    # appending a duplicate: extend a touched pipe (1-to-1) or bridge two pipes (1-to-2,
-    # dropping the merged target). Ambiguous branches stay independent but snap endpoints.
+    # --- Smart Box-Trace stitching ---------------------------------------------------
+    # Absorb the freshly traced region path into existing runs instead of always
+    # appending a duplicate: extend a touched pipe (1-to-1 / Scenario A), bridge two
+    # severed pipes (1-to-2 / Scenario B, dropping the merged target), or keep the path
+    # as an independent new run when it touches nothing (Scenario C). The old rigid
+    # "Replace vs Append" choice is gone — the backend decides automatically.
     current_runs, new_runs, consumed_ids = stitch_region_runs(
-        new_runs, current_runs, bbox=(x1, y1, x2, y2), snap_px=18,
+        current_runs, new_runs, bounds_roi=(x1, y1, x2, y2), snap_radius=18.0,
     )
+    stitched_runs_count = len(consumed_ids)
 
     all_runs = current_runs + new_runs
 
@@ -361,7 +347,8 @@ async def trace_region(
     return {
         "status": "success",
         "new_runs": new_runs,
-        "stitched": len(consumed_ids),
+        "stitched_runs_count": stitched_runs_count,
+        "stitched": stitched_runs_count,
         "total_runs": len(result["runs"]),
         "result": result,
     }

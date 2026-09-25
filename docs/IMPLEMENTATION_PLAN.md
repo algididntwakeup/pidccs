@@ -1,3 +1,73 @@
+## HANDOFF UPDATE — ROI Localized OCR & Smart Box-Trace Stitching (2026-09-25)
+
+**Alur Box Trace kini otomatis: tidak ada lagi modal "Replace vs Append".** Saat user melepas
+drag kotak seleksi, frontend langsung memanggil `POST /trace-region`; backend yang secara cerdas
+memutuskan apakah garis baru **disambung (stitch)** ke pipa lama atau ditambah sebagai run baru.
+
+### 1. Smart Stitching — `stitch_region_runs` (`pidcorr/lines.py`)
+
+Fungsi lama hilang saat rollback ke golden commit (endpoint jatuh ke stub no-op sehingga ROI
+selalu menambah run duplikat). Fungsi ditulis ulang dengan signature baru yang eksplisit:
+
+```python
+stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0)
+# -> (updated_existing, remaining_new, consumed_ids)
+```
+
+Logika evaluasi **titik ujung (endpoints)** jalur baru terhadap endpoint run eksisting yang berada
+di sekitar/dalam `bounds_roi` (jarak endpoint→polyline baru <= `snap_radius`):
+
+| Skenario | Kondisi | Aksi |
+|---|---|---|
+| **A — 1-to-1 / Extend** | ujung baru menyentuh **tepat satu** ujung pipa eksisting | koordinat pipa eksisting **diperpanjang** (prefix/suffix). Tidak ada ID/garis baru. |
+| **B — 1-to-2 / Bridge** | jalur baru menjembatani **dua** ujung pipa terputus | `Existing A + New + Existing B` digabung jadi **satu polyline**; ID pipa B dihapus (`_drop`) agar tidak duplikat. |
+| **C — New Run** | tidak menyentuh ujung pipa lama sama sekali | dibiarkan menjadi `PipeRun` baru yang independen. |
+| Ambigu (>2 kandidat / T-junction) | banyak ujung berebut | run baru tetap independen, tapi ujungnya **di-snap** ke titik eksisting terdekat. |
+
+Detail implementasi:
+- **Normalisasi tipe**: `_run_to_dict()` menerima `PipeRun` dataclass maupun dict, sehingga fungsi
+  aman dipanggil dari endpoint (dict) maupun test (objek).
+- **Jarak endpoint→polyline**: `_poly_dist()` memakai proyeksi ter-clamp per segmen (bukan hanya
+  `points[0]`/`points[-1]`), jadi pipa bengkok (polyline) ikut terdeteksi dengan benar.
+- **Orientasi jalur baru**: untuk A dan B, jalur baru dibalik bila perlu agar ujungnya bertemu
+  ujung pipa yang cocok; `_apply_points()` membuang vertex duplikat + rekalkulasi bbox.
+- **Pewarisan atribut**: label/pid/fluid dari jalur baru (hasil OCR) atau dari pipa B yang diserap
+  diturunkan ke pipa hasil gabungan **hanya bila** pipa tujuan belum punya label (label lama menang).
+
+### 2. Localized OCR pada endpoint ROI (`backend/app/routers/projects.py`)
+
+`/trace-region` sudah menjalankan OCR **hanya pada area crop** (`roi_bgr = img[y1:y2, x1:x2]`) via
+`BaseTextExtractor.extract()`; token string diekstrak dengan `RegexPipingIDParser`. Tag yang valid
+ditempelkan sebagai atribut `label` (dan `pid`/`fluid`) pada `PipeRun` baru yang lokasinya **paling
+dekat** dengan kotak teks (jarak titik-titik ke polyline). Tag juga diregistrasi ke
+`result_json["piping_ids"]` dengan `run_idx` menunjuk run yang diberi label. Setelah stitching,
+label ini otomatis menular ke pipa eksisting yang diperpanjang (Skenario A/B).
+
+### 3. Response & Frontend
+
+- Endpoint mengembalikan `{"new_runs": [...], "stitched_runs_count": N, "stitched": N, ...}`
+  (`stitched` dipertahankan untuk kompatibilitas klien lama).
+- `TraceRegionRequest` **tidak lagi** punya field `replace_existing`; blok filter "Option C"
+  (buang run yang pusatnya di dalam ROI) **dihapus** dari endpoint.
+- Frontend (`InteractivePipeCanvas.tsx`): state `roiPendingModal` + `handleExecuteRescanModal` +
+  seluruh JSX modal "Replace / Append" **dihapus**; `onMouseUp` Box Trace langsung
+  `await onRescan(bounds)` (rect tetap tampil selama request in-flight, dijaga `toolBusy` agar
+  tidak dobel). Shortcut Shift-untuk-auto-replace dihapus karena tidak relevan lagi.
+- `api.ts` `traceRegion()` tidak lagi mengirim `replace_existing`; `page.tsx` `handleRescan()`
+  disederhanakan dan toast-nya menyebut jumlah pipa yang tersambung otomatis.
+- Ikon `RotateCcw`/`Plus` yang tak terpakai dibersihkan dari import canvas.
+
+### 4. Verifikasi
+- `backend/tests/test_box_trace_stitching.py` (baru, **11 tes**): Skenario A (extend depan/belakang,
+  pewarisan label, label lama menang), Skenario B (bridge normal + jalur terbalik + warisan label
+  dari pipa B), Skenario C (independen), ambigu (snap), input kosong, dan input `PipeRun` objek.
+- `python -m pytest backend/tests/test_box_trace_stitching.py -q` → **11 passed**.
+- `python -m pytest backend/tests/ -q` → **79 passed, 4 skipped** (313.89s + 18.88s e2e);
+  struktur `PipeRun` tidak rusak.
+- `npx tsc --noEmit` bersih; tidak ada lagi referensi `replace_existing`/`roiPendingModal`.
+
+
+
 ## HANDOFF UPDATE — Deep Optimization: YOLO Bypass, Instrument Gaps, O(N²), Text Underlines (2026-09-25)
 
 **4 perbaikan bedah pada 3 file utama:**

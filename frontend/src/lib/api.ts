@@ -219,13 +219,12 @@ export async function updateRunPoints(projectId: string, sheetId: string, runIdx
 export async function traceRegion(
   projectId: string,
   sheetId: string,
-  bounds: { x1: number; y1: number; x2: number; y2: number },
-  replaceExisting: boolean = false
+  bounds: { x1: number; y1: number; x2: number; y2: number }
 ) {
   const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/trace-region`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...bounds, sheet_id: sheetId, replace_existing: replaceExisting }),
+    body: JSON.stringify({ ...bounds, sheet_id: sheetId }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to trace region' }));

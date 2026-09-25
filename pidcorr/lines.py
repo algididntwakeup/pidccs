@@ -1646,6 +1646,226 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
     return out
 
 
+# ----------------------------------------- 3b) SMART BOX-TRACE STITCHING ----------
+def _run_to_dict(r):
+    """Normalisasi PipeRun | dict -> dict plain (agar stitching bisa memodifikasi titik)."""
+    if isinstance(r, dict):
+        return dict(r)
+    return {
+        "id": getattr(r, "id", ""),
+        "points": [list(p) for p in getattr(r, "points", [])],
+        "axis": getattr(r, "axis", "poly"),
+        "pid": getattr(r, "pid", ""),
+        "fluid": getattr(r, "fluid", ""),
+        "label": getattr(r, "label", getattr(r, "pid", "")),
+        "color": getattr(r, "color", "#2563EB"),
+        "underline": getattr(r, "underline", False),
+        "manual": getattr(r, "manual", False),
+        "equipment_outline": getattr(r, "equipment_outline", False),
+    }
+
+def _poly_dist(pt, pts):
+    """Jarak terdekat titik `pt` ke polyline `pts` (proyeksi ter-clamp per segmen)."""
+    px, py = float(pt[0]), float(pt[1])
+    if len(pts) < 2:
+        return float("inf")
+    best = float("inf")
+    for i in range(len(pts) - 1):
+        ax, ay = float(pts[i][0]), float(pts[i][1])
+        bx, by = float(pts[i + 1][0]), float(pts[i + 1][1])
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        if l2 <= 1e-9:
+            d = math.hypot(px - ax, py - ay)
+        else:
+            t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+            d = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+        if d < best:
+            best = d
+    return best
+
+def _apply_points(run, clean_pts):
+    """Set points run + rekalkulasi bbox; buang vertex duplikat berurutan."""
+    if not clean_pts:
+        run["points"] = []
+        return
+    dedup = [[int(round(clean_pts[0][0])), int(round(clean_pts[0][1]))]]
+    for p in clean_pts[1:]:
+        q = [int(round(p[0])), int(round(p[1]))]
+        if q[0] != dedup[-1][0] or q[1] != dedup[-1][1]:
+            dedup.append(q)
+    run["points"] = dedup
+    run["x1"] = min(p[0] for p in dedup)
+    run["y1"] = min(p[1] for p in dedup)
+    run["x2"] = max(p[0] for p in dedup)
+    run["y2"] = max(p[1] for p in dedup)
+
+def _snap_new_endpoints(nr, matching):
+    """Mode ambigu: biarkan run baru independen, tapi snap ujungnya ke titik run eksisting terdekat."""
+    out = dict(nr)
+    pts = [[int(round(p[0])), int(round(p[1]))] for p in nr.get("points", [])]
+    if len(pts) < 2 or not matching:
+        return out
+    for end_idx in (0, -1):
+        px, py = pts[end_idx]
+        best, best_d = None, float("inf")
+        for m in matching:
+            ex, ey = m["end"]
+            d = math.hypot(px - ex, py - ey)
+            if d < best_d:
+                best_d, best = d, (ex, ey)
+        if best is not None:
+            pts[end_idx] = [int(best[0]), int(best[1])]
+    _apply_points(out, pts)
+    return out
+
+def stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0):
+    """SMART BOX-TRACE STITCHING — sambung cerdas jalur ROI baru ke pipa eksisting.
+
+    Dipanggil oleh `POST /trace-region` setelah crop ROI di-trace. Alih-alih selalu
+    menambah run independen (yang membuat pipa terduplikasi di kanvas/sidebar), fungsi
+    ini mengevaluasi TITIK UJUNG (endpoints) `new_runs` terhadap endpoint `existing_runs`
+    yang berada di sekitar/di dalam `bounds_roi`:
+
+      * SKENARIO A (1-to-1 / Extend): salah satu ujung jalur baru menyentuh HANYA SATU
+        ujung pipa eksisting (jarak <= `snap_radius`) -> koordinat pipa eksisting
+        DIPERPANJANG. Tidak ada ID/garis baru yang dibuat.
+      * SKENARIO B (1-to-2 / Bridge): jalur baru menjembatani DUA ujung pipa eksisting
+        yang terputus -> ketiganya digabung (Existing A + New + Existing B) menjadi satu
+        polyline utuh. ID garis B yang diserap dihapus agar tidak duplikat.
+      * SKENARIO C (New Run): jalur baru tidak menyentuh ujung pipa lama sama sekali ->
+        dibiarkan menjadi `PipeRun` baru yang independen.
+      * AMBIGU (>2 kandidat / percabangan T): run baru tetap independen, tapi ujungnya
+        di-snap ke titik eksisting terdekat agar tidak menggantung.
+
+    Args:
+        existing_runs: list[dict|PipeRun] koordinat GLOBAL.
+        new_runs: list[dict] hasil trace crop (koordinat GLOBAL).
+        bounds_roi: (x1, y1, x2, y2) kotak seleksi global (SEBELUM padding crop).
+        snap_radius: radius toleransi sentuh ujung, px (default 18.0).
+
+    Returns:
+        (updated_existing, remaining_new, consumed_ids)
+        - updated_existing: existing runs (mungkin sudah diperpanjang / digabung, B terhapus)
+        - remaining_new: new runs yang tidak terserap (menjadi run independen)
+        - consumed_ids: id run yang sudah di-merge/diserap (new & existing-B) untuk dibuang
+    """
+    existing = [_run_to_dict(r) for r in (existing_runs or [])]
+    if not new_runs:
+        return existing, [], []
+
+    bx1, by1, bx2, by2 = [float(v) for v in bounds_roi]
+    remaining_new = []
+    consumed_ids = []
+
+    for nr in new_runs:
+        npts = [[int(round(p[0])), int(round(p[1]))] for p in nr.get("points", [])]
+        if len(npts) < 2:
+            continue
+        n_a, n_b = npts[0], npts[-1]
+
+        # --- Cari endpoint existing yang berada di sekitar/dalam ROI dan benar-benar
+        #     menyentuh jalur baru (jarak endpoint -> polyline baru <= snap_radius).
+        matching = []
+        for ri, er in enumerate(existing):
+            if er.get("_drop"):
+                continue
+            epts = er.get("points", [])
+            if len(epts) < 2:
+                continue
+            best = None
+            for which, end in (("a", epts[0]), ("b", epts[-1])):
+                ex, ey = float(end[0]), float(end[1])
+                in_roi = (bx1 - snap_radius <= ex <= bx2 + snap_radius and
+                          by1 - snap_radius <= ey <= by2 + snap_radius)
+                if not in_roi:
+                    continue
+                d = _poly_dist((ex, ey), npts)
+                if d > snap_radius:
+                    continue
+                if best is None or d < best["d"]:
+                    d_new_a = math.hypot(ex - n_a[0], ey - n_a[1])
+                    d_new_b = math.hypot(ex - n_b[0], ey - n_b[1])
+                    best = {
+                        "ri": ri, "which": which, "end": (int(round(ex)), int(round(ey))),
+                        "d": d, "new_end": "a" if d_new_a <= d_new_b else "b",
+                    }
+            if best is not None:
+                matching.append(best)
+        matching.sort(key=lambda c: c["d"])
+
+        if len(matching) == 1:
+            # ---------------- SKENARIO A: 1-to-1 -> perpanjang pipa eksisting ----------
+            m = matching[0]
+            ext = [list(p) for p in npts]
+            # Orientasi: ext[0] harus berimpit dgn ujung existing yang cocok.
+            if m["new_end"] == "b":
+                ext = ext[::-1]
+            base = [[int(round(p[0])), int(round(p[1]))] for p in existing[m["ri"]].get("points", [])]
+            merged = (ext[::-1] + base) if m["which"] == "a" else (base + ext)
+            _apply_points(existing[m["ri"]], merged)
+            # Warisi label/pid/fluid dari jalur baru bila pipa eksisting belum punya.
+            if nr.get("label") and not existing[m["ri"]].get("label"):
+                existing[m["ri"]]["label"] = nr["label"]
+                if nr.get("pid"):
+                    existing[m["ri"]]["pid"] = nr["pid"]
+                if nr.get("fluid"):
+                    existing[m["ri"]]["fluid"] = nr["fluid"]
+            consumed_ids.append(nr.get("id"))
+
+        elif len(matching) == 2:
+            # ---------------- SKENARIO B: 1-to-2 -> jembatani dua pipa terputus --------
+            m, f = matching[0], matching[1]
+            if m["ri"] == f["ri"]:
+                remaining_new.append(_snap_new_endpoints(nr, matching))
+                continue
+            ext = [list(p) for p in npts]
+            # Orient the new path so ext[0] meets M and ext[-1] meets F:
+            #   m["new_end"] == "b"  -> n_b is nearest M's end, so reverse (ext[0] = n_b).
+            #   m["new_end"] == "a"  -> n_a is nearest M's end, so keep as-is.
+            if m["new_end"] == "b" and f["new_end"] == "a":
+                ext = ext[::-1]
+            elif m["new_end"] == "a" and f["new_end"] == "b":
+                pass
+            else:
+                # Kedua ujung existing terdekat ke ujung baru yang SAMA -> bukan bridge bersih.
+                remaining_new.append(_snap_new_endpoints(nr, matching))
+                continue
+
+            base_m = [[int(round(p[0])), int(round(p[1]))] for p in existing[m["ri"]].get("points", [])]
+            base_f = [[int(round(p[0])), int(round(p[1]))] for p in existing[f["ri"]].get("points", [])]
+            if m["which"] == "a":
+                base_m = base_m[::-1]
+            if f["which"] == "b":
+                base_f = base_f[::-1]
+            merged = base_m + ext + base_f
+            _apply_points(existing[m["ri"]], merged)
+            # Warisi label dari pipa F / jalur baru bila pipa M belum punya.
+            if not existing[m["ri"]].get("label"):
+                lbl = existing[f["ri"]].get("label") or nr.get("label")
+                if lbl:
+                    existing[m["ri"]]["label"] = lbl
+                    existing[m["ri"]]["pid"] = (existing[f["ri"]].get("pid") or
+                                                nr.get("pid") or lbl)
+                    existing[m["ri"]]["fluid"] = (existing[f["ri"]].get("fluid") or
+                                                  nr.get("fluid", ""))
+            consumed_ids.append(nr.get("id"))
+            consumed_ids.append(existing[f["ri"]].get("id"))
+            existing[f["ri"]]["_drop"] = True
+
+        else:
+            # ---------------- SKENARIO C (atau ambigu): run baru independen -------------
+            if len(matching) == 0:
+                remaining_new.append(nr)
+            else:
+                remaining_new.append(_snap_new_endpoints(nr, matching))
+
+    existing = [r for r in existing if not r.get("_drop")]
+    for r in existing:
+        r.pop("_drop", None)
+    consumed = [cid for cid in consumed_ids if cid]
+    return existing, remaining_new, consumed
+
 def extract_pipe_runs(img_bgr, dpi=350, detections=None, furniture=None, diagonal=False,
                       boxes=None, **kw):
     """Pipeline lengkap: segmen -> buang tepi-box simbol -> buang interior equipment ->

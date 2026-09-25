@@ -13,8 +13,6 @@ import {
   Crop,
   Pencil,
   Hand,
-  RotateCcw,
-  Plus,
   GripVertical,
   BoxSelect,
 } from 'lucide-react';
@@ -86,7 +84,7 @@ interface InteractivePipeCanvasProps {
   onRedo: () => void;
   traceTool: 'pan' | 'rescan' | 'pen' | 'multiselect';
   onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen' | 'multiselect') => void;
-  onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }, replaceExisting?: boolean) => Promise<void>;
+  onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }) => Promise<void>;
   onManualRun: (points: [number, number][]) => Promise<void>;
   // Optional mode-driven color override: maps run index -> CSS color.
   // Used for Corrosion System / Circuit views so circuit coloring is rendered
@@ -140,7 +138,6 @@ export default function InteractivePipeCanvas({
   // Box Trace state
   const [roiStart, setRoiStart] = useState<{ x: number; y: number } | null>(null);
   const [roiRect, setRoiRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
-  const [roiPendingModal, setRoiPendingModal] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
   // Manual Pen state
   const [manualPoints, setManualPoints] = useState<[number, number][]>([]);
@@ -967,38 +964,26 @@ export default function InteractivePipeCanvas({
       y2: Math.round(Math.max(roiStart.y, point.y)),
     };
 
+    // Ignore accidental click-like drags (too small to be a real ROI box).
     if (bounds.x2 - bounds.x1 < 12 || bounds.y2 - bounds.y1 < 12) {
       setRoiRect(null);
       return;
     }
 
-    setRoiRect(bounds);
-
-    // If Shift held: power-user shortcut to auto-replace without prompt
-    if (e.shiftKey) {
-      setToolBusy(true);
-      try {
-        await onRescan(bounds, true);
-      } finally {
-        setRoiRect(null);
-        setToolBusy(false);
-      }
+    // Keep the rubber-band rectangle visible while the request is in flight so the user
+    // sees what is being scanned; the backend decides automatically whether to extend a
+    // touched pipe (stitch), bridge two severed pipes, or append a brand-new run. There
+    // is no more Replace/Append confirmation modal — releasing the drag executes directly.
+    if (toolBusy) {
+      setRoiRect(null);
       return;
     }
-
-    // Otherwise show Option (C) modal prompt (Replace vs Append vs Cancel)
-    setRoiPendingModal(bounds);
-  };
-
-  const handleExecuteRescanModal = async (replaceExisting: boolean) => {
-    if (!roiPendingModal) return;
-    const bounds = roiPendingModal;
-    setRoiPendingModal(null);
-    setRoiRect(null);
+    setRoiRect(bounds);
     setToolBusy(true);
     try {
-      await onRescan(bounds, replaceExisting);
+      await onRescan(bounds);
     } finally {
+      setRoiRect(null);
       setToolBusy(false);
     }
   };
@@ -1039,7 +1024,6 @@ export default function InteractivePipeCanvas({
           e.preventDefault();
           setRoiStart(null);
           setRoiRect(null);
-          setRoiPendingModal(null);
           setManualPoints([]);
           setPenHoverPt(null);
           setMarqueeStart(null);
@@ -1536,56 +1520,6 @@ export default function InteractivePipeCanvas({
         </div>
       )}
 
-      {/* 3. Option (C) Re-scan Confirmation Modal */}
-      {roiPendingModal && (
-        <div
-          className="absolute z-50 bg-white border border-slate-300 rounded-2xl shadow-2xl p-4 flex flex-col space-y-3 text-xs animate-in fade-in zoom-in-95 duration-150"
-          style={{
-            left: '50%',
-            top: '40%',
-            transform: 'translate(-50%, -50%)',
-            minWidth: 320,
-            maxWidth: '92vw',
-            maxHeight: '90vh',
-            overflowY: 'auto',
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-center space-x-2 border-b border-slate-100 pb-2">
-            <Crop className="w-4 h-4 text-cyan-600" />
-            <h3 className="font-bold text-slate-800 text-sm">Re-scan Area Terpilih</h3>
-          </div>
-          <p className="text-slate-600 text-xs leading-relaxed">
-            Pilih tindakan untuk garis pipa yang ada di dalam kotak area seleksi ini:
-          </p>
-          <div className="flex flex-col space-y-2 pt-1">
-            <button
-              onClick={() => handleExecuteRescanModal(true)}
-              className="w-full py-2 px-3 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold rounded-xl flex items-center justify-center space-x-2 shadow transition"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              <span>Ganti Pipa Lama di Area Ini (Replace)</span>
-            </button>
-            <button
-              onClick={() => handleExecuteRescanModal(false)}
-              className="w-full py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl flex items-center justify-center space-x-2 transition"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Tambahkan Pipa Baru Saja (Append)</span>
-            </button>
-            <button
-              onClick={() => {
-                setRoiPendingModal(null);
-                setRoiRect(null);
-              }}
-              className="w-full py-1.5 text-slate-400 hover:text-slate-600 text-center font-medium transition"
-            >
-              Batal
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* 4. Split Mode Guide Banner */}
       {splitMode && (
         <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-red-600/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 animate-bounce max-w-[92vw] truncate">
@@ -1621,10 +1555,10 @@ export default function InteractivePipeCanvas({
         </div>
       )}
 
-      {traceTool === 'rescan' && !roiPendingModal && (
+      {traceTool === 'rescan' && (
         <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-cyan-700/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 max-w-[92vw] truncate">
           <Crop className="w-3.5 h-3.5" />
-          <span>Tarik kotak (drag rectangle) pada area pipa yang ingin di-scan ulang. Tahan [Shift] untuk auto-replace.</span>
+          <span>Tarik kotak pada area pipa untuk scan ulang. Garis akan otomatis menyambung ke pipa yang ada.</span>
         </div>
       )}
 
@@ -1639,7 +1573,6 @@ export default function InteractivePipeCanvas({
             onSetTraceTool('pan');
             setManualPoints([]);
             setRoiRect(null);
-            setRoiPendingModal(null);
             setMarqueeRect(null);
             setMarqueeStart(null);
           }}
@@ -1659,7 +1592,6 @@ export default function InteractivePipeCanvas({
             onSetTraceTool('multiselect');
             setManualPoints([]);
             setRoiRect(null);
-            setRoiPendingModal(null);
           }}
           className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'multiselect'
@@ -1694,7 +1626,6 @@ export default function InteractivePipeCanvas({
           onClick={() => {
             onSetTraceTool('pen');
             setRoiRect(null);
-            setRoiPendingModal(null);
             setMarqueeRect(null);
             setMarqueeStart(null);
           }}

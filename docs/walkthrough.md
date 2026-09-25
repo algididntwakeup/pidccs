@@ -1,3 +1,62 @@
+## ROI Localized OCR & Smart Box-Trace Stitching (2026-09-25)
+
+**Box Trace is nu automatisch: de "Replace vs Append"-modal is verdwenen.** Zodra de gebruiker de
+selectierechthoek loslaat, roept de frontend direct `POST /trace-region` aan; de backend beslist
+slim of de nieuwe lijn **aaneengeregen (stitch)** wordt aan een bestaande pijp of als losse run
+wordt toegevoegd.
+
+### 1. Smart stitching — `stitch_region_runs` (`pidcorr/lines.py`)
+
+De functie was verdwenen bij de rollback naar de golden commit (de endpoint viel terug op een
+no-op stub, waardoor ROI altijd een dubbele run toevoegde). Herimplementatie met expliciete
+signature:
+
+```python
+stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0)
+# -> (updated_existing, remaining_new, consumed_ids)
+```
+
+Beoordeelt de **eindpunten (endpoints)** van de nieuwe paden tegen bestaande run-eindpunten in de
+buurt/binnen `bounds_roi` (afstand endpoint→nieuwe polyline ≤ `snap_radius`):
+
+| Scenario | Voorwaarde | Actie |
+|---|---|---|
+| **A — 1-to-1 / Extend** | nieuw uiteinde raakt **exact één** bestaand pijpeinde | bestaande pijp wordt **verlengd**; geen nieuwe ID/lijn. |
+| **B — 1-to-2 / Bridge** | nieuw pad verbindt **twee** onderbroken pijpeinden | `Existing A + New + Existing B` → **één polyline**; ID van pijp B verwijderd (`_drop`). |
+| **C — New Run** | raakt geen enkel oud pijpeinde | blijft een onafhankelijke nieuwe `PipeRun`. |
+| Ambigu (>2 kandidaten / T-splitsing) | meerdere eindpunten concurreren | run blijft onafhankelijk, maar eindpunten worden **gesnapt** naar dichtstbijzijnde bestaande. |
+
+- `_run_to_dict()` accepteert zowel `PipeRun` dataclass als dict.
+- `_poly_dist()` projecteert per segment (niet enkel `points[0]`/`points[-1]`), dus ook bij
+  polylines (bochten) klopt de afstand.
+- Label/pid/fluid van het nieuwe pad (OCR-resultaat) of van opgenomen pijp B wordt overgeërfd
+  **alleen als** de doelpijp nog geen label heeft (bestaand label wint).
+
+### 2. Gelokaliseerde OCR op het ROI-endpoint (`backend/app/routers/projects.py`)
+
+`/trace-region` draait OCR **alleen op het cropgebied** (`roi_bgr`) via `BaseTextExtractor.extract()`;
+tokens worden met `RegexPipingIDParser` geëxtraheerd. Een geldige tag wordt als `label` (plus
+`pid`/`fluid`) op de **dichtstbijzijnde** nieuwe `PipeRun` gezet en geregistreerd in
+`result_json["piping_ids"]` met bijbehorende `run_idx`.
+
+### 3. Response & frontend
+
+- Endpoint retourneert `{"new_runs": [...], "stitched_runs_count": N, "stitched": N, ...}`.
+- `TraceRegionRequest` heeft **geen** `replace_existing` meer; de "Option C"-filter is verwijderd.
+- `InteractivePipeCanvas.tsx`: `roiPendingModal`-state, `handleExecuteRescanModal` en alle modal-JSX
+  verwijderd; `onMouseUp` voert direct `await onRescan(bounds)` uit (rect blijft zichtbaar tijdens de
+  request, `toolBusy` voorkomt dubbel). Shift-auto-replace snelkoppeling verwijderd.
+- `api.ts` stuurt geen `replace_existing` meer; `page.tsx` `handleRescan()` vereenvoudigd en de toast
+  meldt het aantal automatisch verbonden pijpen. Ongebruikte iconen (`RotateCcw`/`Plus`) opgeruimd.
+
+### 4. Verificatie
+- `backend/tests/test_box_trace_stitching.py` (nieuw, **11 tests**): A (verlengen begin/eind,
+  label-overerving, oud label wint), B (bridge normaal + omgekeerd pad + label van pijp B),
+  C (onafhankelijk), ambigu (snap), lege input, en `PipeRun`-object input.
+- `pytest backend/tests/test_box_trace_stitching.py -q` → **11 passed**.
+- `pytest backend/tests/ -q` → **79 passed, 4 skipped**.
+- `npx tsc --noEmit` schoon.
+
 ## Deep Optimization — 4 Surgical Fixes (2026-09-25)
 
 Vier structurele bugs opgelost in 3 bestanden:
