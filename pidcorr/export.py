@@ -11,6 +11,7 @@ Export deliverable (Fitur 2) — dipanggil INTERAKTIF dari GUI (pilihan user, bu
      gambar dibungkus jadi halaman PDF.
 """
 from __future__ import annotations
+import math
 import os
 import numpy as np
 import cv2
@@ -144,11 +145,16 @@ def _poly(vis, run, rgb):
 
 
 # ------------------------------------------------------------ PDF (Acrobat-editable) --
-def export_marked_pdf(result, out_path, mode="engineer"):
+def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
     """Tulis PDF ter-marking. Marking = PolyLine annotation per run pipa (bukan pixel),
     legend = Square+FreeText annotation -> semuanya editable/movable/deletable di Acrobat.
     Subject annotation diisi nama system/circuit supaya panel Comments Acrobat bisa
-    sort-by-subject per corrosion system. Return jumlah annotation garis."""
+    sort-by-subject per corrosion system. Return jumlah annotation garis.
+
+    `include_legend=False` (default): TANPA kotak legenda di pojok kertas — sebagai
+    gantinya tiap grup manual engineer diberi STEMPEL FreeText berisi nama grup di titik
+    tengah run terpanjangnya (`_stamp_groups`). Set `True` untuk perilaku lama.
+    """
     import fitz
 
     src = result.get("image_path", "")
@@ -163,32 +169,61 @@ def export_marked_pdf(result, out_path, mode="engineer"):
         if ri is not None and ri >= 0:
             run_pids.setdefault(int(ri), []).append(p.get("pid", ""))
 
-    # (warna_rgb, subject, [run_idx], teks_legend)
+    # Grup MANUAL (HITL) menang atas grup otomatis: run yang sudah di-assign ke grup
+    # manual dikeluarkan dari grup mode (engineer/system/circuit) lalu dirender ulang
+    # dengan warna + nama grup manual (lihat penambahan grup manual setelah cabang mode).
+    manual_groups = result.get("manual_groups") or []
+    manual_by_run = {}                             # run_idx -> indeks grup manual
+    for gi, g in enumerate(manual_groups):
+        for ri, r in enumerate(runs):
+            if r.get("group_id") and r.get("group_id") == g.get("id"):
+                manual_by_run[ri] = gi
+
+    # (warna_rgb, subject, [run_idx], teks_legend, teks_stempel)
     groups, title = [], ""
     if mode == "engineer":
         title = "PIPING RUN TRACE (Engineer Polyline Mode)"
         from collections import defaultdict
         color_groups = defaultdict(list)
         for ri, r in enumerate(runs):
+            if ri in manual_by_run:
+                continue
             rgb = _hex_to_rgb(r.get("color", "#2563EB"))
             color_groups[rgb].append(ri)
         for rgb, r_idxs in color_groups.items():
             hex_label = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
             subj = f"Piping Run {hex_label}"
-            groups.append((rgb, subj, r_idxs, f"Piping Run {hex_label} ({len(r_idxs)} segmen)"))
+            groups.append((rgb, subj, r_idxs,
+                           f"Piping Run {hex_label} ({len(r_idxs)} segmen)", None))
     elif mode == "system":
         title = "CORROSION SYSTEM (per process fluid)"
         for si, s in enumerate(systemize(result), 1):
             subj = f"Corrosion System #{si:02d} - {s['fluid']}"
-            groups.append((s["color"], subj, s["run_idxs"],
-                           f"{s['fluid']}  ({s['n_pipes']} pipa)"))
+            idxs = [ri for ri in s["run_idxs"] if ri not in manual_by_run]
+            if not idxs:
+                continue
+            groups.append((s["color"], subj, idxs,
+                           f"{s['fluid']}  ({s['n_pipes']} pipa)", s["fluid"]))
     else:
         title = "CORROSION CIRCUIT (per fluid + material)"
         for s in circuitize(result):
             for c in s["circuits"]:
                 subj = f"Circuit {c['code']} - {s['fluid']}-{c['material'] or '-'}"
-                groups.append((c["color"], subj, c["run_idxs"],
-                               f"{c['code']}  {s['fluid']}-{c['material'] or '-'}  ({len(c['pid_idxs'])} line)"))
+                idxs = [ri for ri in c["run_idxs"] if ri not in manual_by_run]
+                if not idxs:
+                    continue
+                groups.append((c["color"], subj, idxs,
+                               f"{c['code']}  {s['fluid']}-{c['material'] or '-'}  "
+                               f"({len(c['pid_idxs'])} line)", c["code"]))
+
+    # Grup manual engineer: warna & nama grup menang atas mode; nama dipakai sebagai
+    # stempel di kanvas PDF (pengganti legend).
+    for gi, g in enumerate(manual_groups):
+        idxs = sorted(ri for ri, mgi in manual_by_run.items() if mgi == gi)
+        if not idxs:
+            continue
+        name = g.get("name") or f"Group {gi + 1}"
+        groups.append((_hex_to_rgb(g.get("color") or "#F59E0B"), name, idxs, name, name))
 
     # --- halaman dasar: PDF asli (vektor, tetap tajam) atau gambar dibungkus PDF ---
     from .pipeline import rotate_bgr, unrotate_matrix
@@ -223,7 +258,7 @@ def export_marked_pdf(result, out_path, mode="engineer"):
     opacity = 0.8
 
     n_annot = 0
-    for rgb, subj, run_idxs, _txt in groups:
+    for rgb, subj, run_idxs, _txt, _stamp in groups:
         col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
         for ri in run_idxs:
             run = runs[ri]
@@ -248,7 +283,9 @@ def export_marked_pdf(result, out_path, mode="engineer"):
             a.update()
             n_annot += 1
 
-    _legend_annots(page, title, [(g[0], g[3]) for g in groups])
+    if include_legend:
+        _legend_annots(page, title, [(g[0], g[3]) for g in groups])
+    _stamp_groups(page, groups, runs, to_pdf, dpi)
 
     # save via tobytes + open(): file IO Python aman utk path non-ASCII Windows
     data = doc.tobytes(garbage=3, deflate=True)
@@ -302,6 +339,75 @@ def _legend_annots(page, title, entries):
             txt, fontsize=8, text_color=(0.1, 0.1, 0.1), fill_color=None, rotate=rot)
         ft.set_flags(fitz.PDF_ANNOT_IS_PRINT); ft.update()
         y += lh
+
+def _run_len(run):
+    """Panjang arc-length polyline `run` (dict result_json) dalam px."""
+    pts = run.get("points") or []
+    if len(pts) < 2:
+        return 0.0
+    return sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+               for i in range(len(pts) - 1))
+
+def _run_midpoint(run):
+    """Titik tengah MENURUT PANJANG polyline (bukan tengah bbox) — interpolasi linear."""
+    pts = run.get("points") or []
+    if len(pts) < 2:
+        return None
+    total = _run_len(run)
+    if total <= 0:
+        return None
+    half, walked = total / 2.0, 0.0
+    for i in range(len(pts) - 1):
+        x0, y0 = float(pts[i][0]), float(pts[i][1])
+        x1, y1 = float(pts[i + 1][0]), float(pts[i + 1][1])
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if walked + seg >= half:
+            t = 0.0 if seg <= 0 else (half - walked) / seg
+            return x0 + t * (x1 - x0), y0 + t * (y1 - y0)
+        walked += seg
+    return float(pts[-1][0]), float(pts[-1][1])
+
+def _stamp_groups(page, groups, runs, to_pdf, dpi):
+    """Stempel nama grup (FreeText annotation) di titik tengah run TERPANJANG tiap grup.
+
+    Pengganti kotak legend: label menempel pada pipa yang di-marking, jadi engineer
+    langsung tahu grup mana milik garis mana tanpa mencari ke pojok kertas. Stempel
+    TIDAK dihitung sebagai annotation garis (return `export_marked_pdf` tetap jumlah
+    PolyLine). Warna teks = warna grup; tanpa fill/border (gaya sama dgn legend).
+    """
+    import fitz
+
+    for rgb, _subj, run_idxs, _txt, stamp in groups:
+        if not stamp or not run_idxs:
+            continue
+        longest = max((runs[ri] for ri in run_idxs if 0 <= ri < len(runs)),
+                      key=_run_len, default=None)
+        if longest is None or _run_len(longest) <= 0:
+            continue
+        mid = _run_midpoint(longest)
+        if mid is None:
+            continue
+        pts = longest.get("points") or []
+        # Teks horizontal di ATAS pipa horizontal; di SAMPING KANAN pipa vertikal
+        # (kalau di atas, label vertikal menabrak garis di sebelahnya).
+        vertical = len(pts) >= 2 and abs(pts[-1][0] - pts[0][0]) < abs(pts[-1][1] - pts[0][1])
+        ax, ay = (mid[0] + 14.0, mid[1]) if vertical else (mid[0], mid[1] - 8.0)
+        # Rect dibangun di ruang TAMPILAN (pt) lalu dipetakan ke ruang annotation
+        # (un-rotated) lewat derotation_matrix — pola sama dengan `_legend_annots`.
+        # Membangun rect langsung di ruang annotation membuat stempel ikut terputar
+        # 90° dan keluar halaman pada lembar ber-/Rotate 90/270.
+        dp = fitz.Point(ax, ay) * to_pdf * page.rotation_matrix
+        q1 = fitz.Point(dp.x, dp.y - 13.0) * page.derotation_matrix
+        q2 = fitz.Point(dp.x + 6.2 * len(stamp) + 6.0, dp.y) * page.derotation_matrix
+        rect = fitz.Rect(min(q1.x, q2.x), min(q1.y, q2.y),
+                         max(q1.x, q2.x), max(q1.y, q2.y))
+        col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+        a = page.add_freetext_annot(rect, stamp, fontsize=9.5, text_color=col,
+                                    fill_color=None, rotate=page.rotation,
+                                    align=fitz.TEXT_ALIGN_LEFT)
+        a.set_info(title=stamp, subject="Group Stamp", content=stamp)
+        a.set_flags(fitz.PDF_ANNOT_IS_PRINT)
+        a.update()
 
 
 def _legend(vis, entries, title):

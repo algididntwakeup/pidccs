@@ -91,7 +91,9 @@ async def test_end_to_end_full_system_lifecycle():
                     files={"file": (sheet5_file.name, f.read(), "image/png")},
                 )
             assert res_s5.status_code == 201, res_s5.text
-            sheet5 = res_s5.json()
+            # Upload selalu mengembalikan DAFTAR sheet (PDF multi-halaman dipecah
+            # server-side jadi satu Sheet per halaman); PNG = 1 elemen.
+            sheet5 = res_s5.json()[0]
             sheet5_id = sheet5["id"]
 
             with open(sheet6_file, "rb") as f:
@@ -100,7 +102,7 @@ async def test_end_to_end_full_system_lifecycle():
                     files={"file": (sheet6_file.name, f.read(), "image/png")},
                 )
             assert res_s6.status_code == 201, res_s6.text
-            sheet6 = res_s6.json()
+            sheet6 = res_s6.json()[0]
             sheet6_id = sheet6["id"]
             print(f"[E2E Step 2/8] Uploaded Sheet 005 ({sheet5_id}) & Sheet 006 ({sheet6_id})")
 

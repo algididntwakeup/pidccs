@@ -225,8 +225,9 @@ async def test_topology_api_endpoint_lifecycle():
                 data={"sheet_number": "002"},
             )
             assert s1_res.status_code == 201 and s2_res.status_code == 201
-            s1_id = s1_res.json()["id"]
-            s2_id = s2_res.json()["id"]
+            # Upload mengembalikan DAFTAR sheet (PDF multi-halaman dipecah per halaman).
+            s1_id = s1_res.json()[0]["id"]
+            s2_id = s2_res.json()[0]["id"]
 
             # 3. Patch sheets with OPC connectivity
             res1_payload = {

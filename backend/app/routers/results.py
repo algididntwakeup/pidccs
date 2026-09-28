@@ -76,6 +76,23 @@ async def get_sheet_result(
                 detail="Sheet has not been processed yet. Call /detect first."
             )
 
+    # Prewarm indeks vektor Magic Wand di daemon thread: klik pertama engineer
+    # tidak perlu menunggu build indeks (~1 s PyMuPDF). Best-effort, tidak boleh
+    # menggagalkan pembacaan result.
+    try:
+        if str(sheet.filename or sheet.file_path).lower().endswith(".pdf"):
+            from ..adapters.storage import LocalStorageAdapter
+            from ..config import settings
+            from pidcorr.lines import prewarm_vector_index
+            path = LocalStorageAdapter(settings.STORAGE_DIR).get_file_path(sheet.file_path)
+            prewarm_vector_index(
+                path,
+                dpi=float(sheet.result_json.get("dpi") or sheet.dpi or 350),
+                rot=int(sheet.result_json.get("rot") or 0),
+            )
+    except Exception:
+        pass
+
     return sheet.result_json
 
 

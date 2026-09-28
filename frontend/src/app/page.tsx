@@ -74,7 +74,13 @@ export default function ProjectsPage() {
     if (!file) return;
     try {
       setUploading(projectId);
-      await uploadSheet(projectId, file);
+      // PDF multi-halaman dipecah server-side: satu Sheet per halaman.
+      const created = await uploadSheet(projectId, file);
+      if (created.length > 1) {
+        window.alert(
+          `${file.name} berisi ${created.length} halaman — dipecah menjadi ${created.length} sheet.`
+        );
+      }
       await loadProjects();
     } catch (err) {
       alert('Upload failed: ' + err);
@@ -207,10 +213,10 @@ export default function ProjectsPage() {
 
                     {p.sheets && p.sheets.length > 0 && (
                       <Link
-                        href={`/project/${p.id}?sheetId=${p.sheets[0].id}`}
+                        href={`/project/${p.id}`}
                         className="text-xs font-semibold bg-slate-900 text-white hover:bg-indigo-600 px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition shadow-sm"
                       >
-                        <span>Open Workspace</span>
+                        <span>Open Folder</span>
                         <ArrowRight className="w-3.5 h-3.5" />
                       </Link>
                     )}
@@ -240,7 +246,7 @@ export default function ProjectsPage() {
                           >
                             {/* Thumbnail Area (Google Drive style card preview) */}
                             <Link
-                              href={`/project/${p.id}?sheetId=${s.id}`}
+                              href={`/project/${p.id}/sheet/${s.id}`}
                               className="block relative aspect-[4/3] bg-slate-900/5 overflow-hidden border-b border-slate-200"
                             >
                               <img
@@ -279,7 +285,7 @@ export default function ProjectsPage() {
                             <div className="p-3.5 bg-white flex-1 flex flex-col justify-between">
                               <div className="flex items-start justify-between gap-2">
                                 <Link
-                                  href={`/project/${p.id}?sheetId=${s.id}`}
+                                  href={`/project/${p.id}/sheet/${s.id}`}
                                   className="font-semibold text-xs text-slate-900 hover:text-indigo-600 truncate flex-1"
                                   title={s.filename}
                                 >
@@ -304,13 +310,15 @@ export default function ProjectsPage() {
                                 <span className="flex items-center space-x-1">
                                   <FileImage className="w-3 h-3 text-slate-400" />
                                   <span>
-                                    {s.width && s.height
+                                    {s.sheet_number
+                                      ? `Hal. ${s.sheet_number}`
+                                      : s.width && s.height
                                       ? `${s.width}×${s.height}`
                                       : 'P&ID Drawing'}
                                   </span>
                                 </span>
                                 <Link
-                                  href={`/project/${p.id}?sheetId=${s.id}`}
+                                  href={`/project/${p.id}/sheet/${s.id}`}
                                   className="text-indigo-600 hover:text-indigo-800 font-semibold flex items-center space-x-0.5"
                                 >
                                   <span>Studio</span>

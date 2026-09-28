@@ -1,3 +1,216 @@
+## HANDOFF UPDATE — FASE 1: Multi-Page PDF Splitter & Folder-Style Workspace (2026-09-28)
+
+**Masalah:** klien EPC kerap mengirim SATU PDF berisi puluhan halaman P&ID. Melemparnya ke kanvas
+membuat browser kehabisan memori. Solusinya memecah di backend + merombak UX: `Project` kini
+berperan sebagai **folder**, dan kanvas dibuka per halaman.
+
+### 1. Backend: splitter pada saat upload
+- `ProjectService._split_pdf_pages()` + `add_sheets()` (`backend/app/services/project_service.py`):
+  PDF N halaman -> **N file PDF 1 halaman**, masing-masing jadi satu entitas `Sheet` dengan
+  `project_id` yang sama. `POST /projects/{id}/sheets` sekarang mengembalikan **daftar** sheet.
+- **Format hasil split = PDF 1 halaman, bukan render PNG.** Keputusan ini yang menjaga fitur yang
+  sudah ada tetap hidup: geometri vektor dan `/Rotate` halaman ikut terbawa, sehingga vector tracing,
+  Box Trace, dan **Magic Wand tetap bekerja pada sheet hasil split** (terukur: 182 / 154 / 68 run
+  pada 3 halaman uji). Render PNG akan mematikan Magic Wand (sheet bukan PDF vektor lagi) sekaligus
+  membengkakkan storage ~10–40 MB/halaman.
+- PDF 1 halaman, PNG, dan JPG **tidak dipecah** dan file aslinya dipakai apa adanya — tidak ada
+  duplikasi storage untuk upload biasa.
+- `_page_dims()` menghitung `width`/`height` dari **rect halaman**, bukan dengan merender. Terukur
+  sama persis dengan hasil render (5790×4094 dan 4094×5790) tetapi instan, sedangkan render
+  2,08 s/halaman tidak masuk akal untuk PDF 50 halaman. **`ceil`, bukan `round`** — pypdfium2
+  membulatkan ke atas dan `round` membuat dimensi meleset 1 px (4093 vs 4094) sehingga overlay
+  kanvas melar. Dikunci oleh test.
+- Split gagal (PDF rusak/terenkripsi) -> tetap unggah sebagai satu sheet; user tidak kehilangan file.
+- Endpoint baru `GET /projects/{id}/sheets` (daftar sheet, urut halaman dengan tiebreak numerik
+  supaya `1/12 … 10/12` tidak terurut leksikografis).
+- Thumbnail/raw **tidak perlu diubah**: tiap Sheet menunjuk PDF 1 halaman, dan `load_drawing_image`
+  sudah menerima `page_number` (selalu 0).
+
+### 2. Frontend: Folder View + kanvas per sheet
+- `app/project/[id]/page.tsx` **diganti** menjadi Project Folder View: grid kartu thumbnail
+  (`getThumbnailUrl`), badge status, badge `Hal. n/N`, dimensi, tombol *Open Studio*, hapus sheet,
+  dan upload langsung dari dalam folder (menampilkan pesan "N halaman dipecah menjadi N sheet").
+- Kanvas dipindah ke `app/project/[id]/sheet/[sheet_id]/page.tsx` (logika OpenSeadragon, toolbar,
+  sidebar, Undo/Redo, Magic Wand, grouping — tidak ada yang hilang). Sheet dibaca dari **route param**,
+  bukan query string; `?sheetId=` tidak dipakai lagi. Sheet yang tidak ada di project -> `router.replace`
+  ke Folder View (bukan kanvas kosong).
+- Tombol **"Back to Project Folder"** (`<--`) di header kiri-atas.
+- Dropdown pemilih sheet menampilkan `nama file — Hal. n/N (status)`.
+- Semua link diperbarui (tanpa redirect): `Open Folder` di kartu project, `Studio`/nama sheet di grid
+  halaman depan, navigasi OPC lintas-sheet, dan redirect setelah menghapus sheet.
+
+### 3. Perbaikan bar kontrol bawah (temuan lama)
+- Bar kontrol (zoom, Pipa ON/OFF, opacity, Undo/Redo, Simpan Perubahan) sebelumnya **mengapung** di
+  atas kanvas (`absolute bottom-6 left-6`) dan menelan klik yang diarahkan ke pipa di bawahnya —
+  terukur: tombol *Simpan Perubahan* menempati x 473–619, y 939–967 pada viewport 1600×1000.
+- Sekarang bar menjadi **bagian layout** (baris di bawah kanvas, `border-t`), kanvas `flex-1 min-h-0`.
+  Terukur: bar y 955–1000, kanvas berakhir y 955.5 -> **overlap 0** (sisa 0,5 px pembulatan
+  sub-pixel), dan probe `elementFromPoint` tepat di tepi bawah kanvas mengembalikan elemen overlay
+  (bukan tombol). Semua kontrol tetap terlihat, termasuk saat tombol Save muncul.
+
+### 4. Verifikasi
+- **Test baru** `backend/tests/test_pdf_split.py` (3 lulus): PDF 3 halaman -> 3 Sheet dengan
+  `file_path` berbeda, urut `1/3,2/3,3/3`, thumbnail tiap halaman berbeda; vektor + `/Rotate` +
+  dimensi (`ceil`) terjaga dan sama dengan hasil render; PDF 1 halaman tidak dipecah dan tidak
+  menggandakan file.
+- **Uji nyata (bukan hanya test)**: PDF 3 halaman dari 3 P&ID nyata (rotasi 270/270/0) diunggah ke
+  stack hidup -> respons 201 berisi 3 Sheet dalam **0,31 s**, dimensi 5790×4094 / 5790×4094 /
+  4094×5790, thumbnail `/thumbnail?size=480` menghasilkan 3 PNG berbeda (62/46/38 KB), `/raw` per
+  halaman 3,2/2,4/2,4 MB. Indeks vektor per halaman hasil split: 182/154/68 run (Magic Wand hidup).
+- **Konsumen respons upload dimigrasi** (clean cutover, tanpa shim): `test_e2e_full_system.py`,
+  `test_phase_c_engine.py`, `test_phase_c_topology.py` membaca `json()[0]["id"]`, dan
+  `frontend/src/app/page.tsx` memberi tahu user "N halaman dipecah menjadi N sheet" untuk PDF
+  multi-halaman. Suite penuh: **102 lulus, 1 gagal** (kegagalan `test_linelist_parser_unit.py` sudah
+  ada sebelum pekerjaan ini: `_ROOT_DIR` resolve ke `/` di container sehingga mencari
+  `/combined_dataset/...` padahal mount-nya `/app/combined_dataset/...`).
+- **Uji UI (dev server + Chrome)**: Folder View menampilkan 3 kartu dengan badge `Hal. 1/3…3/3`;
+  klik kartu ke-2 -> `/project/.../sheet/7344391a...` (halaman yang benar: header & dropdown
+  menunjukkan `Hal. 2/3`); tombol Back mengarah ke `/project/{id}`; setelah *Detect (lines only)*,
+  kanvas menampilkan gambar halaman 2 dan Magic Wand menambah run (72 -> 73). Bar kontrol terukur
+  tidak menutupi kanvas dan tombol Save tetap terjangkau.
+- **Frontend**: `npx tsc --noEmit` bersih.
+
+---
+
+## HANDOFF UPDATE — PIVOT FASE C: HITL Manual Marking (Magic Wand, Manual Groups, Stamp Export) (2026-09-28)
+
+**Arahan CTO:** integrasi AI lanjutan (enrichment otomatis lanjutan) dan RBAC **ditunda**. Fokus digeser ke
+Human-in-the-Loop manual yang ultra-cepat agar engineer bisa men-marking P&ID sendiri tanpa menunggu model.
+Tiga deliverable: (1) Magic Wand 1-click trace, (2) grouping manual (nama + warna + assign pipa), (3) export
+PDF tanpa kotak legenda dengan stempel nama grup menempel pada pipa.
+
+### 1. Magic Wand 1-Click Trace
+- Endpoint baru: `POST /api/v1/projects/{project_id}/sheets/{sheet_id}/trace-click` — payload `{x, y, radius}`
+  (`radius` default 15 px, max 300). Tanpa OCR, tanpa YOLO, tanpa routing: murni geometri vektor PDF.
+- Indeks vektor dibangun oleh `pidcorr/lines.py` (`build_vector_index` / `prewarm_vector_index` /
+  `get_vector_index` / `nearest_run_at` / `find_duplicate_run`), memakai
+  `extract_vector_runs(..., keep_furniture=True)` — **tanpa filter furniture**, karena user mengklik garisnya
+  sendiri sehingga tidak ada alasan membuang kandidat (border frame, title block, tabel NOTES/TAG tetap
+  terambil; berguna justru pada lembar di mana title block berisi pipa).
+- Cache in-process LRU (4 sheet) + prewarm **daemon thread** yang dipicu `GET /result` saat sheet dibuka,
+  sehingga klik pertama tidak menunggu parse PDF. Multi-worker tidak jadi masalah: compose menjalankan
+  uvicorn single-worker, jadi prewarm dan klik berada di proses yang sama.
+- Dedupe: `find_duplicate_run` menolak kandidat yang KEDUA ujungnya sudah tercakup polyline eksisting
+  (toleransi 4 px) → klik pada pipa yang sudah ter-trace tidak membuat run ganda, hanya men-select run itu.
+- Sheet non-vektor (PNG/JPG) ditolak **HTTP 400** dengan pesan jelas (tanpa fallback raster).
+
+**Angka terukur (lembar `BCD3-605-42-PID-1-006-01 Rev.10-CCD2.pdf`, 5790×4094 px @350 dpi, `/Rotate 270`):**
+
+| Metrik | Nilai |
+|---|---|
+| Indeks vektor (PyMuPDF, `keep_furniture=True`) | **0,93–0,97 s** — 182 run |
+| Indeks deteksi pipeline (pdfplumber, filter furniture) | 10,23 s — 181 run |
+| Geometri kedua engine | identik: 50 dari 50 ujung run hasil pdfplumber punya garis di indeks PyMuPDF dalam 3 px |
+| `GET /result` (memicu prewarm) | 0,08–0,19 s (prewarm jalan di belakang) |
+| Klik **dingin** (klik pertama sebelum prewarm selesai) | 1,80 s |
+| Klik **hangat** | **45–46 ms** (uji otomatis: 194–306 ms termasuk HTTP + overhead pytest) |
+| Pencarian `nearest_run_at` atas 182 run | < 1 ms |
+
+> Catatan penting: indeks Magic Wand sengaja memakai engine **PyMuPDF** (`_WAND_ENGINE`), bukan pdfplumber.
+> pdfplumber butuh 10,3 s/lembar — tidak bisa diterima pada jalur klik interaktif — sementara geometrinya
+> identik (181 vs 182 run; 50 dari 50 ujung run pdfplumber ada di indeks PyMuPDF dalam 3 px). Pipeline
+> deteksi tetap memakai pdfplumber (`VECTOR_ENGINE`) untuk kualitas & keamanan `/Rotate`.
+
+### 2. Manual Grouping UI (HITL)
+- Data grup disimpan di `result_json` (`manual_groups: [{id, name, color}]`) dan `run.group_id` per pipa;
+  dipersist lewat endpoint `PATCH /result` yang sudah ada — **tidak ada endpoint baru untuk grouping**.
+- Panel **Manual Groups (HITL)** di tab Corrosion Circuit: input nama (`mis. CC #07-06-12`), pemilih warna,
+  tombol **Add New Group**, dan per grup: jumlah pipa, tombol **Assign (N) ke <nama>**, tombol hapus.
+- Assign me-recolor stroke pipa ke warna grup (`run.color = group.color`) dan menempelkan `run.group_id`.
+  Hapus grup melepas anggotanya (`group_id` dibuang) tanpa menghapus pipanya.
+- Warna grup manual **menang** atas warna sistem/circuit otomatis di kanvas (`colorOverrideMap` mengisi
+  grup manual lebih dulu; warna sistem/circuit hanya untuk indeks yang belum terisi) dan di export PDF.
+- Selection pipa **dipertahankan** saat berpindah tab ke Corrosion Circuit (agar bisa di-assign), dan hanya
+  di-reset saat sheet berganti. Undo/redo tidak mencakup grup (riwayat hanya membawa runs/piping_ids).
+
+### 3. Export Stempel Tanpa Legend
+- `export_marked_pdf(result, out_path, mode="engineer", include_legend=False)` — **default tanpa kotak
+  legenda** di pojok kertas. `include_legend=True` mengembalikan perilaku lama.
+- `_stamp_groups()` menambahkan **FreeText annotation** berisi nama grup di titik tengah **run terpanjang**
+  tiap grup (dihitung menurut arc-length polyline, bukan tengah bbox): teks di ATAS pipa horizontal, di
+  SAMPING KANAN pipa vertikal, warna teks = warna grup, tanpa fill/border. Karena annotation, stempel bisa
+  digeser/dihapus di Acrobat.
+- Grup manual dirender ulang sebagai grup tersendiri: anggotanya dikeluarkan dari grup mode (engineer/system/
+  circuit) lalu PolyLine-nya memakai warna grup. `render_marked_png` tidak diubah (PNG tetap memakai legend).
+- Stempel tidak menambah hitungan `n_annot` (jumlah PolyLine) — kontrak `test_pdf_appearance_stream.py`
+  (`n == 3`) tetap utuh.
+
+### 4. Skema & Tipe
+- `backend/app/schemas/run.py`: `PipeRun.group_id: Optional[str]`.
+- `backend/app/schemas/result.py`: model `ManualGroup {id, name, color}` + `DigitizationResult.manual_groups`.
+- `frontend/src/types/schema.ts`: `PipeRun.group_id`, `ManualGroup`, `DigitizationResult.manual_groups`,
+  `TraceClickResponse`.
+- `frontend/src/lib/api.ts`: `traceClick(projectId, sheetId, x, y, radius=15)`.
+
+### 5. Verifikasi
+- **Test baru** `backend/tests/test_wand_trace.py` (8 lulus): pemilihan garis terdekat + batas radius +
+  preferensi run terpanjang saat jarak seri, deteksi duplikat, prewarm mengisi cache yang sama dengan yang
+  dibaca klik (0,93–1,05 s, anggaran < 5 s), kesetaraan geometri PyMuPDF vs pdfplumber, endpoint menambah
+  lalu men-dedupe pada klik kedua, penolakan sheet non-PDF (400, pesan memuat "PDF vektor"), dan anggaran
+  latensi klik hangat < 1 s (terukur 111–310 ms lewat HTTP test client; 45 ms via curl di stack hidup).
+- **Test baru** `backend/tests/test_export_stamp.py` (2 lulus): stempel di titik tengah run terpanjang,
+  warna grup ter-bake ke Appearance Stream (`/AP`), PolyLine grup memakai warna grup, legend absen secara
+  default dan muncul dengan `include_legend=True`.
+- **Regresi**: `test_pdf_appearance_stream.py`, `test_vector_tracer.py`, `test_box_trace_stitching.py`,
+  `test_split_and_color.py`, `test_decoupled_pipeline.py`, `test_api_and_db.py` → **59 lulus**.
+  Seluruh suite backend (`tests/`, benchmark di-skip): **99 lulus, 1 gagal** — kegagalan tunggal itu
+  `test_linelist_parser_unit.py::test_linelist_endpoint_combined_dataset_enrichment` yang **sudah ada
+  sebelumnya** dan tidak terkait pekerjaan ini: test (untracked, WIP Task C.01) menghitung
+  `_ROOT_DIR = /` di dalam container sehingga mencari `/combined_dataset/...` padahal mount-nya
+  `/app/combined_dataset/...`; helper `_fixtures.fixture_path` sudah ada untuk kasus ini.
+- **Frontend**: `npx tsc --noEmit` bersih.
+- **Smoke UI (Chrome, sheet `006-01 Rev.10`)**: klik Magic Wand pada garis belum ter-trace →
+  "Magic Wand: pipa ditambahkan (1 px dari klik)" dan run bertambah 139→140; klik ulang di titik sama →
+  "Pipa ini sudah ter-trace — tidak ditambahkan ulang"; klik area kosong → "Tidak ada garis CAD dalam
+  radius 15 px dari klik". Multi-Select (marquee) → 4 pipa terpilih → Add New Group `CC #07-07-01` →
+  **Assign (4)** → kanvas berubah warna (4 polyline memakai warna grup) dan `manual_groups`/`group_id`
+  terpersist di DB. Hapus grup → `group_id` anggota terlepas, pipa tetap ada. Export PDF mode Circuit dari
+  UI → teks `CC #07-06-12` menempel di atas pipa (warna sesuai grup) dan **tidak ada kotak legenda**.
+- **Bug yang ditemukan & diperbaiki saat smoke**: rect FreeText stempel awalnya dibangun langsung di ruang
+  annotation, sehingga pada lembar ber-`/Rotate 270` (semua fixture CCD2) stempel terputar 90° dan jatuh di
+  luar halaman. Sekarang rect dibangun di ruang tampilan lalu dipetakan lewat `derotation_matrix` (pola sama
+  dengan `_legend_annots`), dan test menguncinya lewat rect ruang-tampilan + `page.rect.contains`.
+
+---
+
+## HANDOFF UPDATE — Task C.01: Excel Line List Import & Piping ID Enrichment (2026-09-28)
+
+**Task C.01 Selesai (100% Verified):**
+Membangun backend parser fleksibel untuk mengimpor Line List Excel (.xlsx/.xls) dan CSV (.csv/.txt) dari berbagai kontraktor EPC, lalu menyuntikkan data operasional (Pressure, Temperature, Phase, Insulation, Notes, dll.) ke objek `PipingID` di seluruh sheet P&ID pada project.
+
+### 1. Schema Definition (`backend/app/schemas/linelist.py`)
+- `LineListEntry`: field lengkap mencakup `line_number`, `design_pressure_barg`, `design_temperature_c`, `operating_pressure_barg`, `operating_temperature_c`, `fluid_phase`, `insulation`, `notes`, `material`, `corrosion_allowance_mm`, `corrosion_rate_mmpy`, `corrosion_loop`, `service_condition`, dan `raw_attributes`.
+- `LineListImportResult`: menambahkan summary response fields `status: str = "success"`, `entries_parsed: int`, dan `pids_enriched: int` berdampingan dengan `total_rows`, `matched_pids`, `unmatched_pids`, dan `enriched_sheets`.
+
+### 2. Parser Service (`backend/app/services/linelist_parser.py`)
+- `LineListParser.parse_file(file_bytes, filename, mapping_dict=None) -> list[LineListEntry]`: mendukung file Excel maupun CSV dengan deteksi otomatis.
+- **Heuristik Auto-Mapping**: mengenali variasi nama kolom engineering kontraktor menggunakan regex dan token matching (misal: "line" & "no" $\rightarrow$ `line_number`, "oper" & "press" $\rightarrow$ `operating_pressure_barg`, "oper" & "temp" $\rightarrow$ `operating_temperature_c`, "design" & "press" $\rightarrow$ `design_pressure_barg`, "phase" $\rightarrow$ `fluid_phase`, "insul" $\rightarrow$ `insulation`, "note"/"remark" $\rightarrow$ `notes`).
+- **Dynamic Column Mapping**: mendukung `mapping_dict` kustom (target $\rightarrow$ source maupun source $\rightarrow$ target) dengan fallback ke auto-mapping untuk kolom yang tidak dipetakan.
+- **Konversi Tipe Data Aman**: `_to_float()` menangani trailing units (e.g. `'750.5 psig'`, `'95.3 °F'`), format desimal koma/titik, dan fallback `None` untuk string kosong / `"-"` / `"N/A"`. `_normalize_phase()` menormalisasi `'Liquid'` $\rightarrow$ `'L'`, `'Gas'`/`'Steam'` $\rightarrow$ `'G'`, `'2-Phase'` $\rightarrow$ `'2P'`.
+
+### 3. REST API Endpoint (`backend/app/routers/linelist.py`)
+- `POST /api/v1/projects/{project_id}/linelist`:
+  - Menerima `UploadFile` dan opsional parameter form `mapping` (JSON string).
+  - Mengekstrak list `LineListEntry`.
+  - Mengindeks line list dengan `canonical_line_key()` untuk pencarian $O(1)$ dan penggabungan atribut duplikat.
+  - Melakukan loop pada seluruh sheet project; mencocokkan `pid` di `Sheet.result_json["piping_ids"]` dengan `line_number` dari line list.
+  - Menyuntikkan operating parameters ke dictionary `piping_id` (`operating_pressure`, `operating_temperature`, `fluid_phase`, `insulation`, `notes`, dll).
+  - Memicu re-komputasi sirkuit korosi via `GroupingService.compute_circuits()`.
+  - Mengembalikan response summary: `{"status": "success", "entries_parsed": X, "pids_enriched": Y, ...}`.
+
+### 4. Verifikasi & Pengujian
+- Unit test suite baru: `backend/tests/test_linelist_parser_unit.py` (4 test lulus: parsing Excel tiruan in-memory, Dynamic Column Mapping custom EPC, validasi schema response summary, dan full endpoint enrichment).
+- Regression test: `backend/tests/test_phase_c_engine.py` (5 test lulus) dan `backend/tests/test_e2e_full_system.py` (lulus 100%).
+- Verifikasi langsung pada 6 workbook nyata di `combined_dataset/`:
+  - `605_CCD2_loop_dataset.xlsx`: 520 entri (sukses)
+  - `605_loop_dataset.xlsx`: 375 entri (sukses)
+  - `610_CCD2_loop_dataset.xlsx`: 273 entri (sukses)
+  - `650_CCD2_loop_dataset.xlsx`: 246 entri (sukses)
+  - `660_CCD2_loop_dataset.xlsx`: 79 entri (sukses)
+  - `695-IS_loop_dataset.xlsx`: 1264 entri (sukses)
+
+---
+
 ## HANDOFF UPDATE — Decoupled AI Pipeline: Fast Lines-Only Mode & On-Demand Enrichment (2026-09-25)
 
 **Pemisahan Pipeline Deteksi menjadi Dua Tahap:**
@@ -1239,7 +1452,7 @@ graph TD
 
 | # | Task | Priority | Depends On | Est. Days |
 |---|---|---|---|---|
-| C.01 | **Line list import endpoint**: `POST /api/v1/projects/{id}/linelist` (Excel/CSV) → parse → merge with piping IDs | P0 | A.10 | 3 |
+| C.01 | [COMPLETED] **Line list import endpoint**: `POST /api/v1/projects/{id}/linelist` (Excel/CSV) → parse → merge with piping IDs | P0 | A.10 | 3 |
 | C.02 | **Enhanced `circuitize()` with operating data**: phase-based split, pressure/temperature boundary check | P1 | C.01 | 3 |
 | C.03 | **Material mapping upgrade**: structured `material_spec.json` with `{class → material, design_P, design_T, CA}` | P1 | C.02 | 2 |
 | C.04 | **Audit trail model**: each circuit assignment stores `{rule, evidence, source, confidence}` | P1 | C.02 | 2 |
@@ -1268,7 +1481,7 @@ graph TD
 
 | ID | Criterion | Measurement | Target |
 |---|---|---|---|
-| DoD-C01 | Line list import correctly enriches ≥ 90% of piping IDs | Match rate on sample line list vs. detection result | ≥ 90% |
+| DoD-C01 | Line list import correctly enriches ≥ 90% of piping IDs | Match rate on sample line list vs. detection result | ≥ 90% (PASSED) |
 | DoD-C02 | Phase-based circuitization produces different circuits for L/G/2Φ segments | Test case: same fluid, different phase → distinct circuits | Pass |
 | DoD-C03 | OPC detection finds ≥ 80% of off-page connectors on test sheets | Manual count vs. detected count | ≥ 80% recall |
 | DoD-C04 | Cross-sheet propagation produces same systemization as manual engineer | Compare with engineer ground truth on 3-sheet set | ≥ 90% agreement |

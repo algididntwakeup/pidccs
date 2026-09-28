@@ -17,8 +17,11 @@ Model run = POLYLINE: `points=[(x,y),...]` (>=2 vertex). Segmen lurus = 2 titik.
 """
 from __future__ import annotations
 import math
+import os
+import threading
+import time
 from dataclasses import dataclass, field
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import numpy as np
 import cv2
 
@@ -1865,6 +1868,123 @@ def stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0):
         r.pop("_drop", None)
     consumed = [cid for cid in consumed_ids if cid]
     return existing, remaining_new, consumed
+
+# --------------------------------------------------- Magic Wand (HITL) -------------
+# Indeks geometri vektor PDF untuk fitur 1-click trace: satu klik pada garis pipa
+# -> ambil PipeRun terdekat. Indeks dibangun dari SELURUH geometri vektor
+# (`keep_furniture=True`) karena user memilih garisnya sendiri; dibangun di daemon
+# thread saat sheet dibuka (`GET /result`) supaya klik pertama tidak menunggu
+# parse pdfplumber (terukur 2.3-6.2 s/lembar) — klik hanya menunggu bila cache
+# benar-benar dingin.
+_WAND_INDEX_CACHE = OrderedDict()      # key -> list[PipeRun]
+_WAND_INDEX_LOCK = threading.Lock()
+_WAND_INDEX_INFLIGHT = set()           # key yang sedang dibangun daemon thread
+_WAND_INDEX_MAX = 4                    # LRU: cukup untuk sheet yang sedang dibuka
+_WAND_INDEX_TIMEOUT_S = 60.0           # batas tunggu prewarm sebelum build sinkron
+# Magic Wand memakai PyMuPDF, BUKAN pdfplumber: geometrinya identik (terukur 181 vs
+# 182 run pada lembar yang sama, uji tetangga terdekat median 0.0 pt) tetapi
+# pdfplumber butuh 10.3 s/lembar sedangkan PyMuPDF 0.97 s. Klik adalah jalur
+# interaktif — 10 s tidak bisa diterima; deteksi pipeline tetap memakai
+# pdfplumber (kualitas & keamanan /Rotate) lewat env VECTOR_ENGINE.
+_WAND_ENGINE = "pymupdf"
+
+def _wand_index_key(pdf_path, dpi, rot, page_index, engine):
+    st = os.stat(pdf_path)
+    return (os.path.abspath(pdf_path), st.st_mtime_ns, st.st_size,
+            int(dpi), int(rot) % 360, int(page_index),
+            (engine or _WAND_ENGINE).lower())
+
+def build_vector_index(pdf_path, dpi=350, rot=0, page_index=0, engine=None):
+    """Indeks geometri vektor penuh (tanpa filter furniture) — sinkron."""
+    # Import LOKAL wajib: vector_tracer mengimpor ..lines (circular di level modul).
+    from .implementations.vector_tracer import extract_vector_runs
+    return extract_vector_runs(pdf_path, dpi=dpi, rot=rot, page_index=page_index,
+                               engine=engine or _WAND_ENGINE, keep_furniture=True)
+
+def _wand_index_store(key, index):
+    with _WAND_INDEX_LOCK:
+        _WAND_INDEX_CACHE[key] = index
+        _WAND_INDEX_CACHE.move_to_end(key)
+        while len(_WAND_INDEX_CACHE) > _WAND_INDEX_MAX:
+            _WAND_INDEX_CACHE.popitem(last=False)
+
+def prewarm_vector_index(pdf_path, dpi=350, rot=0, page_index=0, engine=None):
+    """Bangun indeks di daemon thread (idempoten). Tidak pernah melempar.
+
+    Terukur pada lembar 5790x4094: selesai ~1 s setelah sheet dibuka, sehingga klik
+    pertama sudah hangat. `engine=None` -> `_WAND_ENGINE` (PyMuPDF).
+    """
+    if not pdf_path or not os.path.exists(pdf_path):
+        return
+    try:
+        key = _wand_index_key(pdf_path, dpi, rot, page_index, engine)
+    except OSError:
+        return
+    with _WAND_INDEX_LOCK:
+        if key in _WAND_INDEX_CACHE or key in _WAND_INDEX_INFLIGHT:
+            return
+        _WAND_INDEX_INFLIGHT.add(key)
+
+    def _worker():
+        try:
+            _wand_index_store(key, build_vector_index(pdf_path, dpi=dpi, rot=rot,
+                                                      page_index=page_index, engine=engine))
+        except Exception:
+            pass
+        finally:
+            with _WAND_INDEX_LOCK:
+                _WAND_INDEX_INFLIGHT.discard(key)
+
+    threading.Thread(target=_worker, daemon=True, name="wand-index-prewarm").start()
+
+def get_vector_index(pdf_path, dpi=350, rot=0, page_index=0, engine=None):
+    """Indeks dari cache; bila dingin, tunggu prewarm (maks 60 s) lalu build sinkron."""
+    key = _wand_index_key(pdf_path, dpi, rot, page_index, engine)
+    deadline = time.time() + _WAND_INDEX_TIMEOUT_S
+    while True:
+        with _WAND_INDEX_LOCK:
+            idx = _WAND_INDEX_CACHE.get(key)
+            if idx is not None:
+                return idx
+            inflight = key in _WAND_INDEX_INFLIGHT
+        if not inflight or time.time() >= deadline:
+            break
+        time.sleep(0.05)
+    index = build_vector_index(pdf_path, dpi=dpi, rot=rot, page_index=page_index,
+                               engine=engine)
+    _wand_index_store(key, index)
+    return index
+
+def nearest_run_at(index, x, y, radius=15.0):
+    """(run, jarak) terdekat dari (x, y) dalam radius; `(None, inf)` bila kosong.
+
+    Toleransi 0.5 px untuk seri jarak -> menang run yang lebih panjang (pipa asli
+    menang atas stub/tick pendek yang kebetulan menyentuh titik klik).
+    """
+    best, best_d = None, float("inf")
+    for r in index:
+        d = _poly_dist((x, y), r.points)
+        if d > radius:
+            continue
+        if best is None or d < best_d - 0.5 or (d <= best_d + 0.5 and r.length > best.length):
+            best, best_d = r, d
+    return best, best_d
+
+def find_duplicate_run(runs, cand, tol_px=4.0):
+    """Indeks run di `runs` (dict result_json) yang sudah mencakup `cand` — atau None.
+
+    Duplikat = kedua UJUNG kandidat jatuh dalam `tol_px` dari polyline eksisting.
+    """
+    if cand is None or len(cand.points) < 2:
+        return None
+    for i, r in enumerate(runs):
+        pts = r.get("points") or []
+        if len(pts) < 2:
+            continue
+        if (_poly_dist(cand.points[0], pts) <= tol_px and
+                _poly_dist(cand.points[-1], pts) <= tol_px):
+            return i
+    return None
 
 def extract_pipe_runs(img_bgr, dpi=350, detections=None, furniture=None, diagonal=False,
                       boxes=None, **kw):

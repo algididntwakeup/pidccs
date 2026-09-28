@@ -20,6 +20,12 @@ class TraceRegionRequest(BaseModel):
     y2: float = Field(..., ge=0)
     sheet_id: Optional[str] = None
 
+class TraceClickRequest(BaseModel):
+    """Satu klik pada garis pipa (koordinat ruang citra = ruang `runs`)."""
+    x: float = Field(..., ge=0)
+    y: float = Field(..., ge=0)
+    radius: float = Field(15.0, gt=0, le=300)
+
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
@@ -70,7 +76,7 @@ async def delete_project(
     return None
 
 
-@router.post("/{project_id}/sheets", response_model=SheetResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/{project_id}/sheets", response_model=List[SheetResponse], status_code=status.HTTP_201_CREATED)
 async def upload_sheet(
     project_id: str,
     file: UploadFile = File(...),
@@ -80,12 +86,17 @@ async def upload_sheet(
     user_id: str = Form("default_user"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload a P&ID sheet drawing (PDF, PNG, JPG) to a project."""
+    """Upload a P&ID drawing (PDF, PNG, JPG) to a project.
+
+    PDF multi-halaman dipecah di sini: satu `Sheet` per halaman, masing-masing
+    menunjuk file PDF 1 halaman sendiri. PDF 1 halaman / PNG / JPG tetap 1 Sheet.
+    Response selalu berupa daftar agar pemanggil tidak perlu tahu jumlah halaman.
+    """
     project = await ProjectService.get_project(db=db, project_id=project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    sheet = await ProjectService.add_sheet(
+    sheets = await ProjectService.add_sheets(
         db=db,
         project_id=project_id,
         file=file,
@@ -94,7 +105,27 @@ async def upload_sheet(
         tenant_id=tenant_id,
         user_id=user_id,
     )
-    return sheet
+    return sheets
+
+@router.get("/{project_id}/sheets", response_model=List[SheetResponse])
+async def list_sheets(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """List every sheet (page) in a project — dipakai grid thumbnail Folder View.
+
+    Urut `created_at` (satu batch upload selalu menaik) dengan tiebreak numerik pada
+    nomor halaman, supaya `1/12, 2/12, ... 10/12` tidak terurut leksikografis.
+    """
+    project = await ProjectService.get_project(db=db, project_id=project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    def _order(sheet):
+        head = (sheet.sheet_number or "").split("/")[0]
+        return (sheet.created_at, int(head) if head.isdigit() else 0)
+
+    return sorted(project.sheets, key=_order)
 
 
 @router.post("/{project_id}/trace-region")
@@ -351,6 +382,84 @@ async def trace_region(
         "stitched": stitched_runs_count,
         "total_runs": len(result["runs"]),
         "result": result,
+    }
+
+@router.post("/{project_id}/sheets/{sheet_id}/trace-click")
+async def trace_click(
+    project_id: str,
+    sheet_id: str,
+    payload: TraceClickRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Magic Wand (HITL): ambil SATU garis vektor CAD terdekat dari titik klik.
+
+    Tanpa OCR, tanpa YOLO, tanpa routing — murni geometri: indeks vektor PDF
+    (di-prewarm saat sheet dibuka) -> `nearest_run_at` -> dedupe -> append run.
+    """
+    from ..adapters.storage import LocalStorageAdapter
+    from ..config import settings
+    from pidcorr.lines import get_vector_index, nearest_run_at, find_duplicate_run
+
+    sheet = await ProjectService.get_sheet(db, sheet_id)
+    if not sheet or sheet.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Sheet not found in this project")
+
+    result = dict(sheet.result_json or {})
+    if not result:
+        raise HTTPException(
+            status_code=400,
+            detail="Sheet belum punya hasil tracing — jalankan Detect P&ID dulu",
+        )
+
+    if not str(sheet.filename or sheet.file_path).lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Magic Wand hanya bekerja pada sheet PDF vektor. "
+                   "Untuk PNG/JPG gunakan Box Trace atau Manual Pen.",
+        )
+
+    image_path = LocalStorageAdapter(settings.STORAGE_DIR).get_file_path(sheet.file_path)
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="File gambar sheet tidak ditemukan di storage")
+
+    dpi = float(result.get("dpi") or sheet.dpi or 350)
+    rot = int(result.get("rot") or 0)
+    index = get_vector_index(image_path, dpi=dpi, rot=rot)
+    runs = list(result.get("runs", []))
+
+    cand, dist = nearest_run_at(index, float(payload.x), float(payload.y),
+                               radius=float(payload.radius))
+    if cand is None:
+        return {
+            "status": "success", "added": False, "reason": "none",
+            "distance": None, "total_runs": len(runs), "result": result,
+        }
+
+    dup = find_duplicate_run(runs, cand)
+    if dup is not None:
+        return {
+            "status": "success", "added": False, "reason": "duplicate",
+            "run_idx": dup, "distance": round(dist, 2),
+            "total_runs": len(runs), "result": result,
+        }
+
+    pts = [[int(p[0]), int(p[1])] for p in cand.points]
+    new_run = {
+        "id": f"wand-{uuid.uuid4().hex[:12]}",
+        "points": pts,
+        "axis": cand.axis if cand.axis in ("h", "v", "d", "poly") else "poly",
+        "x1": min(p[0] for p in pts), "y1": min(p[1] for p in pts),
+        "x2": max(p[0] for p in pts), "y2": max(p[1] for p in pts),
+        "color": "#2563EB", "manual": True, "label": "",
+    }
+    runs.append(new_run)
+    result["runs"] = runs
+    sheet.result_json = result
+    await db.commit()
+    return {
+        "status": "success", "added": True, "reason": None,
+        "run_idx": len(runs) - 1, "run": new_run, "distance": round(dist, 2),
+        "total_runs": len(runs), "result": result,
     }
 
 

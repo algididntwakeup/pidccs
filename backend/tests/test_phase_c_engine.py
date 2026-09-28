@@ -193,7 +193,8 @@ async def test_linelist_api_endpoint_lifecycle():
                 data={"sheet_number": "001"},
             )
             assert res_sheet.status_code == 201, res_sheet.text
-            sheet_id = res_sheet.json()["id"]
+            # Upload mengembalikan DAFTAR sheet (PDF multi-halaman dipecah per halaman).
+            sheet_id = res_sheet.json()[0]["id"]
 
             # 3. Populate sheet with sample detection result conforming to DigitizationResult
             initial_result = {

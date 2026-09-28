@@ -48,6 +48,12 @@ class OffPageConnector(BaseModel):
     )
 
 
+class ManualGroup(BaseModel):
+    """Grup marking manual engineer (HITL): nama + warna untuk sekumpulan run."""
+    id: str = Field(..., description="Unique group identifier")
+    name: str = Field(..., description="Engineer-facing group name (dipakai sebagai stempel export)")
+    color: str = Field(default="#F59E0B", description="Hex color applied to member runs")
+
 class DigitizationResult(BaseModel):
     image_path: str = Field(default="", description="Path or reference identifier of base drawing")
     dpi: int = Field(default=350, description="Rasterization resolution DPI")
@@ -60,5 +66,6 @@ class DigitizationResult(BaseModel):
     conn_points: List[ConnectionPoint] = Field(default_factory=list, description="Detected spec break connection points")
     opcs: List[OffPageConnector] = Field(default_factory=list, description="Detected off-page continuation connectors")
     furniture: List[List[int]] = Field(default_factory=list, description="Title blocks, notes, and tables bounding boxes [x1, y1, x2, y2]")
+    manual_groups: List[ManualGroup] = Field(default_factory=list, description="Grup marking manual engineer (HITL)")
     _break_pairs: Optional[List[List[int]]] = None
     _split_done: Optional[bool] = None

@@ -600,7 +600,8 @@ def _rotate_point(x: float, y: float, rot: int, w: float, h: float) -> Tuple[flo
 
 def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
                         rot: int = 0, progress: Optional[Callable[[str], None]] = None,
-                        page=None, engine: str = "pdfplumber") -> List[PipeRun]:
+                        page=None, engine: str = "pdfplumber",
+                        keep_furniture: bool = False) -> List[PipeRun]:
     """Ekstrak PipeRun dari geometri vektor PDF.
 
     Args:
@@ -616,6 +617,10 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
             (~0.3 s, tetapi koordinatnya un-rotated sehingga `rotation_matrix`
             wajib diterapkan). Geometri keduanya identik (uji tetangga terdekat:
             median 0.0 pt); pilihan ini murni soal kecepatan vs keamanan rotasi.
+        keep_furniture: `True` = JANGAN buang furniture (border frame, title
+            block, tabel NOTES/TAG). Dipakai Magic Wand: user mengklik garis
+            tertentu secara eksplisit, jadi tidak ada alasan membuang geometri
+            apa pun dari kandidat. Default `False` = perilaku deteksi biasa.
 
     Returns:
         list[PipeRun] dengan skema identik keluaran skeleton tracer.
@@ -628,7 +633,8 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
             if progress:
                 progress(f"vektor: {len(segs)} ruas garis (pdfplumber, display-space)")
             # pdfplumber sudah display-space; rotasi manual tetap diterapkan bila ada.
-            return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress)
+            return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress,
+                                 keep_furniture=keep_furniture)
         except ImportError:
             # Engine opsional: jangan gagalkan tracing hanya karena paketnya tidak
             # terpasang — jatuh ke PyMuPDF, bukan ke jalur raster.
@@ -663,7 +669,8 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
                              rotation_matrix=page.rotation_matrix)
         if progress:
             progress(f"vektor: {len(segs)} ruas garis dari PDF")
-        return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress)
+        return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress,
+                             keep_furniture=keep_furniture)
     finally:
         if own_doc is not None:
             try:
@@ -674,7 +681,8 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
 
 def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
                   dpi: int = 350, rot: int = 0,
-                  progress: Optional[Callable[[str], None]] = None) -> List[PipeRun]:
+                  progress: Optional[Callable[[str], None]] = None,
+                  keep_furniture: bool = False) -> List[PipeRun]:
     """Ruas lurus (pt, display-space) -> PipeRun (px) — merge, filter, konversi."""
     runs_pt, axes = _to_runs(segs, min_seg_pt=GLYPH_MAX_SEG_PT)
     # Buang sisa glyph/dash yang tidak tersambung ke jaringan mana pun.
@@ -682,7 +690,7 @@ def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
     # Buang baris/kolom TABEL (title block, TAG list, NOTES) berdasarkan
     # struktur geometrisnya — jalur raster sudah mem-blackout area ini lebih
     # dulu, sedangkan jalur vektor harus mengenalinya dari pola garis.
-    table_regions = _table_regions(runs_pt, axes)
+    table_regions = [] if keep_furniture else _table_regions(runs_pt, axes)
     if table_regions:
         runs_pt, axes = _drop_inside_regions(runs_pt, axes, table_regions)
     if progress:
@@ -696,7 +704,7 @@ def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
         length_pt = _dist(a, b)
         # Filter Fase 1 (rasio, jadi sah dalam satuan pt): buang border frame,
         # title block, tabel NOTES, dan tick koordinat.
-        if is_furniture_geometry(x0, y0, x1, y1, length_pt, W_pt, H_pt):
+        if not keep_furniture and is_furniture_geometry(x0, y0, x1, y1, length_pt, W_pt, H_pt):
             continue
         px0, py0 = _rotate_point(x0 * scale, y0 * scale, rot, W_pt * scale, H_pt * scale)
         px1, py1 = _rotate_point(x1 * scale, y1 * scale, rot, W_pt * scale, H_pt * scale)
@@ -709,6 +717,8 @@ def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
     # di ruang PDF belum ada deteksi YOLO maupun bbox OCR, jadi guard-nya tidak
     # aktif — yang bekerja adalah band simetris, aturan tepi, dan aturan span.
     # Ini yang membuang tabel TAG/NOTES di puncak lembar dan title block bawah.
+    if keep_furniture:
+        return out
     return suppress_furniture_geometry(out, page_wh=(W_pt * scale, H_pt * scale), dpi=dpi)
 
 

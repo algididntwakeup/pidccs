@@ -1,4 +1,4 @@
-import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse } from '@/types/schema';
+import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse, TraceClickResponse } from '@/types/schema';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -38,7 +38,13 @@ export async function deleteSheet(projectId: string, sheetId: string): Promise<v
   if (!res.ok) throw new Error('Failed to delete sheet');
 }
 
-export async function uploadSheet(projectId: string, file: File, dpi: number = 350): Promise<SheetResponse> {
+export async function fetchSheets(projectId: string): Promise<SheetResponse[]> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets`);
+  if (!res.ok) throw new Error('Failed to fetch sheets');
+  return res.json();
+}
+
+export async function uploadSheet(projectId: string, file: File, dpi: number = 350): Promise<SheetResponse[]> {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('dpi', dpi.toString());
@@ -48,6 +54,8 @@ export async function uploadSheet(projectId: string, file: File, dpi: number = 3
     body: formData,
   });
   if (!res.ok) throw new Error('Failed to upload drawing sheet');
+  // A multi-page PDF is split server-side into one sheet per page, so the response
+  // is always a list.
   return res.json();
 }
 
@@ -262,6 +270,25 @@ export async function traceRegion(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to trace region' }));
     throw new Error(err.detail || 'Failed to trace region');
+  }
+  return res.json();
+}
+
+export async function traceClick(
+  projectId: string,
+  sheetId: string,
+  x: number,
+  y: number,
+  radius: number = 15
+): Promise<TraceClickResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/trace-click`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x, y, radius }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Magic Wand gagal' }));
+    throw new Error(err.detail || 'Magic Wand gagal');
   }
   return res.json();
 }

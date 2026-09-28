@@ -15,6 +15,7 @@ import {
   Hand,
   GripVertical,
   BoxSelect,
+  Wand2,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
 
@@ -82,9 +83,10 @@ interface InteractivePipeCanvasProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
-  traceTool: 'pan' | 'rescan' | 'pen' | 'multiselect';
-  onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen' | 'multiselect') => void;
+  traceTool: 'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand';
+  onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand') => void;
   onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }) => Promise<void>;
+  onTraceClick: (x: number, y: number) => Promise<void>;
   onManualRun: (points: [number, number][]) => Promise<void>;
   // Optional mode-driven color override: maps run index -> CSS color.
   // Used for Corrosion System / Circuit views so circuit coloring is rendered
@@ -118,6 +120,7 @@ export default function InteractivePipeCanvas({
   traceTool,
   onSetTraceTool,
   onRescan,
+  onTraceClick,
   onManualRun,
   colorOverrideMap,
   dimUncolored,
@@ -243,7 +246,7 @@ export default function InteractivePipeCanvas({
   useEffect(() => {
     if (!viewer) return;
 
-    if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect') {
+    if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect' || traceTool === 'wand') {
       viewer.setMouseNavEnabled(false);
       if (container) {
         container.style.pointerEvents = 'auto';
@@ -308,7 +311,7 @@ export default function InteractivePipeCanvas({
       container.style.cursor = 'grab';
     } else {
       // Restore interaction for the currently active tool.
-      if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect') {
+      if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect' || traceTool === 'wand') {
         try {
           viewer.setMouseNavEnabled(false);
         } catch (e) {}
@@ -728,7 +731,22 @@ export default function InteractivePipeCanvas({
   // -------------------------------------------------------------
   // BOX TRACE (RESCAN) HANDLER
   // -------------------------------------------------------------
-  const handleSvgMouseDown = (e: React.MouseEvent) => {
+  const handleSvgMouseDown = async (e: React.MouseEvent) => {
+    if (traceTool === 'wand') {
+      // Magic Wand: satu klik = satu garis vektor CAD terdekat. Sengaja TIDAK
+      // me-reset tool ke 'pan' setelah sukses — engineer biasanya mengklik
+      // beberapa pipa berturut-turut.
+      e.stopPropagation();
+      const point = getImageCoordinates(e);
+      if (!point || toolBusy) return;
+      setToolBusy(true);
+      try {
+        await onTraceClick(Math.round(point.x), Math.round(point.y));
+      } finally {
+        setToolBusy(false);
+      }
+      return;
+    }
     if (traceTool === 'multiselect') {
       e.stopPropagation();
       const point = getImageCoordinates(e);
@@ -1069,7 +1087,7 @@ export default function InteractivePipeCanvas({
           strokeLinecap="round"
           strokeLinejoin="round"
           style={{
-            pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
+            pointerEvents: traceTool === 'multiselect' || traceTool === 'wand' ? 'none' : 'stroke',
             cursor: splitMode ? 'crosshair' : 'pointer',
           }}
           onPointerDown={(e) => {
@@ -1156,6 +1174,8 @@ export default function InteractivePipeCanvas({
                 : 'all',
               cursor: tempPan
                 ? 'grab'
+                : traceTool === 'wand'
+                ? 'crosshair'
                 : traceTool === 'rescan'
                 ? 'crosshair'
                 : traceTool === 'pen'
@@ -1599,6 +1619,13 @@ export default function InteractivePipeCanvas({
         </div>
       )}
 
+      {traceTool === 'wand' && (
+        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-40 bg-amber-600/95 backdrop-blur text-white px-4 py-1.5 rounded-full shadow-xl text-xs font-semibold flex items-center space-x-2 max-w-[92vw] truncate">
+          <Wand2 className="w-3.5 h-3.5" />
+          <span>Klik tepat pada garis pipa — jejak vektor CAD terdekat langsung ditambahkan.</span>
+        </div>
+      )}
+
       {/* 6. Active Tool Dock / Pill Toolbar at Bottom-Center */}
       {/* Vertical tool rack (Photoshop-style), anchored to the RIGHT edge and vertically
           centered. Living on the right edge keeps it clear of the bottom-center
@@ -1622,6 +1649,25 @@ export default function InteractivePipeCanvas({
         >
           <Hand className="w-4 h-4 shrink-0" />
           <span className="hidden xl:inline">Pan &amp; Select</span>
+        </button>
+
+        <button
+          onClick={() => {
+            onSetTraceTool('wand');
+            setManualPoints([]);
+            setRoiRect(null);
+            setMarqueeRect(null);
+            setMarqueeStart(null);
+          }}
+          className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
+            traceTool === 'wand'
+              ? 'bg-amber-500 text-white shadow-md'
+              : 'hover:bg-slate-100 text-slate-700'
+          }`}
+          title="Magic Wand (1-Click Trace): klik satu kali pada garis pipa untuk mengambil jejak vektor CAD"
+        >
+          <Wand2 className="w-4 h-4 shrink-0" />
+          <span className="hidden xl:inline">Magic Wand</span>
         </button>
 
         <button

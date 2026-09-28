@@ -56,6 +56,7 @@ export interface PipeRun {
   pid?: string;
   fluid?: string;
   manual?: boolean;
+  group_id?: string;
   equipment_outline?: boolean;
   length?: number;
 }
@@ -104,6 +105,24 @@ export interface DigitizationResult {
   conn_points: ConnectionPoint[];
   opcs?: OffPageConnector[];
   furniture: [number, number, number, number][];
+  manual_groups?: ManualGroup[];
+}
+
+export interface ManualGroup {
+  id: string;
+  name: string;
+  color: string;
+}
+
+export interface TraceClickResponse {
+  status: string;
+  added: boolean;
+  reason?: 'none' | 'duplicate' | null;
+  run_idx?: number;
+  run?: PipeRun;
+  distance?: number | null;
+  total_runs?: number;
+  result?: DigitizationResult;
 }
 
 export interface CircuitProvenance {
