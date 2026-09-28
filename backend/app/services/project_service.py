@@ -196,7 +196,7 @@ class ProjectService:
                 filename=filename,
                 sheet_number=sheet_number or label,
                 file_path=page_rel,
-                status="uploaded",
+                status="queued",
                 dpi=dpi,
                 width=width,
                 height=height,

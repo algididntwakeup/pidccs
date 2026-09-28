@@ -1,9 +1,7 @@
 """B.07 benchmark: tiled YOLO versus SAHI on the symbol test set."""
 
-import os
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import cv2

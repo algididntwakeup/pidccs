@@ -30,7 +30,6 @@ def test_predict_tiled_reports_each_tile():
 
 import os
 import sys
-import pytest
 import numpy as np
 
 _BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

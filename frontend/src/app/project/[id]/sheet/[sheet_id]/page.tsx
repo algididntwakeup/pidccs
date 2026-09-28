@@ -16,9 +16,7 @@ import {
   Maximize2,
   RefreshCw,
   Search,
-  Filter,
   Upload,
-  ExternalLink,
   Network,
   FileSpreadsheet,
   ShieldCheck,
@@ -28,12 +26,10 @@ import {
   ArrowRight,
   Crosshair,
   Eye,
-  Component,
   RotateCcw,
   RotateCw,
   Save,
   Sliders,
-  Scissors,
   EyeOff,
   Tag,
   Palette,
@@ -75,17 +71,21 @@ import {
   fetchProjectTopology,
   patchResult,
   splitRun,
-  updateRunColor,
-  batchUpdateRunColors,
   deleteRun,
   batchDeleteRuns,
-  updateRunPoints,
-  traceRegion,
-  traceClick,
 } from '@/lib/api';
 import { parsePipingIdTag } from '@/lib/tagParser';
+import { useHistory } from '@/hooks/useHistory';
+import { usePipeTracer } from '@/hooks/usePipeTracer';
 
 type ViewMode = 'digitize' | 'system' | 'circuit' | 'report' | 'topology';
+
+type JobKind = 'detection' | 'enrichment';
+
+const JOB_POLL_MS = 3000;
+const JOB_POLL_MAX_TICKS = 200;   // ~10 menit, sama seperti batas lama
+const JOB_STALL_MS = 60000;       // tidak ada progres sama sekali => worker tidak jalan
+const EMPTY_RUN_INDEX_SET: Set<number> = new Set();
 
 export default function ProjectWorkspace() {
   const params = useParams();
@@ -110,6 +110,9 @@ export default function ProjectWorkspace() {
   const [topology, setTopology] = useState<ProjectTopologyResponse | null>(null);
 
   const [showOverlay, setShowOverlay] = useState<boolean>(true);
+  // Auto-Trace lines (tracer output, `manual !== true`) can be hidden so the raw CAD
+  // drawing is clean for manual marking with the Magic Wand.
+  const [showAutoTrace, setShowAutoTrace] = useState(true);
   const [detecting, setDetecting] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [progressPct, setProgressPct] = useState(0);
@@ -121,7 +124,6 @@ export default function ProjectWorkspace() {
   const [searchQuery, setSearchQuery] = useState('');
   const [editingRunLabel, setEditingRunLabel] = useState<string>('');
   const runRowRefs = useRef<{ [key: number]: HTMLDivElement | null }>({});
-  const [filterFluid, setFilterFluid] = useState<string>('all');
 
   // Line list modal state
   const [showLineListModal, setShowLineListModal] = useState(false);
@@ -159,17 +161,6 @@ export default function ProjectWorkspace() {
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupColor, setNewGroupColor] = useState('#F59E0B');
   const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
-  const [history, setHistory] = useState<
-    Array<{
-      desc: string;
-      prevRuns: PipeRun[];
-      nextRuns: PipeRun[];
-      prevPids: PipingID[];
-      nextPids: PipingID[];
-    }>
-  >([]);
-  const [historyIndex, setHistoryIndex] = useState<number>(-1);
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
@@ -218,6 +209,36 @@ export default function ProjectWorkspace() {
     setSelectedRunIds(new Set(ids.filter(Boolean)));
   }, []);
 
+  // Garis auto-trace = run yang bukan hasil aksi engineer (pen/Magic Wand/Box Trace
+  // menandai manual=true di backend).
+  const hiddenRunIndices = useMemo(() => {
+    if (showAutoTrace) return EMPTY_RUN_INDEX_SET;
+    const hidden = new Set<number>();
+    (result?.runs || []).forEach((r, i) => { if (r.manual !== true) hidden.add(i); });
+    return hidden;
+  }, [showAutoTrace, result?.runs]);
+
+  // Indices of runs the engineer can currently see/select (auto-trace may be hidden).
+  const visibleRunIndices = useMemo(() => {
+    const all = (result?.runs || []).map((_, i) => i);
+    return hiddenRunIndices.size === 0 ? all : all.filter((i) => !hiddenRunIndices.has(i));
+  }, [result?.runs, hiddenRunIndices]);
+
+  // Prune the selection when auto-trace is hidden so no halo / vertex handle is left
+  // behind on a line the engineer can no longer see or edit.
+  useEffect(() => {
+    if (showAutoTrace) return;
+    setSelectedRunIds((prev) => {
+      const runs = runsRef.current;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        const idx = runs.findIndex((r) => r.id === id);
+        if (idx >= 0 && runs[idx].manual === true) next.add(id);
+      });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [showAutoTrace]);
+
   const canvasRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const osdModuleRef = useRef<any>(null);
@@ -229,6 +250,11 @@ export default function ProjectWorkspace() {
   // heavier each time a project is opened.
   const pollIntervalRef = useRef<any>(null);
   const detectionWsRef = useRef<WebSocket | null>(null);
+  // Sheet id whose in-flight job we are already observing (either started here or resumed).
+  const resumedJobRef = useRef<string | null>(null);
+  // Monotonic token so a late artifact response for a PREVIOUS sheet can never overwrite
+  // the state of the sheet the user is looking at now.
+  const sheetDataTokenRef = useRef(0);
 
   // All pending status-toast timeouts, cleared on unmount to avoid setState leaks.
   const toastTimeoutsRef = useRef<any[]>([]);
@@ -242,6 +268,11 @@ export default function ProjectWorkspace() {
       toastTimeoutsRef.current = toastTimeoutsRef.current.slice(-20);
     }
   }, []);
+
+  const {
+    historyIndex, historyLength, pushHistory, handleUndo, handleRedo,
+    hasUnsavedChanges, setHasUnsavedChanges,
+  } = useHistory(result, setResult, projectId, activeSheet?.id, showToast);
 
   const stopDetectionResources = useCallback(() => {
     if (pollIntervalRef.current) {
@@ -272,55 +303,149 @@ export default function ProjectWorkspace() {
     };
   }, [stopDetectionResources]);
 
-  // Push action to Undo/Redo history stack (15-20 steps)
-  const pushHistory = useCallback(
-    (desc: string, prevRuns: PipeRun[], nextRuns: PipeRun[], prevPids: PipingID[], nextPids: PipingID[]) => {
-      setHistory((prev) => {
-        const trimmed = prev.slice(0, historyIndex + 1);
-        const nextHistory = [
-          ...trimmed,
-          { desc, prevRuns, nextRuns, prevPids, nextPids },
-        ].slice(-20);
-        setHistoryIndex(nextHistory.length - 1);
-        return nextHistory;
-      });
-      setHasUnsavedChanges(true);
-    },
-    [historyIndex]
-  );
-
-  const handleUndo = useCallback(() => {
-    if (historyIndex >= 0 && history[historyIndex]) {
-      const action = history[historyIndex];
-      if (result && projectId && activeSheet) {
-        const restored = { ...result, runs: action.prevRuns, piping_ids: action.prevPids };
-        setResult(restored);
-        // Persist the restored state so the backend's runs array stays in sync
-        // with what the user sees. Without this, undo/redo left the DB on a
-        // different run count and later index-based edits errored out.
-        patchResult(projectId, activeSheet.id, restored).catch((e) =>
-          console.error('Gagal sinkronisasi undo ke server:', e)
-        );
-      }
-      setHistoryIndex((idx) => idx - 1);
-      showToast(`Undo: ${action.desc}`, 2000);
+  // ---------------------------------------------------------------------------
+  // SINGLE artifact load path. /result, /systems and /validate all 400 on a sheet
+  // that has not been processed yet, so every caller must go through here.
+  //
+  // /result is fetched FIRST: /systems and /validate require the same result_json,
+  // so a 400 there means a 400 on the other two — no point firing all three.
+  // ---------------------------------------------------------------------------
+  const loadSheetArtifacts = useCallback(async (sheet: SheetResponse | null) => {
+    if (!projectId || !sheet) return;
+    const token = ++sheetDataTokenRef.current;
+    if (sheet.status !== 'detected' && sheet.status !== 'completed') {
+      setResult(null);
+      setSystems([]);
+      setValidation(null);
+      return;
     }
-  }, [historyIndex, history, result, projectId, activeSheet, showToast]);
-
-  const handleRedo = useCallback(() => {
-    if (historyIndex < history.length - 1 && history[historyIndex + 1]) {
-      const action = history[historyIndex + 1];
-      if (result && projectId && activeSheet) {
-        const restored = { ...result, runs: action.nextRuns, piping_ids: action.nextPids };
-        setResult(restored);
-        patchResult(projectId, activeSheet.id, restored).catch((e) =>
-          console.error('Gagal sinkronisasi redo ke server:', e)
-        );
-      }
-      setHistoryIndex((idx) => idx + 1);
-      showToast(`Redo: ${action.desc}`, 2000);
+    try {
+      const res = await fetchResult(projectId, sheet.id);
+      if (token !== sheetDataTokenRef.current) return;
+      setResult(res);
+      fetchSystems(projectId, sheet.id)
+        .then((s) => { if (token === sheetDataTokenRef.current) setSystems(s); })
+        .catch(() => {});
+      fetchValidation(projectId, sheet.id)
+        .then((v) => { if (token === sheetDataTokenRef.current) setValidation(v); })
+        .catch(() => {});
+    } catch {
+      if (token !== sheetDataTokenRef.current) return;
+      setResult(null);
+      setSystems([]);
+      setValidation(null);
     }
-  }, [historyIndex, history, result, projectId, activeSheet, showToast]);
+  }, [projectId]);
+
+  // ---------------------------------------------------------------------------
+  // SINGLE job waiter, used by BOTH the "Detect P&ID"/Enrich buttons and the
+  // resume-after-remount effect. Three near-identical waiters used to exist, each
+  // polling the SHEET status only: when the worker died, or when it reported
+  // 'completed' without committing the result, the bar stayed at "Detection job
+  // queued (mode: lines_only)" forever. Now the job row is authoritative, a stall
+  // timer bounds a dead worker, and completion without a stored result is an error.
+  // ---------------------------------------------------------------------------
+  const attachToJob = useCallback((jobId: string | null, sheetId: string, kind: JobKind) => {
+    stopDetectionResources();
+    resumedJobRef.current = sheetId;
+    setDetecting(true);
+    setProgressPct(0);
+    setProgressMsg(kind === 'detection' ? 'Menunggu hasil Fast Trace…' : 'Menunggu hasil enrichment…');
+
+    let settled = false;
+    let lastProgressAt = Date.now();
+
+    const refreshSheet = async () => {
+      const p = await fetchProject(projectId);
+      setProject(p);
+      const s = p.sheets?.find((sh) => sh.id === sheetId) ?? null;
+      if (s) setActiveSheet(s);
+      return s;
+    };
+
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      stopDetectionResources();
+      resumedJobRef.current = null;
+      setDetecting(false);
+      setProgressMsg(message);
+      showToast(message, 5000);
+    };
+
+    const finish = async () => {
+      if (settled) return;
+      stopDetectionResources();
+      resumedJobRef.current = null;
+      const s = await refreshSheet().catch(() => null);
+      if (s && (s.status === 'detected' || s.status === 'completed')) {
+        settled = true;
+        setDetecting(false);
+        setProgressPct(100);
+        setProgressMsg(kind === 'detection' ? 'Tracing selesai.' : 'Enrichment selesai.');
+      } else {
+        // Job bilang selesai tetapi server belum menyimpan hasil: jangan biarkan bar nyangkut.
+        fail('Job selesai tetapi hasil belum tersimpan di server. Jalankan Fast Trace lagi.');
+      }
+    };
+
+    const onEvent = (data: any) => {
+      lastProgressAt = Date.now();
+      if (data.pct !== undefined) setProgressPct(data.pct);
+      if (data.message) setProgressMsg(data.message);
+      if (data.step === 'completed') void finish();
+      else if (data.step === 'failed') fail(data.message || 'Detection gagal.');
+    };
+
+    if (jobId) {
+      fetchJob(jobId).then((j) => {
+        if (settled) return;
+        lastProgressAt = Date.now();
+        if (j.progress_pct !== undefined) setProgressPct(j.progress_pct);
+        if (j.message) setProgressMsg(j.message);
+        if (j.status === 'completed') void finish();
+        else if (j.status === 'failed') fail(j.message || j.error || 'Detection gagal.');
+      }).catch(() => {});
+
+      try {
+        const ws = new WebSocket(
+          (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${jobId}`,
+        );
+        detectionWsRef.current = ws;
+        ws.onmessage = (event) => { try { onEvent(JSON.parse(event.data)); } catch {} };
+        ws.onerror = () => {};
+      } catch {}
+    }
+
+    let ticks = 0;
+    pollIntervalRef.current = setInterval(async () => {
+      ticks += 1;
+      if (ticks > JOB_POLL_MAX_TICKS) {
+        fail('Waktu tunggu habis. Periksa Celery worker lalu jalankan Fast Trace lagi.');
+        return;
+      }
+      try {
+        if (jobId) {
+          const j = await fetchJob(jobId);
+          if (settled) return;
+          // 'queued' = worker belum menyentuh job; 'processing' = worker hidup.
+          if (j.status !== 'queued') lastProgressAt = Date.now();
+          if (j.progress_pct !== undefined) setProgressPct(j.progress_pct);
+          if (j.message) setProgressMsg(j.message);
+          if (j.status === 'completed') { void finish(); return; }
+          if (j.status === 'failed') { fail(j.message || j.error || 'Detection gagal.'); return; }
+        }
+        const p = await fetchProject(projectId);
+        if (settled) return;
+        const s = p.sheets?.find((sh) => sh.id === sheetId);
+        if (s?.status === 'detected' || s?.status === 'completed') { void finish(); return; }
+        if (s?.status === 'error') { fail('Detection gagal di server.'); return; }
+        if (Date.now() - lastProgressAt > JOB_STALL_MS) {
+          fail('Belum ada progres dari server selama 60 detik — pastikan Celery worker berjalan, lalu klik "Detect P&ID" lagi.');
+        }
+      } catch {}
+    }, JOB_POLL_MS);
+  }, [projectId, stopDetectionResources, showToast]);
 
   // Recolor selected runs in frontend state
   const handleRecolorRuns = (runIdxs: number[], newColor: string) => {
@@ -363,7 +488,7 @@ export default function ProjectWorkspace() {
   };
 
   // Delete runs (single or batch) via backend API
-  const handleDeleteRuns = async (runIdxs: number[]) => {
+  const handleDeleteRuns = useCallback(async (runIdxs: number[]) => {
     if (!result || !projectId || !activeSheet || runIdxs.length === 0) return;
     try {
       const prevRuns = [...result.runs];
@@ -389,7 +514,7 @@ export default function ProjectWorkspace() {
     } catch (err: any) {
       alert(err.message || 'Gagal menghapus pipa');
     }
-  };
+  }, [result, projectId, activeSheet, pushHistory, setSelectedRunIndices, showToast]);
 
   // Update label / tag of a run.
   //
@@ -544,8 +669,7 @@ export default function ProjectWorkspace() {
       );
       setResult(updated);
       setEditingRunLabel(trimmed);
-      setHasUnsavedChanges(true);
-      fetchSystems(projectId, activeSheet.id).then(setSystems).catch(() => {});
+      void loadSheetArtifacts(activeSheet);
       showToast(`Tag pipa diperbarui: ${trimmed || '(dikosongkan)'}`, 2500);
     } catch (err: any) {
       alert(err.message || 'Gagal memperbarui tag pipa');
@@ -589,7 +713,6 @@ export default function ProjectWorkspace() {
         updated.piping_ids || prevPids
       );
       setResult(updated);
-      setHasUnsavedChanges(true);
       showToast(`Pipa #${runIdx} digabungkan ke line "${tag}"`, 3000);
     } catch (err: any) {
       alert(err.message || 'Gagal menggabungkan pipa');
@@ -598,6 +721,10 @@ export default function ProjectWorkspace() {
 
   // Select a run from the inspector, set active state, and pan/zoom canvas to its bounding box
   const handleSelectRun = (run: PipeRun, idx: number) => {
+    if (hiddenRunIndices.has(idx)) {
+      showToast('Garis Auto-Trace sedang disembunyikan — aktifkan "Auto-Trace: ON" untuk mengeditnya.', 3000);
+      return;
+    }
     setSelectedRunIndices(new Set([idx]));
     setEditingRunLabel(run.label || run.pid || '');
     if (run.points && run.points.length > 0) {
@@ -662,117 +789,12 @@ export default function ProjectWorkspace() {
     } finally {
       setSavingChanges(false);
     }
-  }, [result, projectId, activeSheet, savingChanges, showToast]);
+  }, [result, projectId, activeSheet, savingChanges, showToast, setHasUnsavedChanges]);
 
-  const handleManualRun = useCallback(async (points: [number, number][]) => {
-    if (!result || !projectId || !activeSheet || points.length < 2) return;
-    const now = Date.now();
-    const nextRun: PipeRun = {
-      id: `manual-run-${now}`,
-      points,
-      axis: points.length === 2 ? 'd' : 'poly',
-      x1: points[0][0], y1: points[0][1],
-      x2: points[points.length - 1][0], y2: points[points.length - 1][1],
-      color: '#2563EB',
-      manual: true,
-    };
-    const prevRuns = [...result.runs];
-    const nextRuns = [...result.runs, nextRun];
-    pushHistory('Tambah pipa manual', prevRuns, nextRuns, result.piping_ids, result.piping_ids);
-    const updated = await patchResult(projectId, activeSheet.id, { ...result, runs: nextRuns });
-    setResult(updated);
-    const added = updated.runs[updated.runs.length - 1];
-    selectRunIds(added && added.id ? [added.id] : []);
-    setTraceTool('pan');
-  }, [result, projectId, activeSheet, pushHistory, selectRunIds]);
-
-  // Update vertex points of a pipe run (after draggable control points adjusted)
-  const handleUpdateRunPoints = useCallback(
-    async (runIdx: number, points: [number, number][]) => {
-      if (!result || !projectId || !activeSheet || points.length < 2) return;
-      try {
-        const prevRuns = [...result.runs];
-        const prevPids = [...result.piping_ids];
-        const res = await updateRunPoints(projectId, activeSheet.id, runIdx, points);
-        const nextRuns = res.result.runs;
-        pushHistory(
-          `Luruskan / Edit titik pipa #${runIdx}`,
-          prevRuns,
-          nextRuns,
-          prevPids,
-          res.result.piping_ids || prevPids
-        );
-        setResult(res.result);
-        setHasUnsavedChanges(true);
-        showToast(`Titik koordinat pipa #${runIdx} berhasil disesuaikan!`, 2500);
-      } catch (err: any) {
-        alert('Gagal mengupdate titik pipa: ' + (err.message || 'Server error'));
-      }
-    },
-    [result, projectId, activeSheet, pushHistory, showToast]
-  );
-
-  const handleRescan = useCallback(
-    async (bounds: { x1: number; y1: number; x2: number; y2: number }) => {
-      if (!projectId || !activeSheet || !result) return;
-      try {
-        const data = await traceRegion(projectId, activeSheet.id, bounds);
-        const nextRuns = data.result?.runs || [...result.runs, ...(data.new_runs || [])];
-        const stitched = data.stitched_runs_count ?? data.stitched ?? 0;
-        pushHistory(
-          'Re-scan area pipa',
-          result.runs,
-          nextRuns,
-          result.piping_ids,
-          data.result?.piping_ids || result.piping_ids
-        );
-        setResult(data.result || { ...result, runs: nextRuns });
-        setHasUnsavedChanges(true);
-        const added = data.new_runs?.length || 0;
-        showToast(
-          stitched > 0
-            ? `Re-scan selesai! ${stitched} pipa tersambung otomatis${added > 0 ? `, ${added} pipa baru` : ''}`
-            : `Re-scan selesai! Menambahkan ${added} pipa baru`,
-          3000
-        );
-        setTraceTool('pan');
-      } catch (err: any) {
-        alert('Gagal melakukan re-scan area: ' + (err.message || 'Server error'));
-      }
-    },
-    [projectId, activeSheet, result, pushHistory, showToast]
-  );
-
-  // Magic Wand (HITL): one click -> nearest vector CAD line becomes a new run.
-  const handleTraceClick = useCallback(async (x: number, y: number) => {
-    if (!projectId || !activeSheet || !result) return;
-    try {
-      const data = await traceClick(projectId, activeSheet.id, x, y, 15);
-      if (data.result) {
-        pushHistory(
-          'Magic Wand trace',
-          result.runs,
-          data.result.runs,
-          result.piping_ids,
-          data.result.piping_ids || result.piping_ids
-        );
-        setResult(data.result);
-      }
-      if (data.added) {
-        const added = data.result?.runs?.[data.run_idx ?? -1];
-        selectRunIds(added?.id ? [added.id] : []);
-        showToast(`Magic Wand: pipa ditambahkan (${data.distance ?? 0} px dari klik)`, 2500);
-      } else if (data.reason === 'duplicate') {
-        const dup = result.runs[data.run_idx ?? -1];
-        if (dup?.id) selectRunIds([dup.id]);
-        showToast('Pipa ini sudah ter-trace — tidak ditambahkan ulang', 2500);
-      } else {
-        showToast('Tidak ada garis CAD dalam radius 15 px dari klik', 2500);
-      }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Magic Wand gagal', 3000);
-    }
-  }, [projectId, activeSheet, result, pushHistory, selectRunIds, showToast]);
+  const { handleManualRun, handleUpdateRunPoints, handleRescan, handleTraceClick } = usePipeTracer({
+    projectId, sheetId: activeSheet?.id, result, setResult, pushHistory,
+    selectRunIds, setTraceTool, showToast,
+  });
 
   // Keyboard shortcuts listener: Ctrl+Z (Undo), Ctrl+Y (Redo), Ctrl+S (Save), Esc (Cancel)
   useEffect(() => {
@@ -835,154 +857,42 @@ export default function ProjectWorkspace() {
     });
   }, [projectId, sheetIdParam, router]);
 
-  // Load detection & grouping data when active sheet changes
+  // Load detection & grouping data when active sheet changes (single gated path).
   useEffect(() => {
-    if (!projectId || !activeSheet) return;
-    if (activeSheet.status === 'detected') {
-      fetchResult(projectId, activeSheet.id)
-        .then(setResult)
-        .catch(console.error);
-      fetchSystems(projectId, activeSheet.id)
-        .then(setSystems)
-        .catch(console.error);
-      fetchValidation(projectId, activeSheet.id)
-        .then(setValidation)
-        .catch(console.error);
-    } else {
-      setResult(null);
-      setSystems([]);
-      setValidation(null);
-    }
-  }, [projectId, activeSheet]);
+    void loadSheetArtifacts(activeSheet);
+  }, [activeSheet, loadSheetArtifacts]);
 
   // ---------------------------------------------------------------------------
   // RESUME in-flight detection after navigation/remount.
   //
   // The job id is NOT persisted client-side, so when the user presses Back and
   // re-opens the same sheet, the page mounts fresh with blank detection state.
-  // Previously this left the user staring at a blank canvas with no spinner.
-  //
-  // Fix: derive state from the SERVER. If the sheet's persisted status is
-  // 'detecting', re-attach to its most recent job and show the SAME loading UI.
-  // This only polls WHILE the sheet is detecting; once it resolves (or on
-  // unmount) all resources are torn down, so idle pages cost nothing.
+  // Fix: derive state from the SERVER and hand the job to the single waiter above.
   // ---------------------------------------------------------------------------
-  const resumedJobRef = useRef<string | null>(null);
   useEffect(() => {
     if (!projectId || !activeSheet) return;
-    if (activeSheet.status !== 'detecting') return;
-
-    // Already attached to this exact sheet/job (e.g. we started it ourselves via
-    // handleRunDetection) — don't attach twice.
+    if (activeSheet.status !== 'detecting' && activeSheet.status !== 'processing' && activeSheet.status !== 'queued') return;
     if (resumedJobRef.current === activeSheet.id) return;
-    resumedJobRef.current = activeSheet.id;
-
+    const sheetId = activeSheet.id;
+    const latestJobId = activeSheet.latest_job_id ?? null;
+    resumedJobRef.current = sheetId;
     let cancelled = false;
-
-    setDetecting(true);
-    setProgressMsg((prev) => prev || 'Detection in progress — resuming status…');
-
-    const onCompleted = () => {
-      if (cancelled) return;
-      stopDetectionResources();
-      setDetecting(false);
-      setProgressPct(100);
-      setProgressMsg('Digitasi & Sistemisasi selesai.');
-      resumedJobRef.current = null;
-      fetchProject(projectId).then((p) => {
-        setProject(p);
-        const updated = p.sheets?.find((sh) => sh.id === activeSheet.id);
-        if (updated) setActiveSheet(updated);
-      });
-      fetchResult(projectId, activeSheet.id).then(setResult).catch(console.error);
-      fetchSystems(projectId, activeSheet.id).then(setSystems).catch(console.error);
-      fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
-    };
-
-    const onFailed = (msg?: string) => {
-      if (cancelled) return;
-      stopDetectionResources();
-      setDetecting(false);
-      resumedJobRef.current = null;
-      if (msg) setProgressMsg(msg);
-    };
-
-    const attach = async () => {
-      let jobId = activeSheet.latest_job_id ?? null;
+    (async () => {
+      let jobId = latestJobId;
       if (!jobId) {
         try {
-          const job = await fetchLatestJobForSheet(activeSheet.id);
-          jobId = job?.job_id ?? null;
-        } catch (e) {
-          /* fall through to polling below */
-        }
+          jobId = (await fetchLatestJobForSheet(sheetId))?.job_id ?? null;
+        } catch {}
       }
       if (cancelled) return;
-
-      // Apply any already-known progress immediately.
-      if (jobId) {
-        fetchJob(jobId)
-          .then((j) => {
-            if (cancelled) return;
-            if (j.progress_pct !== undefined) setProgressPct(j.progress_pct);
-            if (j.message) setProgressMsg(j.message);
-            if (j.status === 'failed') onFailed(j.message || j.error || 'Detection failed');
-          })
-          .catch(() => {});
-
-        const wsUrl =
-          (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${jobId}`;
-        try {
-          const ws = new WebSocket(wsUrl);
-          detectionWsRef.current = ws;
-          ws.onmessage = (event) => {
-            try {
-              const data = JSON.parse(event.data);
-              if (data.pct !== undefined) setProgressPct(data.pct);
-              if (data.message) setProgressMsg(data.message);
-              if (data.step === 'completed') onCompleted();
-              else if (data.step === 'failed') onFailed(data.message || 'Detection failed');
-            } catch (err) {}
-          };
-          ws.onerror = () => {};
-        } catch (e) {
-          /* polling fallback handles it */
-        }
-      }
-
-      // Lightweight fallback: poll only while the sheet is still 'detecting'.
-      // Max ~10 minutes (200 * 3s) then give up to avoid an endless timer.
-      let ticks = 0;
-      pollIntervalRef.current = setInterval(async () => {
-        ticks += 1;
-        if (ticks > 200) {
-          stopDetectionResources();
-          return;
-        }
-        try {
-          if (jobId) {
-            const j = await fetchJob(jobId);
-            if (j.progress_pct !== undefined) setProgressPct(j.progress_pct);
-            if (j.message) setProgressMsg(j.message);
-            if (j.status === 'completed') return onCompleted();
-            if (j.status === 'failed') return onFailed(j.message || j.error || 'Detection failed');
-          }
-          const p = await fetchProject(projectId);
-          const s = p.sheets?.find((sh) => sh.id === activeSheet.id);
-          if (s && s.status === 'detected') onCompleted();
-          else if (s && s.status === 'error') onFailed('Detection failed.');
-        } catch (e) {}
-      }, 3000);
-    };
-
-    attach();
-
+      attachToJob(jobId, sheetId, 'detection');
+    })();
     return () => {
       cancelled = true;
       stopDetectionResources();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, activeSheet?.id, activeSheet?.status, activeSheet?.latest_job_id]);
+  }, [projectId, activeSheet?.id, activeSheet?.status, activeSheet?.latest_job_id, attachToJob]);
 
   // Initialize OpenSeadragon Canvas
   useEffect(() => {
@@ -1043,16 +953,12 @@ export default function ProjectWorkspace() {
   // vector overlay, so this effect only needs to react to sheet changes — NOT to
   // mode/showOverlay, which previously forced a full-res `viewer.open()` that wiped
   // the tracing overlay on every tab switch.
-  const isDetected = activeSheet?.status === 'detected' || Boolean(result);
 
-  // Show the detection progress UI whenever EITHER we locally started a job OR
-  // the persisted sheet status says a job is running. The persisted-status branch
-  // is what guarantees a spinner is shown after a Back-and-reopen remount (the
-  // local `detecting` flag is lost on navigation, but server `status` is not).
-  // The top progress bar always shows when detecting; the full-page overlay
-  // only shows on the first detection (when no result exists yet).
-  const showDetectionProgress =
-    detecting || activeSheet?.status === 'detecting';
+  // Server status is NOT the UI source of truth: the resume effect lifts an in-flight
+  // job into `detecting` on mount, and the waiter clears it when the job settles. Using
+  // `activeSheet.status === 'detecting'` here made the bar impossible to dismiss when a
+  // job ended without committing its result.
+  const showDetectionProgress = detecting;
   useEffect(() => {
     if (!viewerRef.current || !activeSheet || !projectId) return;
     const viewer = viewerRef.current;
@@ -1500,75 +1406,7 @@ export default function ProjectWorkspace() {
       );
 
       const job = await triggerDetection(projectId, activeSheet.id, undefined, undefined, detectionMode);
-
-      // Mark this sheet as locally-attached so the resume effect below does not
-      // re-attach to the same in-flight job (it would otherwise create a second
-      // WebSocket + poll interval for a job we already own).
-      resumedJobRef.current = activeSheet.id;
-
-      // WebSocket connection for live progress
-      const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${job.job_id}`;
-      const ws = new WebSocket(wsUrl);
-      detectionWsRef.current = ws;
-
-      let completedHandled = false;
-
-      const onCompleted = () => {
-        if (completedHandled) return;
-        completedHandled = true;
-        stopDetectionResources();
-        setDetecting(false);
-        setProgressPct(100);
-        setProgressMsg(
-          detectionMode === 'lines_only'
-            ? 'Tracing garis selesai.'
-            : 'Digitasi & Sistemisasi selesai.'
-        );
-        resumedJobRef.current = null;
-
-        // Refresh project and active sheet state
-        fetchProject(projectId).then((p) => {
-          setProject(p);
-          const updatedSheet = p.sheets?.find((sh) => sh.id === activeSheet.id);
-          if (updatedSheet) {
-            setActiveSheet(updatedSheet);
-          }
-        });
-        fetchResult(projectId, activeSheet.id).then(setResult).catch(console.error);
-        fetchSystems(projectId, activeSheet.id).then(setSystems).catch(console.error);
-        fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
-      };
-
-      // Periodic polling fallback in case WebSocket drops or times out.
-      // Tracked in a ref so it is cleared on unmount / sheet change.
-      pollIntervalRef.current = setInterval(async () => {
-        try {
-          const res = await fetchProject(projectId);
-          const s = res.sheets?.find((sh) => sh.id === activeSheet.id);
-          if (s && s.status === 'detected') {
-            onCompleted();
-          }
-        } catch (e) {}
-      }, 3000);
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.pct !== undefined) setProgressPct(data.pct);
-          if (data.message) setProgressMsg(data.message);
-          if (data.step === 'completed' || data.pct === 100) {
-            onCompleted();
-          } else if (data.step === 'failed') {
-            stopDetectionResources();
-            setDetecting(false);
-            alert('Detection error: ' + data.message);
-          }
-        } catch (err) {}
-      };
-
-      ws.onerror = () => {
-        // WebSocket error, fallback polling continues to monitor progress
-      };
+      attachToJob(job.job_id, activeSheet.id, 'detection');
     } catch (err: any) {
       stopDetectionResources();
       setDetecting(false);
@@ -1588,61 +1426,7 @@ export default function ProjectWorkspace() {
       setProgressMsg('Memulai pindai AI OCR & Simbol (Enrich)...');
 
       const job = await triggerEnrichment(projectId, activeSheet.id);
-      resumedJobRef.current = activeSheet.id;
-
-      const wsUrl = (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${job.job_id}`;
-      const ws = new WebSocket(wsUrl);
-      detectionWsRef.current = ws;
-
-      let completedHandled = false;
-
-      const onCompleted = () => {
-        if (completedHandled) return;
-        completedHandled = true;
-        stopDetectionResources();
-        setDetecting(false);
-        setProgressPct(100);
-        setProgressMsg('Pindai simbol & teks selesai.');
-        resumedJobRef.current = null;
-
-        fetchProject(projectId).then((p) => {
-          setProject(p);
-          const updatedSheet = p.sheets?.find((sh) => sh.id === activeSheet.id);
-          if (updatedSheet) {
-            setActiveSheet(updatedSheet);
-          }
-        });
-        fetchResult(projectId, activeSheet.id).then(setResult).catch(console.error);
-        fetchSystems(projectId, activeSheet.id).then(setSystems).catch(console.error);
-        fetchValidation(projectId, activeSheet.id).then(setValidation).catch(console.error);
-      };
-
-      pollIntervalRef.current = setInterval(async () => {
-        try {
-          const res = await fetchProject(projectId);
-          const s = res.sheets?.find((sh) => sh.id === activeSheet.id);
-          if (s && s.status === 'detected') {
-            onCompleted();
-          }
-        } catch (e) {}
-      }, 3000);
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.pct !== undefined) setProgressPct(data.pct);
-          if (data.message) setProgressMsg(data.message);
-          if (data.step === 'completed' || data.pct === 100) {
-            onCompleted();
-          } else if (data.step === 'failed') {
-            stopDetectionResources();
-            setDetecting(false);
-            alert('Enrichment error: ' + data.message);
-          }
-        } catch (err) {}
-      };
-
-      ws.onerror = () => {};
+      attachToJob(job.job_id, activeSheet.id, 'enrichment');
     } catch (err: any) {
       stopDetectionResources();
       setDetecting(false);
@@ -1666,11 +1450,9 @@ export default function ProjectWorkspace() {
       setUploadingLineList(true);
       await uploadLineList(projectId, file);
       setShowLineListModal(false);
-      // Refresh active sheet data
-      if (activeSheet) {
-        fetchResult(projectId, activeSheet.id).then(setResult);
-        fetchSystems(projectId, activeSheet.id).then(setSystems);
-      }
+      // Refresh active sheet data through the gated path (line list only enriches a
+      // sheet that already has results, so this never fires the 400 trio).
+      await loadSheetArtifacts(activeSheet);
       fetchProject(projectId).then(setProject);
       alert('Line List successfully imported! Operating parameters enriched.');
     } catch (err: any) {
@@ -1708,7 +1490,7 @@ export default function ProjectWorkspace() {
         piping_ids: updatedPids,
       });
       setResult(updated);
-      fetchSystems(projectId, activeSheet.id).then(setSystems);
+      void loadSheetArtifacts(activeSheet);
       setEditingPid(null);
     } catch (err: any) {
       alert('Failed to save manual edit: ' + err.message);
@@ -1946,7 +1728,7 @@ export default function ProjectWorkspace() {
           )}
 
           {/* Circuit Overlay Toggle Button in Header Bar */}
-          {(result || activeSheet?.status === 'detected') && (
+          {(result || activeSheet?.status === 'detected' || activeSheet?.status === 'completed') && (
             <button
               onClick={() => setShowOverlay(!showOverlay)}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition ${
@@ -1962,7 +1744,7 @@ export default function ProjectWorkspace() {
           )}
 
           {/* Export Button (opens modal) */}
-          {(result || activeSheet?.status === 'detected') && (
+          {(result || activeSheet?.status === 'detected' || activeSheet?.status === 'completed') && (
             <button
               onClick={() => setShowExportModal(true)}
               className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition"
@@ -2054,10 +1836,6 @@ export default function ProjectWorkspace() {
               onUpdateRunPoints={handleUpdateRunPoints}
               splitMode={splitMode}
               onSetSplitMode={setSplitMode}
-              canUndo={historyIndex >= 0}
-              canRedo={historyIndex < history.length - 1}
-              onUndo={handleUndo}
-               onRedo={handleRedo}
                traceTool={traceTool}
                onSetTraceTool={setTraceTool}
                onRescan={handleRescan}
@@ -2065,6 +1843,7 @@ export default function ProjectWorkspace() {
                onManualRun={handleManualRun}
                colorOverrideMap={colorOverrideMap}
                dimUncolored={mode === 'system' || mode === 'circuit'}
+               hiddenRunIndices={hiddenRunIndices}
              />
           )}
 
@@ -2093,7 +1872,7 @@ export default function ProjectWorkspace() {
               <Maximize2 className="w-4 h-4" />
             </button>
 
-            {(result || activeSheet?.status === 'detected') && (
+            {(result || activeSheet?.status === 'detected' || activeSheet?.status === 'completed') && (
               <>
                 <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
 
@@ -2109,6 +1888,20 @@ export default function ProjectWorkspace() {
                 >
                   {showOverlay ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
                   <span>{showOverlay ? 'Pipa: ON' : 'Pipa: OFF'}</span>
+                </button>
+
+                {/* Auto-Trace (Fast Trace) visibility toggle */}
+                <button
+                  onClick={() => setShowAutoTrace((v) => !v)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
+                    showAutoTrace
+                      ? 'bg-amber-500 text-white shadow-sm hover:bg-amber-600'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                  title="Tampilkan/sembunyikan garis hasil Auto-Trace (Fast Trace). Matikan untuk marking manual bersih dengan Magic Wand."
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{showAutoTrace ? 'Auto-Trace: ON' : 'Auto-Trace: OFF'}</span>
                 </button>
 
                 {/* Opacity Slider */}
@@ -2148,9 +1941,9 @@ export default function ProjectWorkspace() {
                 </button>
                 <button
                   onClick={handleRedo}
-                  disabled={historyIndex >= history.length - 1}
+                  disabled={historyIndex >= historyLength - 1}
                   className={`p-2 rounded-lg transition ${
-                    historyIndex < history.length - 1
+                    historyIndex < historyLength - 1
                       ? 'text-slate-700 hover:bg-slate-100'
                       : 'text-slate-300 cursor-not-allowed'
                   }`}
@@ -2517,15 +2310,15 @@ export default function ProjectWorkspace() {
                       <div className="flex items-center justify-between">
                         <button
                           onClick={() => {
-                            if (selectedRunIndices.size === (result.runs?.length || 0)) {
+                            if (selectedRunIndices.size === visibleRunIndices.length && visibleRunIndices.length > 0) {
                               setSelectedRunIndices(new Set());
                             } else {
-                              setSelectedRunIndices(new Set(result.runs.map((_, i) => i)));
+                              setSelectedRunIndices(new Set(visibleRunIndices));
                             }
                           }}
                           className="flex items-center space-x-1.5 text-xs font-semibold text-slate-700 hover:text-indigo-600 transition"
                         >
-                          {selectedRunIndices.size === (result.runs?.length || 0) && (result.runs?.length || 0) > 0 ? (
+                          {selectedRunIndices.size === visibleRunIndices.length && visibleRunIndices.length > 0 ? (
                             <CheckSquare className="w-4 h-4 text-indigo-600" />
                           ) : (
                             <Square className="w-4 h-4 text-slate-400" />

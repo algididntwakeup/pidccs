@@ -6,7 +6,7 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from pidcorr.systemize import systemize, circuitize, recolor_fluid, fluid_color
+from pidcorr.systemize import systemize, circuitize, recolor_fluid
 from pidcorr.validate import validate_digitization, validate_grouping, validate_marking
 
 

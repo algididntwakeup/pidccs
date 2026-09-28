@@ -4,7 +4,6 @@ Usage:
     python -m scripts.compare_runs_count "/path/to/pid.pdf" [page] [dpi]
 """
 import sys
-import numpy as np
 
 from app.adapters.pdf_renderer import load_drawing_image
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer

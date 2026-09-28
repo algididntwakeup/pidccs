@@ -25,7 +25,6 @@ import math
 import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import numpy as np
 
 from ..interfaces.perception import BaseLineTracer
 from ..lines import PipeRun, is_furniture_geometry, suppress_furniture_geometry
@@ -190,9 +189,9 @@ def _path_endpoints(drawing: Dict[str, Any]) -> Tuple[Optional[Point], Optional[
         elif kind == "re":
             r = it[1]
             if isinstance(r, (tuple, list)):
-                x0, y0, x1, y1 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+                x0, y0 = float(r[0]), float(r[1])
             else:
-                x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                x0, y0 = float(r.x0), float(r.y0)
             if first is None:
                 first = (x0, y0)
             last = (x0, y0)                    # persegi selalu tertutup
@@ -312,7 +311,7 @@ def _merge_intervals(items: Iterable[Tuple[float, float, float]],
     for key in sorted(buckets):
         rows = sorted(buckets[key], key=lambda r: r[1])
         c_lo, c_hi = rows[0][1], rows[0][2]
-        w_mid, w_len = rows[0][0], max(1e-9, rows[0][2] - rows[0][1])
+        w_len = max(1e-9, rows[0][2] - rows[0][1])
         acc_mid, acc_len = rows[0][0] * w_len, w_len
         for mid, lo, hi in rows[1:]:
             if lo - c_hi <= gap:

@@ -12,8 +12,8 @@ if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
 from app.main import app
-from app.services.linelist_parser import LineListParser, canonical_line_key
-from pidcorr.systemize import material_of, circuitize, systemize
+from app.services.linelist_parser import LineListParser
+from pidcorr.systemize import material_of, circuitize
 
 from _fixtures import fixture_path
 

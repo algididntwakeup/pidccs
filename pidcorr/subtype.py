@@ -22,7 +22,6 @@ Field hasil: symbol['subtype'] (string, '' bila tak teridentifikasi).
 """
 from __future__ import annotations
 import re
-import numpy as np
 import cv2
 
 _VALVE_MODELS = {}

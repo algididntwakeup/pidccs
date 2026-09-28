@@ -756,7 +756,7 @@ class SkeletonLineTracer(BaseLineTracer):
         # Buang garis lurus PALSU hasil skeletonisasi yang melintasi kertas kosong
         # (mayoritas titik sampelnya tidak menyentuh tinta). Terukur: satu run
         # 1017 px di lembar referensi hanya 20% tinta — bukan pipa, bukan gambar.
-        filtered = suppress_low_ink_diagonals(filtered, img_bgr=img_bgr)
+        filtered = suppress_low_ink_diagonals(filtered, img_bgr=gray)
         filtered = bridge_collinear_headers(filtered, max_gap_px=55)
 
         # 7. Bridge pipe runs cut by inline valves

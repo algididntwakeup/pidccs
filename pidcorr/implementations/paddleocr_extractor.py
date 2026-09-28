@@ -1,6 +1,4 @@
-﻿import os
-import re
-from typing import Callable, Dict, Any, List, Optional, Tuple
+﻿from typing import Callable, Dict, Any, List, Optional, Tuple
 import numpy as np
 import cv2
 
@@ -107,9 +105,9 @@ class PaddleOCRExtractor(BaseTextExtractor):
 
                 for item in ocr_results:
                     if len(item) == 2:
-                        box, (text, score) = item
+                        box, (text, _) = item
                     elif len(item) >= 3:
-                        box, text, score = item[0], item[1], item[2]
+                        box, text = item[0], item[1]
                     else:
                         continue
 

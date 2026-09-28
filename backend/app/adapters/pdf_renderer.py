@@ -1,4 +1,5 @@
 from typing import Protocol, runtime_checkable
+from importlib import import_module
 import os
 import cv2
 import numpy as np
@@ -48,11 +49,11 @@ class PyMuPDFRenderer:
 def get_default_pdf_renderer() -> PDFRenderer:
     """Factory to get the best available PDF renderer with graceful fallback."""
     try:
-        import pypdfium2
+        import_module("pypdfium2")
         return PyPdfiumRenderer()
     except ImportError:
         try:
-            import fitz
+            import_module("fitz")
             return PyMuPDFRenderer()
         except ImportError:
             raise RuntimeError("No PDF renderer found. Please install either pypdfium2 or PyMuPDF.")

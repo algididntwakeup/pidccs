@@ -12,7 +12,6 @@ if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
 from app.main import app
-from app.services.export_service import ExportService
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.db.base import Base
 from app.db.session import get_db
@@ -52,6 +51,15 @@ async def test_end_to_end_full_system_lifecycle():
     7. Human-in-the-Loop Engineer Review & Overrides
     8. Multi-Format Deliverable Exports (Excel, Word, Vector PDF, PNG)
     """
+    # The industrial drawings are local reference data and are intentionally not
+    # committed. CI still exercises the synthetic API/export tests.
+    required_drawings = [
+        fixture_path("Contoh P&ID", "BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png"),
+        fixture_path("Contoh P&ID", "BCD3-605-42-PID-1-006-01 Rev.10-CCD2.png"),
+    ]
+    if not all(path.exists() for path in required_drawings):
+        pytest.skip("industrial P&ID reference drawings not available")
+
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)

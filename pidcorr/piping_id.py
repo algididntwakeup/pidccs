@@ -15,7 +15,7 @@ Input = CITRA (numpy BGR) P&ID kosongan pada DPI memadai (>=300 disarankan utk t
 """
 from __future__ import annotations
 import os, json, re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from collections import defaultdict
 import numpy as np
 import cv2

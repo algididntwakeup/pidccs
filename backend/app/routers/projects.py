@@ -2,13 +2,15 @@ import os
 import uuid
 from typing import List, Optional
 import cv2
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..db.session import get_db
 from ..schemas.project import ProjectCreate, ProjectResponse, SheetResponse
 from ..services.project_service import ProjectService
+from ..services.detection_service import queue_sheet_detection, dispatch_detection_job
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -79,6 +81,7 @@ async def delete_project(
 @router.post("/{project_id}/sheets", response_model=List[SheetResponse], status_code=status.HTTP_201_CREATED)
 async def upload_sheet(
     project_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     dpi: int = Form(350),
     sheet_number: str = Form(""),
@@ -91,6 +94,10 @@ async def upload_sheet(
     PDF multi-halaman dipecah di sini: satu `Sheet` per halaman, masing-masing
     menunjuk file PDF 1 halaman sendiri. PDF 1 halaman / PNG / JPG tetap 1 Sheet.
     Response selalu berupa daftar agar pemanggil tidak perlu tahu jumlah halaman.
+
+    Setiap sheet langsung di-Fast-Trace (`lines_only`) di background kecuali
+    `AUTO_TRACE_ON_UPLOAD=false` atau Celery berjalan eager (`.delay()` inline akan
+    memblokir respons upload sampai tracing selesai).
     """
     project = await ProjectService.get_project(db=db, project_id=project_id)
     if not project:
@@ -105,6 +112,18 @@ async def upload_sheet(
         tenant_id=tenant_id,
         user_id=user_id,
     )
+
+    if settings.AUTO_TRACE_ON_UPLOAD and not settings.CELERY_TASK_ALWAYS_EAGER:
+        jobs = [(queue_sheet_detection(s, mode="lines_only"), s) for s in sheets]
+        # Baris Job harus sudah ter-commit sebelum task dikirim, kalau tidak worker
+        # bisa memproses task untuk Job yang belum terlihat di DB.
+        await db.commit()
+        for job, sheet in jobs:
+            dispatch_detection_job(
+                job, sheet, mode="lines_only", dpi=sheet.dpi, rot=sheet.rot or 0,
+                background_tasks=background_tasks,
+            )
+
     return sheets
 
 @router.get("/{project_id}/sheets", response_model=List[SheetResponse])
@@ -240,7 +259,7 @@ async def trace_region(
             "points": points,
             "x1": min(p[0] for p in points), "y1": min(p[1] for p in points),
             "x2": max(p[0] for p in points), "y2": max(p[1] for p in points),
-            "color": "#2563EB", "manual": False, "source": "rescan",
+            "color": "#2563EB", "manual": True, "source": "rescan",
             "label": record.get("label", ""),
             "pid": record.get("pid", ""),
         })

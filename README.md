@@ -10,6 +10,18 @@
 
 ---
 
+## Alur Aktif: HITL & Fast Trace
+
+Panduan untuk agent yang melanjutkan pekerjaan ada di [AGENTS.md](AGENTS.md).
+Dokumen itu mencatat keputusan produk, batas refactor, dan pemeriksaan sebelum
+menyatakan perubahan selesai.
+
+Workspace sheet mengutamakan **Fast Trace** (`lines_only`): PDF vektor ditelusuri langsung dari geometri PDF tanpa OCR/YOLO atau rasterisasi resolusi penuh. Untuk PDF raster dan gambar PNG/JPG, tracer raster digunakan sebagai fallback. Engineer kemudian memperbaiki hasil melalui Magic Wand, Box Trace, pen manual, edit titik, dan Undo/Redo. OCR/YOLO tetap tersedia melalui aksi **full detection** atau **enrichment** atas permintaan; keduanya bukan prasyarat Fast Trace. Uraian pipeline otomatis di bawah ini adalah kemampuan mode full/legacy, bukan jalur Fast Trace.
+
+CI menjalankan pytest, ESLint, pemeriksaan tipe TypeScript, dan production build. Dataset gambar industri di `Contoh P&ID` bersifat lokal dan tidak tersimpan di Git; pengujian yang memerlukannya dilewati di CI, sedangkan pengujian sintetis tetap dijalankan.
+
+---
+
 ## Ringkasan Eksekutif / Executive Summary
 
 **PIDCCS (P&ID Studio Web Platform)** adalah platform re-engineering modern dari perangkat lunak desktop monolitik PyQt5 menjadi sistem *cloud-native / web-first distributed architecture*. Platform ini dirancang khusus untuk memproses dokumen **Piping & Instrumentation Diagram (P&ID)** skala industri minyak, gas, dan petrokimia secara otomatis, akurat, dan sesuai standar keselamatan proses internasional.

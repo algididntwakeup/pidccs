@@ -25,7 +25,7 @@ class SheetResponse(TenantUserBase):
     filename: str = Field(..., description="Original filename (e.g. BCD3-605-42-PID-1-001.pdf)")
     sheet_number: str = Field(default="", description="Drawing sheet code (e.g. 001-01)")
     file_path: str = Field(..., description="Storage relative path")
-    status: str = Field(default="uploaded", description="Status: uploaded, detecting, detected, error")
+    status: str = Field(default="queued", description="Status: queued, processing, completed, error")
     dpi: int = Field(default=350)
     rot: int = Field(default=0)
     width: Optional[int] = None

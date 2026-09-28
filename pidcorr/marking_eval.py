@@ -148,7 +148,7 @@ def _prf(tp, fp, fn):
 def evaluate(result, pdf_path, min_votes=2):
     """Metrik A (placement) + B (boundary) marking sistem vs CCD marked. Return dict / None
     bila drawing raster (GT tak bisa diekstrak)."""
-    from .systemize import circuitize, run_labels
+    from .systemize import circuitize
     from .propagate import build_adjacency
 
     runs = result.get("runs", [])
@@ -166,7 +166,6 @@ def evaluate(result, pdf_path, min_votes=2):
         for c in s["circuits"]:
             for ri in c["run_idxs"]:
                 sys_circ[ri] = c["code"]
-    lab = run_labels(result)                            # run pipa (bukan underline) yg berlabel
 
     pipe = [i for i, r in enumerate(runs) if not r.get("underline")]
     gt_col = {}

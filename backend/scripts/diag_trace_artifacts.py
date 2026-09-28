@@ -11,7 +11,6 @@ import numpy as np
 import cv2
 
 from app.adapters.pdf_renderer import load_drawing_image
-from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 
 
 def build_pre_skeleton(img_bgr, dpi, detections, furniture, tokens):

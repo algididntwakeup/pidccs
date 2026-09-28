@@ -1,42 +1,65 @@
-/* eslint-disable @next/next/no-img-element */
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Plus,
   Folder,
-  Upload,
+  FolderPlus,
   Layers,
   ArrowRight,
   Trash2,
-  AlertTriangle,
-  CheckCircle2,
   RefreshCw,
-  Eye,
-  FileImage,
+  Search,
+  Clock,
+  LayoutGrid,
+  List as ListIcon,
+  FolderOpen,
+  Calendar,
+  AlertTriangle,
 } from 'lucide-react';
-import { ProjectResponse, SheetResponse } from '@/types/schema';
+import { ProjectResponse } from '@/types/schema';
 import {
   fetchProjects,
   createProject,
-  uploadSheet,
   deleteProject,
-  deleteSheet,
-  getThumbnailUrl,
 } from '@/lib/api';
 
+/**
+ * Format timestamp to localized readable date & time (e.g. 28 Sep 2026, 14:30)
+ */
+function formatUploadTime(dateStr?: string) {
+  if (!dateStr) return '-';
+  try {
+    const d = new Date(dateStr);
+    return new Intl.DateTimeFormat('id-ID', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(d);
+  } catch {
+    return dateStr;
+  }
+}
+
 export default function ProjectsPage() {
+  const router = useRouter();
   const [projects, setProjects] = useState<ProjectResponse[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+
+  // Create Project Modal state
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDesc, setNewProjectDesc] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [uploading, setUploading] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
 
-  // Deletion modals state
+  // Deletion modal state
   const [projectToDelete, setProjectToDelete] = useState<ProjectResponse | null>(null);
-  const [sheetToDelete, setSheetToDelete] = useState<{ projectId: string; sheet: SheetResponse } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
   const loadProjects = async () => {
@@ -45,48 +68,33 @@ export default function ProjectsPage() {
       const data = await fetchProjects();
       setProjects(data);
     } catch (e) {
-      console.error(e);
+      console.error('Failed to load projects:', e);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadProjects();
+    void loadProjects();
   }, []);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProjectName.trim()) return;
     try {
-      await createProject(newProjectName.trim(), newProjectDesc.trim());
+      setIsCreating(true);
+      const created = await createProject(newProjectName.trim(), newProjectDesc.trim());
       setNewProjectName('');
       setNewProjectDesc('');
       setShowCreateModal(false);
       await loadProjects();
-    } catch (err) {
-      alert('Failed to create project: ' + err);
-    }
-  };
-
-  const handleFileUpload = async (projectId: string, e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      setUploading(projectId);
-      // PDF multi-halaman dipecah server-side: satu Sheet per halaman.
-      const created = await uploadSheet(projectId, file);
-      if (created.length > 1) {
-        window.alert(
-          `${file.name} berisi ${created.length} halaman — dipecah menjadi ${created.length} sheet.`
-        );
+      if (created?.id) {
+        router.push(`/project/${created.id}`);
       }
-      await loadProjects();
     } catch (err) {
-      alert('Upload failed: ' + err);
+      alert('Gagal membuat project folder: ' + err);
     } finally {
-      setUploading(null);
-      e.target.value = '';
+      setIsCreating(false);
     }
   };
 
@@ -98,316 +106,358 @@ export default function ProjectsPage() {
       setProjectToDelete(null);
       await loadProjects();
     } catch (err) {
-      alert('Failed to delete project: ' + err);
+      alert('Gagal menghapus folder: ' + err);
     } finally {
       setIsDeleting(false);
     }
   };
 
-  const confirmDeleteSheet = async () => {
-    if (!sheetToDelete) return;
-    try {
-      setIsDeleting(true);
-      await deleteSheet(sheetToDelete.projectId, sheetToDelete.sheet.id);
-      setSheetToDelete(null);
-      await loadProjects();
-    } catch (err) {
-      alert('Failed to delete sheet: ' + err);
-    } finally {
-      setIsDeleting(false);
-    }
-  };
+  const filteredProjects = useMemo(() => {
+    if (!searchQuery.trim()) return projects;
+    const q = searchQuery.toLowerCase();
+    return projects.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.description && p.description.toLowerCase().includes(q))
+    );
+  }, [projects, searchQuery]);
 
   return (
     <div className="h-full flex flex-col bg-slate-50 text-slate-900 overflow-y-auto">
-      {/* Header */}
-      <header className="bg-white border-b border-slate-200 px-8 py-5 flex items-center justify-between shadow-sm sticky top-0 z-30">
+      {/* Top Navbar */}
+      <header className="bg-white border-b border-slate-200 px-6 lg:px-8 py-4 flex items-center justify-between shadow-xs sticky top-0 z-30">
         <div className="flex items-center space-x-3">
           <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold text-xl shadow-md">
             P
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">P&ID Studio Web Platform</h1>
+            <div className="flex items-center space-x-2">
+              <h1 className="text-lg font-bold tracking-tight text-slate-900">
+                P&ID Studio Web Platform
+              </h1>
+              <span className="text-[11px] font-semibold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200/60">
+                Drive Workspace
+              </span>
+            </div>
             <p className="text-xs text-slate-500 font-medium">
               API RP 970 Corrosion Control Document (CCD) Digitization & Circuitization
             </p>
           </div>
         </div>
+
         <button
           onClick={() => setShowCreateModal(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium text-sm flex items-center space-x-2 shadow transition"
+          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold text-sm flex items-center space-x-2 shadow-xs transition"
         >
-          <Plus className="w-4 h-4" />
-          <span>New Project</span>
+          <FolderPlus className="w-4 h-4" />
+          <span>New Project Folder</span>
         </button>
       </header>
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-8 space-y-8">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-slate-800 flex items-center space-x-2">
-            <Folder className="w-5 h-5 text-indigo-600" />
-            <span>Plant Projects & Units</span>
-          </h2>
-          <span className="text-sm font-medium text-slate-500">{projects.length} workspace(s)</span>
-        </div>
-
-        {loading ? (
-          <div className="flex flex-col items-center justify-center h-64 text-slate-400 space-y-3">
-            <RefreshCw className="w-6 h-6 animate-spin text-indigo-600" />
-            <span className="text-sm font-medium">Loading project workspaces...</span>
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-6 lg:p-8 space-y-6">
+        {/* Drive Explorer Toolbar */}
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center space-x-3 flex-1 min-w-0">
+            <div className="relative flex-1 max-w-md">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Cari folder project atau unit..."
+                className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition"
+              />
+            </div>
+            <span className="text-xs font-medium text-slate-500 shrink-0">
+              {filteredProjects.length} folder{filteredProjects.length === 1 ? '' : 's'}
+            </span>
           </div>
-        ) : projects.length === 0 ? (
-          <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 p-12 text-center max-w-md mx-auto my-12 shadow-sm">
-            <Layers className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-            <h3 className="text-base font-semibold text-slate-800">No Projects Yet</h3>
-            <p className="text-sm text-slate-500 mt-1 mb-4">
-              Create your first project workspace to start digitizing P&ID diagrams.
-            </p>
+
+          <div className="flex items-center space-x-2 shrink-0 self-end sm:self-auto">
+            {/* View Mode Toggle */}
+            <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setViewMode('grid')}
+                className={`p-1.5 rounded-md text-xs font-medium flex items-center transition ${
+                  viewMode === 'grid'
+                    ? 'bg-white text-indigo-600 shadow-xs'
+                    : 'text-slate-500 hover:text-slate-900'
+                }`}
+                title="Tampilan Kisi (Grid)"
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('list')}
+                className={`p-1.5 rounded-md text-xs font-medium flex items-center transition ${
+                  viewMode === 'list'
+                    ? 'bg-white text-indigo-600 shadow-xs'
+                    : 'text-slate-500 hover:text-slate-900'
+                }`}
+                title="Tampilan Tabel (List)"
+              >
+                <ListIcon className="w-4 h-4" />
+              </button>
+            </div>
+
             <button
-              onClick={() => setShowCreateModal(true)}
-              className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition"
+              onClick={() => void loadProjects()}
+              disabled={loading}
+              className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition"
+              title="Refresh daftar folder"
             >
-              Create Workspace
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-indigo-600' : ''}`} />
             </button>
           </div>
-        ) : (
-          <div className="space-y-8">
-            {projects.map((p) => (
-              <div
-                key={p.id}
-                className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition duration-200"
+        </div>
+
+        {/* Section Heading */}
+        <div className="flex items-center space-x-2 text-slate-700">
+          <FolderOpen className="w-5 h-5 text-indigo-600" />
+          <h2 className="text-base font-bold tracking-tight">Plant Projects &amp; Units</h2>
+        </div>
+
+        {/* Content body */}
+        {loading && projects.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-64 text-slate-400 space-y-3 bg-white rounded-2xl border border-slate-200">
+            <RefreshCw className="w-7 h-7 animate-spin text-indigo-600" />
+            <span className="text-sm font-medium">Memuat workspace folder...</span>
+          </div>
+        ) : filteredProjects.length === 0 ? (
+          <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 p-12 text-center max-w-md mx-auto my-8 shadow-xs">
+            <Folder className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+            <h3 className="text-base font-bold text-slate-800">
+              {searchQuery ? 'Tidak Ada Folder yang Cocok' : 'Belum Ada Project'}
+            </h3>
+            <p className="text-xs text-slate-500 mt-1 mb-5">
+              {searchQuery
+                ? `Tidak ditemukan folder dengan nama "${searchQuery}". Coba kata kunci lain.`
+                : 'Buat folder project pertama Anda untuk mulai mengunggah dan mendigitasi diagram P&ID.'}
+            </p>
+            {!searchQuery && (
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-xs transition"
               >
-                {/* Project Workspace Bar */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-100 gap-3">
-                  <div className="flex items-start space-x-3">
-                    <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0 mt-0.5">
-                      <Folder className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <div className="flex items-center space-x-2.5">
-                        <h3 className="font-bold text-slate-900 text-base">{p.name}</h3>
-                        <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2.5 py-0.5 rounded-full border border-slate-200">
-                          {p.sheets?.length || 0} sheet{(p.sheets?.length || 0) === 1 ? '' : 's'}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        {p.description || 'P&ID drawing sheets & corrosion circuit register'}
-                      </p>
-                    </div>
-                  </div>
+                Buat Folder Project
+              </button>
+            )}
+          </div>
+        ) : viewMode === 'grid' ? (
+          /* ========================================================================= */
+          /* GOOGLE DRIVE / EXPLORER STYLE FOLDER GRID                                */
+          /* ========================================================================= */
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+            {/* Quick Action: New Folder Card */}
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(true)}
+              className="border-2 border-dashed border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/20 rounded-xl p-4 flex flex-col items-center justify-center text-center transition group min-h-[140px]"
+            >
+              <div className="w-11 h-11 rounded-full bg-slate-100 group-hover:bg-indigo-100 text-slate-400 group-hover:text-indigo-600 flex items-center justify-center mb-2.5 transition">
+                <Plus className="w-6 h-6" />
+              </div>
+              <span className="text-xs font-semibold text-slate-700 group-hover:text-indigo-600">
+                + New Project Folder
+              </span>
+              <span className="text-[10px] text-slate-400 mt-0.5">Tambah workspace baru</span>
+            </button>
 
-                  {/* Project Quick Actions */}
-                  <div className="flex items-center space-x-2 shrink-0">
-                    <label className="cursor-pointer text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition border border-indigo-200">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{uploading === p.id ? 'Uploading...' : 'Upload P&ID'}</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="hidden"
-                        disabled={uploading === p.id}
-                        onChange={(e) => handleFileUpload(p.id, e)}
-                      />
-                    </label>
-
-                    {p.sheets && p.sheets.length > 0 && (
-                      <Link
-                        href={`/project/${p.id}`}
-                        className="text-xs font-semibold bg-slate-900 text-white hover:bg-indigo-600 px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition shadow-sm"
-                      >
-                        <span>Open Folder</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </Link>
-                    )}
+            {/* Folder Cards */}
+            {filteredProjects.map((p) => {
+              const sheetCount = p.sheets?.length || 0;
+              return (
+                <div
+                  key={p.id}
+                  onClick={() => router.push(`/project/${p.id}`)}
+                  className="bg-white hover:bg-slate-50/80 border border-slate-200 hover:border-indigo-300 rounded-xl p-4 shadow-2xs hover:shadow-md transition-all duration-150 flex flex-col justify-between group cursor-pointer relative min-h-[140px]"
+                >
+                  {/* Top Bar: Folder Icon & Delete Button */}
+                  <div className="flex items-start justify-between">
+                    <div className="w-11 h-11 rounded-xl bg-amber-50 border border-amber-200/70 flex items-center justify-center text-amber-500 group-hover:bg-indigo-50 group-hover:border-indigo-200 group-hover:text-indigo-600 transition-colors shrink-0">
+                      <Folder className="w-6 h-6 fill-amber-400/30 group-hover:fill-indigo-500/20 transition-colors" />
+                    </div>
 
                     <button
-                      onClick={() => setProjectToDelete(p)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-                      title="Delete Project Workspace"
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setProjectToDelete(p);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                      title="Hapus Folder Project"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
-                </div>
 
-                {/* Google Drive-Style P&ID Sheets Grid */}
-                <div className="mt-5">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5">
-                    {/* Sheet Cards */}
-                    {p.sheets &&
-                      p.sheets.map((s) => {
-                        const thumbUrl = getThumbnailUrl(p.id, s.id, 480);
-                        const isDetected = s.status === 'detected';
-                        return (
-                          <div
-                            key={s.id}
-                            className="group relative bg-slate-50 border border-slate-200 rounded-xl overflow-hidden hover:shadow-lg hover:border-indigo-300 transition duration-200 flex flex-col justify-between"
-                          >
-                            {/* Thumbnail Area (Google Drive style card preview) */}
-                            <Link
-                              href={`/project/${p.id}/sheet/${s.id}`}
-                              className="block relative aspect-[4/3] bg-slate-900/5 overflow-hidden border-b border-slate-200"
-                            >
-                              <img
-                                src={thumbUrl}
-                                alt={s.filename}
-                                loading="lazy"
-                                className="w-full h-full object-contain p-1.5 group-hover:scale-105 transition-transform duration-300"
-                              />
-
-                              {/* Status Badge on Thumbnail */}
-                              <div className="absolute top-2 left-2 z-10">
-                                <span
-                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-md shadow-sm uppercase tracking-wider flex items-center space-x-1 ${
-                                    isDetected
-                                      ? 'bg-emerald-600 text-white'
-                                      : s.status === 'detecting'
-                                      ? 'bg-amber-500 text-white animate-pulse'
-                                      : 'bg-slate-700 text-white'
-                                  }`}
-                                >
-                                  {isDetected && <CheckCircle2 className="w-3 h-3 inline" />}
-                                  <span>{s.status}</span>
-                                </span>
-                              </div>
-
-                              {/* Hover Quick View Overlay */}
-                              <div className="absolute inset-0 bg-slate-900/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                                <span className="bg-white/90 text-slate-900 text-xs font-semibold px-3 py-1.5 rounded-lg shadow-md flex items-center space-x-1.5">
-                                  <Eye className="w-3.5 h-3.5 text-indigo-600" />
-                                  <span>Open in Studio</span>
-                                </span>
-                              </div>
-                            </Link>
-
-                            {/* Sheet Details & Action Bar */}
-                            <div className="p-3.5 bg-white flex-1 flex flex-col justify-between">
-                              <div className="flex items-start justify-between gap-2">
-                                <Link
-                                  href={`/project/${p.id}/sheet/${s.id}`}
-                                  className="font-semibold text-xs text-slate-900 hover:text-indigo-600 truncate flex-1"
-                                  title={s.filename}
-                                >
-                                  {s.filename}
-                                </Link>
-
-                                {/* Delete Sheet Quick Button */}
-                                <button
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setSheetToDelete({ projectId: p.id, sheet: s });
-                                  }}
-                                  className="text-slate-300 hover:text-rose-600 p-1 hover:bg-rose-50 rounded transition shrink-0"
-                                  title="Delete this P&ID Sheet"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-
-                              <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-                                <span className="flex items-center space-x-1">
-                                  <FileImage className="w-3 h-3 text-slate-400" />
-                                  <span>
-                                    {s.sheet_number
-                                      ? `Hal. ${s.sheet_number}`
-                                      : s.width && s.height
-                                      ? `${s.width}×${s.height}`
-                                      : 'P&ID Drawing'}
-                                  </span>
-                                </span>
-                                <Link
-                                  href={`/project/${p.id}/sheet/${s.id}`}
-                                  className="text-indigo-600 hover:text-indigo-800 font-semibold flex items-center space-x-0.5"
-                                >
-                                  <span>Studio</span>
-                                  <ArrowRight className="w-3 h-3" />
-                                </Link>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-
-                    {/* Quick Upload Card (Google Drive New File style) */}
-                    <label
-                      className={`aspect-[4/3] sm:aspect-auto min-h-[180px] border-2 border-dashed border-slate-200 hover:border-indigo-400 bg-slate-50/50 hover:bg-indigo-50/30 rounded-xl flex flex-col items-center justify-center cursor-pointer transition p-4 text-center group ${
-                        uploading === p.id ? 'opacity-50 pointer-events-none' : ''
-                      }`}
+                  {/* Middle: Project Title & Description */}
+                  <div className="my-2.5 min-w-0">
+                    <h3
+                      className="font-bold text-slate-900 text-sm group-hover:text-indigo-600 truncate transition-colors"
+                      title={p.name}
                     >
-                      <div className="w-10 h-10 rounded-full bg-white group-hover:bg-indigo-100 border border-slate-200 group-hover:border-indigo-300 flex items-center justify-center text-slate-400 group-hover:text-indigo-600 mb-2 transition shadow-sm">
-                        {uploading === p.id ? (
-                          <RefreshCw className="w-5 h-5 animate-spin text-indigo-600" />
-                        ) : (
-                          <Upload className="w-5 h-5" />
-                        )}
-                      </div>
-                      <span className="text-xs font-semibold text-slate-700 group-hover:text-indigo-700">
-                        {uploading === p.id ? 'Uploading drawing...' : '+ Add P&ID Sheet'}
-                      </span>
-                      <span className="text-[10px] text-slate-400 mt-1">PDF, PNG, JPG up to 350 DPI</span>
-                      <input
-                        type="file"
-                        accept=".pdf,.png,.jpg,.jpeg"
-                        className="hidden"
-                        disabled={uploading === p.id}
-                        onChange={(e) => handleFileUpload(p.id, e)}
-                      />
-                    </label>
+                      {p.name}
+                    </h3>
+                    <p
+                      className="text-xs text-slate-500 truncate mt-0.5"
+                      title={p.description || 'P&ID drawing sheets & corrosion circuit register'}
+                    >
+                      {p.description || 'P&ID drawing sheets & corrosion circuits'}
+                    </p>
+                  </div>
+
+                  {/* Bottom: Metadata Bar (Sheet Count & Upload Time) */}
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="flex items-center space-x-1 font-semibold text-slate-600">
+                      <Layers className="w-3.5 h-3.5 text-slate-400" />
+                      <span>{sheetCount} Sheet{sheetCount === 1 ? '' : 's'}</span>
+                    </span>
+
+                    <span
+                      className="flex items-center space-x-1 text-slate-400"
+                      title={`Dibuat / Diunggah: ${formatUploadTime(p.created_at)}`}
+                    >
+                      <Clock className="w-3 h-3 text-slate-400" />
+                      <span className="truncate max-w-[110px]">{formatUploadTime(p.created_at)}</span>
+                    </span>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
+          </div>
+        ) : (
+          /* ========================================================================= */
+          /* WINDOWS EXPLORER / DRIVE STYLE LIST VIEW                                 */
+          /* ========================================================================= */
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-slate-50/80 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                  <th className="py-3 px-4">Nama Folder / Project</th>
+                  <th className="py-3 px-4 w-40">Jumlah Sheets</th>
+                  <th className="py-3 px-4 w-48">Waktu Upload</th>
+                  <th className="py-3 px-4 text-right w-24">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-xs">
+                {filteredProjects.map((p) => {
+                  const sheetCount = p.sheets?.length || 0;
+                  return (
+                    <tr
+                      key={p.id}
+                      onClick={() => router.push(`/project/${p.id}`)}
+                      className="hover:bg-slate-50 cursor-pointer transition group"
+                    >
+                      <td className="py-3 px-4">
+                        <div className="flex items-center space-x-3">
+                          <Folder className="w-5 h-5 text-amber-500 fill-amber-400/20 group-hover:text-indigo-600 shrink-0 transition" />
+                          <div className="min-w-0">
+                            <span className="font-semibold text-slate-900 group-hover:text-indigo-600 truncate block">
+                              {p.name}
+                            </span>
+                            {p.description && (
+                              <span className="text-[11px] text-slate-400 truncate block">
+                                {p.description}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center space-x-1.5 bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded text-[11px]">
+                          <Layers className="w-3 h-3 text-slate-500" />
+                          <span>{sheetCount} Sheet{sheetCount === 1 ? '' : 's'}</span>
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-slate-500 text-[11px]">
+                        <span className="flex items-center space-x-1">
+                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                          <span>{formatUploadTime(p.created_at)}</span>
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setProjectToDelete(p);
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                          title="Hapus Folder"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </main>
 
-      {/* Create Project Modal */}
+      {/* ========================================================================= */}
+      {/* MODAL: CREATE PROJECT FOLDER                                              */}
+      {/* ========================================================================= */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4">
-            <h3 className="text-lg font-bold text-slate-900">Create New Project Workspace</h3>
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center space-x-2.5 pb-2 border-b border-slate-100">
+              <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <FolderPlus className="w-5 h-5" />
+              </div>
+              <h3 className="text-base font-bold text-slate-900">Buat Folder Project Baru</h3>
+            </div>
+
             <form onSubmit={handleCreateProject} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Project / Plant Unit Name
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Nama Project / Plant Unit <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. Unit 605 Amine Treating"
+                  required
+                  placeholder="Contoh: Unit 605 Amine Treating"
                   value={newProjectName}
                   onChange={(e) => setNewProjectName(e.target.value)}
-                  autoFocus
-                  required
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
                 />
               </div>
+
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Description (Optional)
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Deskripsi / Catatan (Opsional)
                 </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Acid Gas Enrichment & Solvent Regeneration"
+                <textarea
+                  rows={3}
+                  placeholder="Deskripsi spesifikasi sistem atau nomor gambar..."
                   value={newProjectDesc}
                   onChange={(e) => setNewProjectDesc(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
                 />
               </div>
+
               <div className="flex justify-end space-x-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowCreateModal(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                  disabled={isCreating}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
                 >
-                  Cancel
+                  Batal
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-sm font-medium bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition"
+                  disabled={isCreating || !newProjectName.trim()}
+                  className="px-4 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white rounded-lg transition flex items-center space-x-1.5 shadow-xs"
                 >
-                  Create Workspace
+                  {isCreating && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Buat Folder</span>
                 </button>
               </div>
             </form>
@@ -415,90 +465,42 @@ export default function ProjectsPage() {
         </div>
       )}
 
-      {/* Delete Project Confirmation Modal */}
+      {/* ========================================================================= */}
+      {/* MODAL: DELETE PROJECT CONFIRMATION                                        */}
+      {/* ========================================================================= */}
       {projectToDelete && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-rose-100">
-            <div className="flex items-center space-x-3 text-rose-600">
-              <div className="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center shrink-0">
-                <AlertTriangle className="w-6 h-6" />
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center space-x-2.5 pb-2 border-b border-slate-100 text-rose-600">
+              <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5" />
               </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-900">Delete Project Workspace?</h3>
-                <p className="text-xs text-slate-500">This action cannot be undone.</p>
-              </div>
+              <h3 className="text-base font-bold text-slate-900">Hapus Folder Project?</h3>
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Are you sure you want to permanently delete{' '}
-              <strong className="text-slate-900 font-semibold">{projectToDelete.name}</strong>?
-              All{' '}
-              <span className="font-semibold text-rose-600">
-                {projectToDelete.sheets?.length || 0} P&ID drawing sheet(s)
-              </span>
-              , OCR tag recognitions, and corrosion circuit lines will be completely removed.
+              Folder <strong className="text-slate-900">{projectToDelete.name}</strong> dan seluruh{' '}
+              <strong className="text-slate-900">{projectToDelete.sheets?.length || 0} sheet</strong>{' '}
+              P&ID beserta hasil digitasinya di dalamnya akan dihapus permanen.
             </p>
 
-            <div className="flex justify-end space-x-2 pt-3 border-t border-slate-100">
+            <div className="flex justify-end space-x-2 pt-2">
               <button
                 type="button"
-                disabled={isDeleting}
                 onClick={() => setProjectToDelete(null)}
+                disabled={isDeleting}
                 className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
               >
-                Cancel
+                Batal
               </button>
               <button
                 type="button"
-                disabled={isDeleting}
                 onClick={confirmDeleteProject}
-                className="px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition shadow flex items-center space-x-1.5"
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 text-white rounded-lg transition flex items-center space-x-1.5 shadow-xs"
               >
                 {isDeleting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                <span>{isDeleting ? 'Deleting...' : 'Delete Permanently'}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Delete Sheet Confirmation Modal */}
-      {sheetToDelete && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-rose-100">
-            <div className="flex items-center space-x-3 text-rose-600">
-              <div className="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center shrink-0">
-                <AlertTriangle className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-900">Delete P&ID Drawing Sheet?</h3>
-                <p className="text-xs text-slate-500">This action cannot be undone.</p>
-              </div>
-            </div>
-
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Are you sure you want to delete drawing sheet{' '}
-              <strong className="text-slate-900 font-semibold">{sheetToDelete.sheet.filename}</strong>?
-              Raw diagram tiles and all associated corrosion line circuit data for this sheet will be permanently deleted.
-            </p>
-
-            <div className="flex justify-end space-x-2 pt-3 border-t border-slate-100">
-              <button
-                type="button"
-                disabled={isDeleting}
-                onClick={() => setSheetToDelete(null)}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={isDeleting}
-                onClick={confirmDeleteSheet}
-                className="px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition shadow flex items-center space-x-1.5"
-              >
-                {isDeleting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                <span>{isDeleting ? 'Deleting...' : 'Delete Sheet'}</span>
+                <span>Hapus Folder</span>
               </button>
             </div>
           </div>

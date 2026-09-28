@@ -6,7 +6,7 @@ table. It reuses the existing _diag_trace_only.py caching for OCR/YOLO/furniture
 Usage (inside api container):
     python _diag_profile.py "Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png"
 """
-import sys, os, json, hashlib, time, math
+import sys, os, json, hashlib, time
 import cv2, numpy as np
 
 path = sys.argv[1] if len(sys.argv) > 1 else "Contoh P&ID/BCD4-605-42-PID-3-019-02 Rev.1-CCD2.png"
@@ -16,10 +16,9 @@ rebuild = "--rebuild" in args
 # --- Load or build cache (same as _diag_trace_only.py) ---
 from pidcorr.factory import get_configured_orchestrator
 from pidcorr.implementations.skeleton_tracer import (
-    SkeletonLineTracer, _morphological_skeleton, _graph_segments,
+    _morphological_skeleton, _graph_segments,
 )
 from pidcorr.lines import (
-    PipeRun,
     suppress_box_edges,
     suppress_equipment_interior,
     snap_endpoints_to_equipment,

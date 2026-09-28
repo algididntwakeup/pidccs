@@ -29,6 +29,10 @@ class Settings(BaseSettings):
         default=False,
         description="Set True to run Celery tasks synchronously (useful for test/dev without worker)"
     )
+    AUTO_TRACE_ON_UPLOAD: bool = Field(
+        default=True,
+        description="Jalankan Fast Trace (lines_only) otomatis untuk setiap sheet yang baru diunggah",
+    )
 
     # Storage Paths
     BASE_DIR: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

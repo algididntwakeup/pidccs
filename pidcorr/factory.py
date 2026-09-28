@@ -6,7 +6,6 @@ from .implementations.rapidocr_extractor import RapidOCRExtractor
 from .implementations.paddleocr_extractor import PaddleOCRExtractor
 from .implementations.morphology_tracer import MorphologyLineTracer
 from .implementations.skeleton_tracer import SkeletonLineTracer
-from .implementations.vector_tracer import VectorLineTracer
 from .implementations.yolo_classifier import YOLOValveClassifier
 
 

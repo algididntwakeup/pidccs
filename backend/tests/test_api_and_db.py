@@ -2,7 +2,6 @@ import os
 import sys
 import pytest
 import asyncio
-from datetime import datetime
 
 _BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _ROOT_DIR = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
@@ -12,15 +11,13 @@ if _ROOT_DIR not in sys.path:
     sys.path.insert(0, _ROOT_DIR)
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from app.config import settings
 from app.db.base import Base
 from app.models.project import Project
 from app.models.sheet import Sheet
 from app.schemas.result import DigitizationResult
 from app.services.grouping_service import GroupingService
 from app.services.export_service import ExportService
-
-from _fixtures import fixture_path
+from PIL import Image
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_pidstudio.db"
 test_engine = create_async_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -117,9 +114,11 @@ def test_grouping_and_validation():
     print("Grouping and Validation logic test PASSED successfully!")
 
 
-def test_exports():
+def test_exports(tmp_path):
+    drawing_path = tmp_path / "drawing.png"
+    Image.new("RGB", (1000, 1000), "white").save(drawing_path)
     mock_result = {
-        "image_path": str(fixture_path("Contoh P&ID", "BCD3-605-42-PID-1-005-01 Rev.4-CCD2.png")),
+        "image_path": str(drawing_path),
         "dpi": 350,
         "rot": 0,
         "w": 3300,

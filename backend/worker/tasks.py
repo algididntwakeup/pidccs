@@ -15,7 +15,6 @@ if _ROOT_DIR not in sys.path:
 from worker.celery_app import celery_app
 from app.config import settings
 from app.services.detection_service import execute_sheet_detection, execute_sheet_enrichment
-from app.services.grouping_service import GroupingService
 from app.services.tile_service import TileService
 
 
@@ -67,6 +66,28 @@ async def get_worker_session():
         await worker_engine.dispose()
 
 
+async def _mark_job_and_sheet_running(job_id: str, sheet_id: str, message: str):
+    """Tandai sheet dan job 'processing' begitu worker benar-benar mulai.
+
+    Baris pertama task Celery mengubah status Sheet dari 'queued' menjadi 'processing'.
+    """
+    from app.models.job import Job
+    from app.models.sheet import Sheet
+
+    try:
+        async with get_worker_session() as session:
+            job = await session.get(Job, job_id)
+            if job:
+                job.status = "processing"
+                job.step = "starting"
+                job.message = message
+            sheet = await session.get(Sheet, sheet_id)
+            if sheet:
+                sheet.status = "processing"
+            await session.commit()
+    except Exception as e:
+        print(f"[Worker] Failed to mark job/sheet running: {e}")
+
 async def _save_detection_to_db(job_id: str, sheet_id: str, result: dict, systems: list):
     """Persist completed detection and API RP 970 circuits to database."""
     from app.models.sheet import Sheet
@@ -77,7 +98,7 @@ async def _save_detection_to_db(job_id: str, sheet_id: str, result: dict, system
         if sheet:
             sheet.result_json = result
             sheet.systems_json = systems
-            sheet.status = "detected"
+            sheet.status = "completed"
             sheet.width = result.get("w")
             sheet.height = result.get("h")
         job = await session.get(Job, job_id)
@@ -116,7 +137,7 @@ async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: 
                 pass
 
             sheet.result_json = res
-            sheet.status = "detected"
+            sheet.status = "completed"
         job = await session.get(Job, job_id)
         if job:
             job.status = "completed"
@@ -165,7 +186,10 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
     asyncio.set_event_loop(loop)
 
     try:
-        # 1. Execute CV / ML detection pipeline
+        # 1. Baris pertama task Celery: ubah status Sheet dari queued menjadi processing
+        loop.run_until_complete(
+            _mark_job_and_sheet_running(job_id, sheet_id, f"Running detection pipeline (mode: {mode})...")
+        )
         publish_progress(r_client, job_id, "starting", 0, 100, f"Starting P&ID pipeline (mode: {mode})...")
         result = execute_sheet_detection(
             file_rel_path=file_rel_path,
@@ -193,10 +217,9 @@ def detect_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
 
         # 4. Save results to PostgreSQL database
         publish_progress(r_client, job_id, "saving", 98, 100, "Menyimpan hasil ke database...")
-        try:
-            loop.run_until_complete(_save_detection_to_db(job_id, sheet_id, result, systems))
-        except Exception as db_err:
-            print(f"[Worker] DB commit error: {db_err}")
+        # Commit gagal = sheet tetap 'detecting' + job 'queued' di DB. Jangan publish
+        # 'completed': lempar supaya klien melihat job 'failed', bukan bar yang nyangkut.
+        loop.run_until_complete(_save_detection_to_db(job_id, sheet_id, result, systems))
 
         publish_progress(r_client, job_id, "completed", 100, 100, "Digitasi selesai.")
 
@@ -239,6 +262,9 @@ def enrich_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
     asyncio.set_event_loop(loop)
 
     try:
+        loop.run_until_complete(
+            _mark_job_and_sheet_running(job_id, sheet_id, "Running sheet enrichment (OCR & YOLO)...")
+        )
         publish_progress(r_client, job_id, "starting", 0, 100, "Starting sheet enrichment (OCR & YOLO)...")
 
         async def _get_existing_data():
@@ -266,10 +292,7 @@ def enrich_sheet_task(self, job_id: str, sheet_id: str, file_rel_path: str, dpi:
         )
 
         publish_progress(r_client, job_id, "saving", 98, 100, "Menyimpan hasil enrichment ke database...")
-        try:
-            loop.run_until_complete(_save_enrichment_to_db(job_id, sheet_id, enrichment_result))
-        except Exception as db_err:
-            print(f"[Worker] DB commit error in enrichment: {db_err}")
+        loop.run_until_complete(_save_enrichment_to_db(job_id, sheet_id, enrichment_result))
 
         publish_progress(r_client, job_id, "completed", 100, 100, "Pindai simbol dan teks (Enrich) selesai.")
 

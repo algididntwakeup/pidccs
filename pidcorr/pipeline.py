@@ -16,7 +16,7 @@ from __future__ import annotations
 import os, re, json
 import numpy as np, cv2, fitz
 
-from .piping_id import detect_piping_ids, get_rapid, PipingID, parse_tokens
+from .piping_id import detect_piping_ids, get_rapid, PipingID
 from .lines import extract_pipe_runs, associate, detect_boxes
 from .layout import detect_furniture, detect_fullpage, suppress_nested
 from .subtype import classify_instruments, classify_valves_equipment, classify_valve_crops

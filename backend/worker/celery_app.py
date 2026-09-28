@@ -27,4 +27,5 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+    task_publish_retry=False,
 )

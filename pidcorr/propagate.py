@@ -55,7 +55,6 @@ def _bbox(r):
 
 
 def _mk_run(points, template):
-    xs = [p[0] for p in points]; ys = [p[1] for p in points]
     axis = template.get("axis", "poly")
     if len(points) == 2:
         axis = "h" if abs(points[0][1] - points[1][1]) <= abs(points[0][0] - points[1][0]) else "v"

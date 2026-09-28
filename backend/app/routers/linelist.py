@@ -1,12 +1,10 @@
 import json
-from typing import List, Dict, Any, Optional
+from typing import Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.orm.attributes import flag_modified
 
 from ..db.session import get_db
-from ..models.project import Project
 from ..models.sheet import Sheet
 from ..schemas.linelist import LineListImportResult, LineListResponse, LineListEntry
 from ..services.linelist_parser import LineListParser, canonical_line_key

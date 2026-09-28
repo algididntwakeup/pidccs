@@ -4,7 +4,7 @@ import numpy as np
 
 from ..interfaces.perception import BaseSymbolDetector
 from ..detect import predict_tiled, Det
-from ..layout import detect_fullpage, suppress_nested
+from ..layout import detect_fullpage
 from ..pipeline import classify_boxes, merge_equipment, detect_boxes
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

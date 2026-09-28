@@ -3,7 +3,7 @@ from typing import Callable, Dict, Any, List, Optional
 import numpy as np
 
 from ..interfaces.perception import BaseSymbolDetector
-from ..detect import COARSE, coarse_of
+from ..detect import coarse_of
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_WEIGHTS = os.path.join(_ROOT, "runs", "detect", "pid3_finetune", "weights", "best.pt")

@@ -1,21 +1,20 @@
-import uuid
-import asyncio
-from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from pydantic import BaseModel
-from ..db.session import get_db, AsyncSessionLocal
+from ..db.session import get_db
 from ..schemas.job import JobResponse
 from ..models.sheet import Sheet
 from ..models.job import Job
 from ..services.project_service import ProjectService
-from ..services.detection_service import execute_sheet_detection, execute_sheet_enrichment
-from ..services.grouping_service import GroupingService
-from ..services.tile_service import TileService
-from ..config import settings
+from ..services.detection_service import (
+    dispatch_detection_job,
+    dispatch_enrichment_job,
+    queue_sheet_detection,
+    queue_sheet_enrichment,
+)
 
 router = APIRouter(tags=["detection"])
 
@@ -25,119 +24,6 @@ class DetectRequest(BaseModel):
     rot: Optional[int] = None
     mode: Optional[str] = "full"
     sheet_id: Optional[str] = None
-
-
-async def _run_detection_in_background(job_id: str, sheet_id: str, file_path: str, dpi: int, rot: int, mode: str = "full"):
-    """Fallback runner when Celery is not active or for lightweight dev testing."""
-    async with AsyncSessionLocal() as session:
-        job = await session.get(Job, job_id)
-        sheet = await session.get(Sheet, sheet_id)
-        if not job or not sheet:
-            return
-
-        try:
-            job.status = "processing"
-            job.step = "starting"
-            job.message = f"Running detection pipeline (mode: {mode})..."
-            sheet.status = "detecting"
-            await session.commit()
-
-            # Execute pipeline synchronously in thread pool
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                execute_sheet_detection,
-                file_path,
-                dpi,
-                rot,
-                None,
-                mode,
-            )
-
-            # Compute circuits
-            circuits = GroupingService.compute_circuits(result)
-
-            sheet.result_json = result
-            sheet.systems_json = circuits
-            sheet.status = "detected"
-            sheet.width = result.get("w")
-            sheet.height = result.get("h")
-
-            job.status = "completed"
-            job.progress_pct = 100
-            job.step = "completed"
-            job.message = "Detection completed successfully"
-            job.completed_at = datetime.utcnow()
-            await session.commit()
-
-        except Exception as e:
-            job.status = "failed"
-            job.error = str(e)
-            job.message = f"Error: {str(e)}"
-            sheet.status = "error"
-            await session.commit()
-
-
-async def _run_enrichment_in_background(job_id: str, sheet_id: str, file_path: str, dpi: int, rot: int):
-    """Fallback runner for sheet enrichment when Celery is not active."""
-    async with AsyncSessionLocal() as session:
-        job = await session.get(Job, job_id)
-        sheet = await session.get(Sheet, sheet_id)
-        if not job or not sheet:
-            return
-
-        try:
-            job.status = "processing"
-            job.step = "starting"
-            job.message = "Running sheet enrichment (OCR & YOLO)..."
-            sheet.status = "detecting"
-            await session.commit()
-
-            existing_runs = sheet.result_json.get("runs", []) if sheet.result_json else []
-            existing_pids = sheet.result_json.get("piping_ids", []) if sheet.result_json else []
-            existing_symbols = sheet.result_json.get("symbols", []) if sheet.result_json else []
-
-            loop = asyncio.get_event_loop()
-            enrichment_result = await loop.run_in_executor(
-                None,
-                execute_sheet_enrichment,
-                file_path,
-                existing_runs,
-                existing_pids,
-                existing_symbols,
-                dpi,
-                rot,
-            )
-
-            res = dict(sheet.result_json or {})
-            res["symbols"] = enrichment_result.get("symbols", [])
-            res["piping_ids"] = enrichment_result.get("piping_ids", [])
-            res["runs"] = enrichment_result.get("runs", res.get("runs", []))
-            if "furniture" in enrichment_result:
-                res["furniture"] = enrichment_result["furniture"]
-            if "conn_points" in enrichment_result:
-                res["conn_points"] = enrichment_result["conn_points"]
-            if "opcs" in enrichment_result:
-                res["opcs"] = enrichment_result["opcs"]
-
-            circuits = GroupingService.compute_circuits(res)
-            sheet.result_json = res
-            sheet.systems_json = circuits
-            sheet.status = "detected"
-
-            job.status = "completed"
-            job.progress_pct = 100
-            job.step = "completed"
-            job.message = "Enrichment completed successfully"
-            job.completed_at = datetime.utcnow()
-            await session.commit()
-
-        except Exception as e:
-            job.status = "failed"
-            job.error = str(e)
-            job.message = f"Error: {str(e)}"
-            sheet.status = "error"
-            await session.commit()
 
 
 @router.post(
@@ -164,55 +50,21 @@ async def trigger_detection(
     target_dpi = (payload.dpi if payload and payload.dpi is not None else None) or dpi or sheet.dpi or 350
     target_rot = (payload.rot if payload and payload.rot is not None else None) or (rot if rot is not None else sheet.rot or 0)
 
-    job_id = str(uuid.uuid4())
-    job = Job(
-        id=job_id,
-        sheet_id=sheet_id,
-        tenant_id=sheet.tenant_id,
-        user_id=sheet.user_id,
-        status="queued",
-        progress_pct=0,
-        step="queued",
-        message=f"Detection job queued (mode: {target_mode})",
-    )
-    db.add(job)
-    sheet.status = "detecting"
+    job = queue_sheet_detection(sheet, mode=target_mode)
     await db.commit()
 
-    # Try dispatching to Celery task if configured, otherwise run via FastAPI BackgroundTasks
-    celery_dispatched = False
-    try:
-        from worker.tasks import detect_sheet_task
-        task = detect_sheet_task.delay(
-            job_id=job_id,
-            sheet_id=sheet_id,
-            file_rel_path=sheet.file_path,
-            dpi=target_dpi,
-            rot=target_rot,
-            mode=target_mode,
-        )
-        celery_dispatched = True
-    except Exception:
-        celery_dispatched = False
-
-    if not celery_dispatched:
-        background_tasks.add_task(
-            _run_detection_in_background,
-            job_id=job_id,
-            sheet_id=sheet_id,
-            file_path=sheet.file_path,
-            dpi=target_dpi,
-            rot=target_rot,
-            mode=target_mode,
-        )
+    dispatch_detection_job(
+        job, sheet, mode=target_mode, dpi=target_dpi, rot=target_rot,
+        background_tasks=background_tasks,
+    )
 
     return JobResponse(
-        job_id=job_id,
+        job_id=job.id,
         sheet_id=sheet_id,
         status="queued",
         progress_pct=0,
         step="queued",
-        message=f"Detection job queued (mode: {target_mode})",
+        message=job.message,
     )
 
 
@@ -269,47 +121,15 @@ async def trigger_enrichment(
     target_dpi = dpi or sheet.dpi or 350
     target_rot = rot if rot is not None else sheet.rot or 0
 
-    job_id = str(uuid.uuid4())
-    job = Job(
-        id=job_id,
-        sheet_id=sheet_id,
-        tenant_id=sheet.tenant_id,
-        user_id=sheet.user_id,
-        status="queued",
-        progress_pct=0,
-        step="queued",
-        message="Enrichment job queued for processing",
-    )
-    db.add(job)
-    sheet.status = "detecting"
+    job = queue_sheet_enrichment(sheet)
     await db.commit()
 
-    celery_dispatched = False
-    try:
-        from worker.tasks import enrich_sheet_task
-        task = enrich_sheet_task.delay(
-            job_id=job_id,
-            sheet_id=sheet_id,
-            file_rel_path=sheet.file_path,
-            dpi=target_dpi,
-            rot=target_rot,
-        )
-        celery_dispatched = True
-    except Exception:
-        celery_dispatched = False
-
-    if not celery_dispatched:
-        background_tasks.add_task(
-            _run_enrichment_in_background,
-            job_id=job_id,
-            sheet_id=sheet_id,
-            file_path=sheet.file_path,
-            dpi=target_dpi,
-            rot=target_rot,
-        )
+    dispatch_enrichment_job(
+        job, sheet, dpi=target_dpi, rot=target_rot, background_tasks=background_tasks,
+    )
 
     return JobResponse(
-        job_id=job_id,
+        job_id=job.id,
         sheet_id=sheet_id,
         status="queued",
         progress_pct=0,

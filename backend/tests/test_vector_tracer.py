@@ -62,10 +62,21 @@ def test_vector_tracer_implements_interface():
     assert isinstance(VectorLineTracer(), BaseLineTracer)
 
 
-def test_tier_classification():
-    """PDF vektor -> A1/A2; PNG (tanpa geometri) -> raster."""
+def test_tier_classification(tmp_path):
+    """A generated vector PDF is classified without relying on local drawings."""
+    import pymupdf
+
+    vector_pdf = tmp_path / "vector.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=600, height=600)
+    for index in range(100):
+        y = 10 + index * 5
+        page.draw_line((10, y), (500, y))
+    document.save(vector_pdf)
+    document.close()
+
     assert tier_of_pdf(str(_PNG)) == "raster"
-    assert tier_of_pdf(str(_PDF)) in ("A1", "A2")
+    assert tier_of_pdf(str(vector_pdf)) == "A1"
 
 
 def test_straight_segments_splits_on_direction_change():
@@ -297,7 +308,7 @@ def test_pymupdf_requires_rotation_matrix():
     tidak hilang tanpa sengaja.
     """
     import pymupdf
-    from pidcorr.implementations.vector_tracer import page_segments, _segs_to_runs
+    from pidcorr.implementations.vector_tracer import page_segments
 
     doc = pymupdf.open(str(_PDF))
     page = doc[0]

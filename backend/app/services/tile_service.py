@@ -1,7 +1,6 @@
 import os
 import math
 import cv2
-import numpy as np
 from typing import Dict, Any
 
 from ..adapters.pdf_renderer import load_drawing_image

@@ -13,11 +13,11 @@ if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
 try:
-    from app.schemas.linelist import LineListEntry, LineListImportResult
-    from app.services.linelist_parser import LineListParser, canonical_line_key
+    from app.schemas.linelist import LineListImportResult
+    from app.services.linelist_parser import LineListParser
 except ImportError:
-    from backend.app.schemas.linelist import LineListEntry, LineListImportResult
-    from backend.app.services.linelist_parser import LineListParser, canonical_line_key
+    from backend.app.schemas.linelist import LineListImportResult
+    from backend.app.services.linelist_parser import LineListParser
 
 
 def create_mock_excel_bytes() -> bytes:
@@ -229,7 +229,9 @@ async def test_linelist_endpoint_combined_dataset_enrichment():
                 data={"sheet_number": "001"},
             )
             assert resp_s.status_code == 201
-            sheet_id = resp_s.json()["id"]
+            created_sheets = resp_s.json()
+            assert len(created_sheets) == 1
+            sheet_id = created_sheets[0]["id"]
 
             # 3. Add detection result with matching line tags from 605_CCD2_loop_dataset.xlsx
             result_payload = {

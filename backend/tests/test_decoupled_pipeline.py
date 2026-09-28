@@ -16,7 +16,6 @@ from pidcorr.lines import PipeRun
 from app.db.base import Base
 from app.models.project import Project
 from app.models.sheet import Sheet
-from app.models.job import Job
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from httpx import AsyncClient, ASGITransport
 from app.main import app
@@ -88,6 +87,50 @@ def test_orchestrator_lines_only_mode():
     assert result["conn_points"] == []
     assert result["furniture"] == []
     assert any("lines_only" in msg for msg in progress_calls)
+
+
+def test_vector_fast_trace_does_not_load_raster(monkeypatch):
+    from pidcorr.implementations import vector_tracer
+    from pidcorr import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(vector_tracer, "tier_of_pdf", lambda _path: "A1")
+    monkeypatch.setattr(
+        vector_tracer, "extract_vector_runs",
+        lambda *_args, **_kwargs: [PipeRun(points=[(10, 20), (100, 20)], axis="h")],
+    )
+    monkeypatch.setattr(orchestrator_module, "_pdf_pixel_size", lambda *_args: (1200, 800))
+    load_image = MagicMock(side_effect=AssertionError("vector trace must not render a bitmap"))
+    tracer = MagicMock()
+    orchestrator = PipelineOrchestrator(
+        detector=MagicMock(), extractor=MagicMock(), tracer=tracer,
+        classifier=MagicMock(), layout_weights="",
+    )
+
+    result = orchestrator.run(
+        img_bgr=None, image_path="drawing.pdf", mode="lines_only", image_loader=load_image,
+    )
+
+    load_image.assert_not_called()
+    tracer.trace.assert_not_called()
+    assert (result["w"], result["h"]) == (1200, 800)
+    assert result["tracer"] == "vector:A1"
+
+
+def test_pdf_pixel_size_matches_renderer(tmp_path):
+    import pymupdf
+    from app.adapters.pdf_renderer import load_drawing_image
+    from pidcorr.orchestrator import _pdf_pixel_size
+
+    path = tmp_path / "rotated.pdf"
+    pdf = pymupdf.open()
+    page = pdf.new_page(width=1191, height=842)
+    page.set_rotation(270)
+    pdf.save(path)
+    pdf.close()
+
+    image = load_drawing_image(str(path), dpi=72)
+    assert _pdf_pixel_size(str(path), 72, 0) == (image.shape[1], image.shape[0])
+    assert _pdf_pixel_size(str(path), 72, 90) == (image.shape[0], image.shape[1])
 
 
 def test_orchestrator_run_enrichment_preserves_runs():

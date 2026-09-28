@@ -9,9 +9,7 @@ Bentuk fisik di gambar:
 """
 from __future__ import annotations
 import re
-import uuid
 from typing import List, Dict, Any, Optional, Tuple
-import numpy as np
 
 
 # Regex pola target drawing & continuation

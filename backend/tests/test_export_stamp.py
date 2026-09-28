@@ -73,8 +73,6 @@ def test_stamp_annotation_placed_at_longest_run_midpoint(tmp_path):
 
     doc = pymupdf.open(out)
     page = doc[0]
-    to_pdf = pymupdf.Matrix(72.0 / _DPI, 72.0 / _DPI) * page.derotation_matrix
-
     stamps = {a.info["content"]: a for a in page.annots()
               if a.type[1] == "FreeText" and a.info.get("subject") == "Group Stamp"}
     assert set(stamps) == {"CC #07-06-12", "CC #07-07-01"}, stamps.keys()

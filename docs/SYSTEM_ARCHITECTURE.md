@@ -2,6 +2,10 @@
 
 > Reference Architecture Document for the Re-Engineered P&ID Digitization & Corrosion Marking System
 
+> **Current path (September 2026):** The sheet workspace uses HITL Fast Trace (`lines_only`) as its primary action. Vector PDFs bypass OCR/YOLO and full-size raster loading; raster inputs fall back to the raster tracer. Full detection and AI enrichment remain explicit optional actions. The automated OCR/YOLO diagrams below describe those optional paths.
+
+> **For future contributors and agents:** Read [`AGENTS.md`](../AGENTS.md) for the current product constraints and verification checklist before changing this pipeline. Treat diagrams below as architecture context; the active sheet page, detection service, and orchestrator are the source of truth for runtime behavior.
+
 ---
 
 ## 1. Architecture Philosophy

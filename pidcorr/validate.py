@@ -95,7 +95,7 @@ def validate_grouping(result):
     """Automated validation of SYSTEMIZATION + CIRCUITIZATION (flowchart: 'logic checks').
     Deterministic invariants — each must hold by construction; a violation means corrupted
     input (e.g. mis-parsed fluid) leaked through, so it is flagged for the engineer."""
-    from .systemize import circuitize, material_of, fluid_color
+    from .systemize import circuitize, material_of
     pids = result.get("piping_ids", []) if result else []
     systems = circuitize(result) if result else []
     fluided = [i for i, p in enumerate(pids) if (p.get("fluid") or "").strip()]

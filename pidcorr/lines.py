@@ -20,7 +20,7 @@ import math
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import defaultdict, OrderedDict
 import numpy as np
 import cv2
@@ -662,7 +662,6 @@ def suppress_text_artifacts(binary, detections=None, dpi=350, tokens=None,
     """
     if binary is None:
         return binary
-    S = dpi / 350.0
     max_side = max(6, int((max_side_pt / 72.0) * dpi))
     max_area = max(12, int((max_area_pt2 / (72.0 ** 2)) * (dpi ** 2)))
 
@@ -1037,7 +1036,6 @@ def suppress_furniture_geometry(segs, page_wh, detections=None, furniture=None,
         x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
         length = s.length if hasattr(s, "length") else sum(
             ((a[0]-b[0])**2 + (a[1]-b[1])**2) ** 0.5 for a, b in zip(pts, pts[1:]))
-        cx = (pts[0][0] + pts[-1][0]) / 2.0
         cy = (pts[0][1] + pts[-1][1]) / 2.0
 
         # Span (bingkai gambar) selalu dibuang, tanpa kecuali.
@@ -1323,27 +1321,32 @@ def suppress_low_ink_diagonals(segs, img_bgr=None, min_ink_frac=0.5, min_len_px=
     def _dist(a, b):
         return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
+    # Index endpoints once. Comparing every diagonal against every run is quadratic
+    # on large sheets, even when the distance check has an AABB fast reject.
+    cell_size = max(float(junction_tol_px), 1.0)
+    endpoint_grid = defaultdict(list)
     ends = []
-    for s in segs:
+    for idx, s in enumerate(segs):
         pts = s.points
-        if len(pts) >= 2:
-            ends.append((tuple(pts[0]), tuple(pts[-1])))
+        pair = (tuple(pts[0]), tuple(pts[-1])) if len(pts) >= 2 else None
+        ends.append(pair)
+        if pair is not None:
+            for pt in pair:
+                cell = (math.floor(pt[0] / cell_size), math.floor(pt[1] / cell_size))
+                endpoint_grid[cell].append((idx, pt))
 
     def _connects(idx):
         """True bila salah satu ujung run ini berimpit dengan ujung run LAIN."""
-        a, b = ends[idx]
-        for j, (c, d) in enumerate(ends):
-            if j == idx:
-                continue
-            # Fast AABB reject: skip distant pairs before computing hypot.
-            if (abs(a[0] - c[0]) > junction_tol_px and abs(a[0] - d[0]) > junction_tol_px
-                    and abs(b[0] - c[0]) > junction_tol_px and abs(b[0] - d[0]) > junction_tol_px
-                    and abs(a[1] - c[1]) > junction_tol_px and abs(a[1] - d[1]) > junction_tol_px
-                    and abs(b[1] - c[1]) > junction_tol_px and abs(b[1] - d[1]) > junction_tol_px):
-                continue
-            if (_dist(a, c) <= junction_tol_px or _dist(a, d) <= junction_tol_px
-                    or _dist(b, c) <= junction_tol_px or _dist(b, d) <= junction_tol_px):
-                return True
+        pair = ends[idx]
+        if pair is None:
+            return False
+        for pt in pair:
+            cx, cy = math.floor(pt[0] / cell_size), math.floor(pt[1] / cell_size)
+            for gx in range(cx - 1, cx + 2):
+                for gy in range(cy - 1, cy + 2):
+                    for j, other in endpoint_grid.get((gx, gy), ()):
+                        if j != idx and _dist(pt, other) <= junction_tol_px:
+                            return True
         return False
 
     out = []

@@ -9,8 +9,6 @@ Yang dikunci:
   3. PDF 1 halaman & PNG tidak dipecah dan file aslinya dipakai apa adanya,
   4. setiap halaman punya thumbnail sendiri yang berbeda.
 """
-import io
-import json
 import os
 import sys
 import uuid
@@ -33,7 +31,6 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models.project import Project
-from app.models.sheet import Sheet
 from _fixtures import fixture_path
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_pdf_split.db"
@@ -121,6 +118,7 @@ async def test_three_page_pdf_becomes_three_sheets():
         assert all(s["file_path"].lower().endswith(".pdf") for s in sheets)
         assert all(s["filename"] == "CCD2-BUNDLE-3P.pdf" for s in sheets)
         assert all(s["project_id"] == pid for s in sheets)
+        assert all(s["status"] == "queued" for s in sheets), "Semua sheet harus berstatus awal 'queued'"
 
         # Endpoint list (dipakai grid Folder View) urut halaman.
         r2 = await ac.get(f"/api/v1/projects/{pid}/sheets")

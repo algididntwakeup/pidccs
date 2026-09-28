@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Scissors,
@@ -18,6 +18,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
+import { useCanvasOverlay, applyMouseNav } from '@/hooks/useCanvasOverlay';
 
 // Liang-Barsky/Cohen-Sutherland style test: does segment (x0,y0)-(x1,y1) intersect an
 // axis-aligned rectangle? Used by the Multi-Select marquee so long pipes crossing the
@@ -79,10 +80,6 @@ interface InteractivePipeCanvasProps {
   onUpdateRunPoints?: (runIdx: number, points: [number, number][]) => Promise<void>;
   splitMode: boolean;
   onSetSplitMode: (active: boolean) => void;
-  canUndo: boolean;
-  canRedo: boolean;
-  onUndo: () => void;
-  onRedo: () => void;
   traceTool: 'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand';
   onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand') => void;
   onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }) => Promise<void>;
@@ -92,6 +89,7 @@ interface InteractivePipeCanvasProps {
   // Used for Corrosion System / Circuit views so circuit coloring is rendered
   // as a vector layer on the raw CAD image instead of swapping to a server PNG.
   colorOverrideMap?: Map<number, string> | null;
+  hiddenRunIndices?: Set<number>;
   dimUncolored?: boolean;
 }
 
@@ -113,19 +111,15 @@ export default function InteractivePipeCanvas({
   onUpdateRunPoints,
   splitMode,
   onSetSplitMode,
-  canUndo,
-  canRedo,
-  onUndo,
-  onRedo,
   traceTool,
   onSetTraceTool,
   onRescan,
   onTraceClick,
   onManualRun,
   colorOverrideMap,
+  hiddenRunIndices,
   dimUncolored,
 }: InteractivePipeCanvasProps) {
-  const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [hoveredRunIdx, setHoveredRunIdx] = useState<number | null>(null);
   const [splitPreview, setSplitPreview] = useState<{ x: number; y: number } | null>(null);
   const [customColor, setCustomColor] = useState('#2563EB');
@@ -156,7 +150,6 @@ export default function InteractivePipeCanvas({
   const [snapGuide, setSnapGuide] = useState<{ axis: 'h' | 'v'; val: number } | null>(null);
 
   // Multi-select marquee state (drag a blue rectangle to select many runs)
-  const [marqueeStart, setMarqueeStart] = useState<{ x: number; y: number } | null>(null);
   const [marqueeRect, setMarqueeRect] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   // Refs mirror the marquee state so the mouseup handler never reads a stale closure.
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -165,166 +158,21 @@ export default function InteractivePipeCanvas({
   const [toolBusy, setToolBusy] = useState(false);
   // Temporary hand-pan: true while Ctrl/Cmd or Space is held down. Lets the user
   // pan the canvas with the mouse without switching the active tool.
-  const [tempPan, setTempPan] = useState(false);
 
   // Arrow-key micro-nudge: accumulated [dx, dy] offset per selected run index. Applied
   // at render-time for instant feedback; committed to the backend (debounced) on idle.
   const [nudgeOffsets, setNudgeOffsets] = useState<Map<number, [number, number]>>(new Map());
+  // Hover and toolbar state change often; pipe geometry changes only after an edit.
+  const pointStrings = useMemo(
+    () => runs.map((run) => run.points?.map((point) => `${point[0]},${point[1]}`).join(' ') ?? ''),
+    [runs],
+  );
   const nudgeCommitRef = useRef<Map<number, [number, number]>>(new Map());
   const nudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const pointerDownRecordRef = useRef<{ x: number; y: number; time: number } | null>(null);
-  const traceToolRef = useRef(traceTool);
-  traceToolRef.current = traceTool;
-
-  // Mount OpenSeadragon overlay container that syncs with pan & zoom.
-  //
-  // IMPORTANT: `viewer.open()` internally calls `close()`, which runs
-  // `clearOverlays()` and wipes the overlays container. The parent swaps the
-  // base image via `viewer.open()` on mode change (digitize <-> system/circuit),
-  // so we must RE-ATTACH our overlay every time the viewer (re)opens, otherwise
-  // the SVG tracing layer silently disappears and is never restored.
-  useEffect(() => {
-    if (!viewer || !osdModule || !width || !height) return;
-
-    const overlayEl = document.createElement('div');
-    overlayEl.id = 'pid-interactive-svg-overlay-container';
-    overlayEl.style.width = '100%';
-    overlayEl.style.height = '100%';
-    overlayEl.style.position = 'absolute';
-    overlayEl.style.top = '0';
-    overlayEl.style.left = '0';
-    // Pointer-events on container: 'none' in pan mode (to allow OSD pan), 'auto' in rescan/pen modes
-    overlayEl.style.pointerEvents = traceToolRef.current === 'pan' ? 'none' : 'auto';
-
-    const aspectRatio = height / width;
-    const rect = new osdModule.Rect(0, 0, 1.0, aspectRatio);
-
-    const attachOverlay = () => {
-      // Re-assert DOM identity in case OSD cleared its overlays container.
-      if (overlayEl.parentNode !== null) {
-        overlayEl.parentNode.removeChild(overlayEl);
-      }
-      try {
-        viewer.addOverlay({
-          element: overlayEl,
-          location: rect,
-          checkResize: false,
-        });
-      } catch (e) {
-        // viewer may be tearing down
-      }
-      // Restore tool-driven pointer-events after a re-attach.
-      overlayEl.style.pointerEvents = traceToolRef.current === 'pan' ? 'none' : 'auto';
-    };
-
-    attachOverlay();
-    setContainer(overlayEl);
-
-    // Re-attach on every (re)open — this is what fixes the "tracing disappears
-    // after switching tabs" regression.
-    viewer.addHandler('open', attachOverlay);
-
-    return () => {
-      try {
-        viewer.removeHandler('open', attachOverlay);
-      } catch (e) {}
-      try {
-        viewer.removeOverlay(overlayEl);
-      } catch (e) {
-        // overlay may have been removed on viewer destroy
-      }
-      if (overlayEl.parentNode) {
-        overlayEl.parentNode.removeChild(overlayEl);
-      }
-      setContainer(null);
-    };
-  }, [viewer, osdModule, width, height]);
-
-  // Synchronize OpenSeadragon mouse navigation & overlay pointer-events based on tool
-  useEffect(() => {
-    if (!viewer) return;
-
-    if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect' || traceTool === 'wand') {
-      viewer.setMouseNavEnabled(false);
-      if (container) {
-        container.style.pointerEvents = 'auto';
-      }
-    } else {
-      // Pan mode
-      viewer.setMouseNavEnabled(true);
-      if (container) {
-        container.style.pointerEvents = 'none';
-      }
-    }
-  }, [viewer, traceTool, container]);
-
-  // --- Temporary hand-pan (hold Ctrl/Cmd or Space) ----------------------------
-  // While the modifier is held we force the SVG tracing layer transparent to
-  // pointer events and re-enable OpenSeadragon navigation, so the user can grab
-  // and pan even in rescan/pen/multiselect mode. On release the active tool's
-  // interaction model is restored exactly as before.
-  useEffect(() => {
-    if (!viewer) return;
-    const isTyping = (el: EventTarget | null) => {
-      const t = el as HTMLElement | null;
-      return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target)) return;
-      // Ctrl (Windows/Linux), Meta (macOS) or Space engage the temp pan.
-      if (e.key === 'Control' || e.key === 'Meta' || e.key === ' ') {
-        // Space would otherwise scroll the page — suppress it while holding.
-        if (e.key === ' ') e.preventDefault();
-        setTempPan((prev) => (prev ? prev : true));
-      }
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Control' || e.key === 'Meta' || e.key === ' ') {
-        setTempPan(false);
-      }
-    };
-    // Safety: releasing focus (tab switch / alt-tab) must clear the temp pan,
-    // otherwise the canvas can get stuck in grab mode.
-    const onBlur = () => setTempPan(false);
-
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
-    };
-  }, [viewer]);
-
-  // Apply the temporary pan state to the viewer + overlay layer.
-  useEffect(() => {
-    if (!viewer || !container) return;
-    if (tempPan) {
-      try {
-        viewer.setMouseNavEnabled(true);
-      } catch (e) {}
-      container.style.pointerEvents = 'none';
-      container.style.cursor = 'grab';
-    } else {
-      // Restore interaction for the currently active tool.
-      if (traceTool === 'rescan' || traceTool === 'pen' || traceTool === 'multiselect' || traceTool === 'wand') {
-        try {
-          viewer.setMouseNavEnabled(false);
-        } catch (e) {}
-        container.style.pointerEvents = 'auto';
-      } else {
-        try {
-          viewer.setMouseNavEnabled(true);
-        } catch (e) {}
-        container.style.pointerEvents = 'none';
-      }
-      container.style.cursor = '';
-    }
-  }, [viewer, container, tempPan, traceTool]);
+  const { container, tempPan } = useCanvasOverlay(viewer, osdModule, width, height, traceTool);
 
   // Commit accumulated nudge offset for one run via onUpdateRunPoints.
   const commitNudge = useCallback(
@@ -398,7 +246,7 @@ export default function InteractivePipeCanvas({
   useEffect(() => {
     if (!viewer) return;
 
-    const onCanvasClick = (event: any) => {
+    const onCanvasClick = () => {
       // If user clicked empty space without dragging and not in splitMode
       if (!splitMode && traceTool === 'pan') {
         onSelectRunIndices(new Set());
@@ -656,7 +504,7 @@ export default function InteractivePipeCanvas({
     if (!viewer) return;
 
     // Temporarily disable OpenSeadragon navigation while dragging vertex
-    viewer.setMouseNavEnabled(false);
+    applyMouseNav(viewer, false);
     setDraggingVertex({ runIdx, ptIdx });
 
     const currentRun = runs[runIdx];
@@ -713,7 +561,7 @@ export default function InteractivePipeCanvas({
 
       // Re-enable OpenSeadragon navigation
       if (viewer && traceTool === 'pan') {
-        viewer.setMouseNavEnabled(true);
+        applyMouseNav(viewer, true);
       }
 
       setLiveDragPoints((finalPts) => {
@@ -755,7 +603,6 @@ export default function InteractivePipeCanvas({
         const rect = { x1: point.x, y1: point.y, x2: point.x, y2: point.y };
         marqueeStartRef.current = start;
         marqueeRectRef.current = rect;
-        setMarqueeStart(start);
         setMarqueeRect(rect);
       }
       return;
@@ -910,7 +757,6 @@ export default function InteractivePipeCanvas({
       const point = getImageCoordinates(e);
       const start = marqueeStartRef.current;
       marqueeStartRef.current = null;
-      setMarqueeStart(null);
 
       const bounds = point
         ? {
@@ -938,6 +784,7 @@ export default function InteractivePipeCanvas({
         x >= bounds.x1 && x <= bounds.x2 && y >= bounds.y1 && y <= bounds.y2;
       const next = new Set<number>(e.shiftKey ? selectedRunIndices : []);
       runs.forEach((run, idx) => {
+        if (hiddenRunIndices?.has(idx)) return;
         if (!run.points || run.points.length < 2) return;
         let hit = run.points.some((p) => inside(p[0], p[1]));
         if (!hit) {
@@ -1006,7 +853,7 @@ export default function InteractivePipeCanvas({
     }
   };
 
-  const finishManual = async () => {
+  const finishManual = useCallback(async () => {
     if (manualPoints.length < 2 || toolBusy) return;
     setToolBusy(true);
     try {
@@ -1016,7 +863,7 @@ export default function InteractivePipeCanvas({
     } finally {
       setToolBusy(false);
     }
-  };
+  }, [manualPoints, toolBusy, onManualRun]);
 
   // Keyboard shortcuts listener for tool actions
   useEffect(() => {
@@ -1044,7 +891,7 @@ export default function InteractivePipeCanvas({
           setRoiRect(null);
           setManualPoints([]);
           setPenHoverPt(null);
-          setMarqueeStart(null);
+          marqueeStartRef.current = null;
           setMarqueeRect(null);
           onSetTraceTool('pan');
         }
@@ -1052,10 +899,11 @@ export default function InteractivePipeCanvas({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [traceTool, manualPoints, toolBusy, onSetTraceTool]);
+  }, [traceTool, onSetTraceTool, finishManual]);
 
   // Render an individual pipe run (polyline + hit area + halo)
   const renderPipeRun = (run: PipeRun, idx: number, isSelected: boolean) => {
+    if (hiddenRunIndices?.has(idx)) return null;
     if (!run.points || run.points.length < 2) return null;
     const isHovered = hoveredRunIdx === idx;
     const isEquipOutline = Boolean(run.equipment_outline);
@@ -1072,7 +920,9 @@ export default function InteractivePipeCanvas({
       nudge && (nudge[0] !== 0 || nudge[1] !== 0)
         ? basePoints.map((p) => [p[0] + nudge[0], p[1] + nudge[1]] as [number, number])
         : basePoints;
-    const ptsStr = activePoints.map((p) => `${p[0]},${p[1]}`).join(' ');
+    const ptsStr = nudge || (draggingVertex?.runIdx === idx && liveDragPoints)
+      ? activePoints.map((p) => `${p[0]},${p[1]}`).join(' ')
+      : pointStrings[idx];
 
     return (
       <g key={run.id || `run-${idx}`} className="group">
@@ -1223,7 +1073,7 @@ export default function InteractivePipeCanvas({
 
             {/* 3. Draggable Vertex Control Points for Selected Lines (ALWAYS on top of all pipe runs) */}
             {runs.map((run, idx) => {
-              if (!selectedRunIndices.has(idx) || !run.points || run.points.length < 2) return null;
+              if (hiddenRunIndices?.has(idx) || !selectedRunIndices.has(idx) || !run.points || run.points.length < 2) return null;
               const basePoints =
                 draggingVertex?.runIdx === idx && liveDragPoints ? liveDragPoints : run.points;
               const nudge = nudgeOffsets.get(idx);
@@ -1638,7 +1488,7 @@ export default function InteractivePipeCanvas({
             setManualPoints([]);
             setRoiRect(null);
             setMarqueeRect(null);
-            setMarqueeStart(null);
+            marqueeStartRef.current = null;
           }}
           className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'pan'
@@ -1657,7 +1507,7 @@ export default function InteractivePipeCanvas({
             setManualPoints([]);
             setRoiRect(null);
             setMarqueeRect(null);
-            setMarqueeStart(null);
+            marqueeStartRef.current = null;
           }}
           className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'wand'
@@ -1692,7 +1542,7 @@ export default function InteractivePipeCanvas({
             onSetTraceTool('rescan');
             setManualPoints([]);
             setMarqueeRect(null);
-            setMarqueeStart(null);
+            marqueeStartRef.current = null;
           }}
           className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'rescan'
@@ -1710,7 +1560,7 @@ export default function InteractivePipeCanvas({
             onSetTraceTool('pen');
             setRoiRect(null);
             setMarqueeRect(null);
-            setMarqueeStart(null);
+            marqueeStartRef.current = null;
           }}
           className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
             traceTool === 'pen'

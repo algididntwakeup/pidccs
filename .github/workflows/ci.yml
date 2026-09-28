@@ -43,7 +43,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
-      - name: Run Backend Pytest Suite (19 test cases + E2E pipeline)
+      - name: Run Backend Pytest Suite
         run: |
           pytest backend/tests/ -v --durations=10
 
@@ -78,6 +78,10 @@ jobs:
       - name: Run ESLint
         run: |
           npm run lint
+
+      - name: Check TypeScript types
+        run: |
+          npx tsc --noEmit
 
       - name: Run Next.js Production Build
         run: |

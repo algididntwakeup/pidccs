@@ -57,8 +57,6 @@ class ExportService:
     ) -> str:
         """Export digitization deliverables. Returns the generated file path."""
         clean_name = os.path.splitext(os.path.basename(drawing_name))[0]
-        rel_dir = os.path.join("exports", clean_name)
-
         if export_format == "xlsx":
             abs_file = ExportService._output_path(clean_name, export_format, mode)
             os.makedirs(os.path.dirname(abs_file), exist_ok=True)

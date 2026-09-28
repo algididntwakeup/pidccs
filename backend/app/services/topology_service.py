@@ -1,9 +1,8 @@
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from ..models.project import Project
 from ..models.sheet import Sheet
 from ..schemas.topology import (
     TopologyNode,
@@ -11,7 +10,6 @@ from ..schemas.topology import (
     ProjectCircuit,
     ProjectTopologyResponse,
 )
-from ..schemas.system import CircuitProvenance
 from ..services.grouping_service import GroupingService
 
 

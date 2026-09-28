@@ -56,7 +56,7 @@ def load_ground_truth():
                 continue                      # file terkunci / rusak -> lewati, jangan gagal total
         cols = {c.lower().strip(): c for c in df.columns}
         c_src = cols.get("source file"); c_pid = cols.get("piping id")
-        c_col = cols.get("color group"); c_loop = cols.get("corr. loop")
+        c_col = cols.get("color group")
         if not (c_src and c_pid and c_col):
             continue
         for _, row in df.iterrows():

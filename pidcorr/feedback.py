@@ -16,7 +16,6 @@ Format: 1 gambar `images/<stem>.png` + 1 label YOLO `labels/<stem>.txt`
 (koreksi terbaru selalu menang) -> tidak menumpuk duplikat, satu drawing = satu sampel.
 """
 import os
-import numpy as np
 import cv2
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

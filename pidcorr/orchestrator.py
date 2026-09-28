@@ -1,6 +1,7 @@
 import os
 import time
 import copy
+import math
 from typing import Callable, Optional, Dict, Any, List, Literal
 import numpy as np
 
@@ -19,7 +20,7 @@ from .layout import detect_furniture
 from .lines import associate, PipeRun
 from .piping_id import PipingID
 from .connpoint import find_connection_points, class_vocab
-from .propagate import split_at_connection_points, propagate_labels
+from .propagate import split_at_connection_points
 
 
 def _dedup_pid_recs(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -30,6 +31,25 @@ def _dedup_pid_recs(recs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if k not in by_pid or r.get("conf", 0) > by_pid[k].get("conf", 0):
             by_pid[k] = r
     return list(by_pid.values())
+
+
+def _pdf_pixel_size(path: str, dpi: int, rot: int) -> tuple[int, int]:
+    """Read page dimensions without rasterizing a full-resolution image."""
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(path)
+    try:
+        page = pdf[0]
+        try:
+            width_pt, height_pt = page.get_size()
+        finally:
+            page.close()
+    finally:
+        pdf.close()
+    # PDFium's page.render() rounds the scaled canvas upward on each axis.
+    width = max(1, math.ceil(width_pt * dpi / 72))
+    height = max(1, math.ceil(height_pt * dpi / 72))
+    return (height, width) if rot % 180 else (width, height)
 
 
 class PipelineOrchestrator:
@@ -54,12 +74,13 @@ class PipelineOrchestrator:
 
     def run(
         self,
-        img_bgr: np.ndarray,
+        img_bgr: Optional[np.ndarray],
         image_path: str = "",
         dpi: int = 350,
         rot: int = 0,
         progress: Optional[Callable[[str], None]] = None,
         mode: Literal["full", "lines_only"] = "full",
+        image_loader: Optional[Callable[[], np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """Execute complete digitization pipeline using configured component adapters.
 
@@ -69,7 +90,6 @@ class PipelineOrchestrator:
             - Runs Stage 4 (Line Tracing) directly
             - Skips Association (pids empty)
         """
-        H, W = img_bgr.shape[:2]
         t0 = time.time()
 
         # Stage 0: Early PDF tier detection — BEFORE any heavy computation.
@@ -91,6 +111,25 @@ class PipelineOrchestrator:
                 if progress:
                     progress(f"Deteksi tier PDF gagal ({e}) — fallback...")
 
+        if img_bgr is not None:
+            H, W = img_bgr.shape[:2]
+        elif mode == "lines_only" and is_vector_pdf:
+            try:
+                W, H = _pdf_pixel_size(image_path, dpi, rot)
+            except Exception:
+                H = W = 0
+        else:
+            H = W = 0
+
+        def ensure_image() -> np.ndarray:
+            nonlocal img_bgr, H, W
+            if img_bgr is None:
+                if image_loader is None:
+                    raise ValueError("A raster image loader is required for raster tracing")
+                img_bgr = image_loader()
+                H, W = img_bgr.shape[:2]
+            return img_bgr
+
         if mode == "lines_only":
             pids = []
             tokens = []
@@ -99,6 +138,7 @@ class PipelineOrchestrator:
             if progress:
                 progress("Mode 'lines_only' aktif: bypass OCR & YOLO, langsung mengekstrak garis...")
         else:
+            img_bgr = ensure_image()
             # Stage 1: Piping ID OCR & candidate token extraction
             if progress:
                 progress("Membaca teks line number (OCR)...")
@@ -173,6 +213,7 @@ class PipelineOrchestrator:
                     progress(f"Ekstraksi vektor dilewati ({e}) — fallback ke raster...")
 
         if runs is None:
+            img_bgr = ensure_image()
             trace_kwargs = {
                 "img_bgr": img_bgr,
                 "dpi": dpi,
@@ -187,6 +228,8 @@ class PipelineOrchestrator:
             if "pids" in sig.parameters:
                 trace_kwargs["pids"] = pids
             runs = self.tracer.trace(**trace_kwargs)
+        elif not H or not W:
+            ensure_image()
 
         # Association: link piping IDs to pipe runs
         if mode != "lines_only" and pids:

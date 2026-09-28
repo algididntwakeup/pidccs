@@ -1,13 +1,12 @@
 import os
 import sys
-import pytest
 import numpy as np
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from pidcorr.lines import PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts, suppress_floating_stubs
+from pidcorr.lines import PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts, suppress_floating_stubs, suppress_low_ink_diagonals
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 
 
@@ -40,6 +39,18 @@ def test_bridge_inline_valve_gaps():
     pts = bridged[0].points if hasattr(bridged[0], "points") else bridged[0]["points"]
     assert pts[0] == (50, 100)
     assert pts[-1] == (200, 100)
+
+
+def test_low_ink_diagonal_keeps_connected_elbow_only():
+    image = np.full((350, 350, 3), 255, dtype=np.uint8)
+    connected = PipeRun(points=[(20, 20), (100, 100)], axis="d")
+    elbow = PipeRun(points=[(101, 100), (150, 100)], axis="h")
+    isolated = PipeRun(points=[(200, 200), (300, 300)], axis="d")
+    empty = PipeRun(points=[], axis="poly")
+
+    kept = suppress_low_ink_diagonals([empty, connected, elbow, isolated], img_bgr=image)
+
+    assert kept == [connected, elbow]
 
 
 def test_skeleton_tracer_dilated_text_and_equipment_masking():
@@ -107,7 +118,6 @@ def test_suppress_floating_stubs_removes_isolated_diagonal():
     out = suppress_floating_stubs(
         [garbage, near_symbol, short_horiz], detections=detections, dpi=350, max_len_px=40
     )
-    kinds = [r.axis for r in out]
     assert garbage not in out, "isolated short diagonal must be dropped"
     assert near_symbol in out, "diagonal attached to a symbol must survive"
     assert short_horiz in out, "short horizontal pipe must survive"

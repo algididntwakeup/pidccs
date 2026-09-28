@@ -1,4 +1,5 @@
-from typing import Dict, Any, Optional, List
+# pyrefly: ignore [missing-import]
+from typing import Dict, Any, List
 from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
