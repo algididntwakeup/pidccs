@@ -1,7 +1,9 @@
-from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+import json
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
 from ..db.session import get_db
 from ..models.project import Project
@@ -18,6 +20,7 @@ router = APIRouter(prefix="/projects/{project_id}/linelist", tags=["linelist"])
 async def import_linelist_endpoint(
     project_id: str,
     file: UploadFile = File(...),
+    mapping: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     """Import Line List Excel or CSV spreadsheet and enrich all P&ID sheets in the project."""
@@ -27,18 +30,17 @@ async def import_linelist_endpoint(
 
     content = await file.read()
     filename = file.filename or "linelist"
-    ext = filename.split(".")[-1].lower()
+
+    # Optional dynamic column mapping JSON string
+    mapping_dict = None
+    if mapping:
+        try:
+            mapping_dict = json.loads(mapping) if isinstance(mapping, str) else mapping
+        except Exception:
+            mapping_dict = None
 
     try:
-        if ext in ("xlsx", "xls"):
-            entries = LineListParser.parse_excel(content)
-        elif ext in ("csv", "txt"):
-            entries = LineListParser.parse_csv(content.decode("utf-8", errors="replace"))
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file format '{ext}'. Please upload an .xlsx or .csv file."
-            )
+        entries = LineListParser.parse_file(content, filename=filename, mapping_dict=mapping_dict)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse line list file: {str(e)}")
 
@@ -78,6 +80,10 @@ async def import_linelist_endpoint(
                 existing.design_temperature_c = entry.design_temperature_c
             if entry.design_pressure_barg is not None and existing.design_pressure_barg is None:
                 existing.design_pressure_barg = entry.design_pressure_barg
+            if entry.insulation and not existing.insulation:
+                existing.insulation = entry.insulation
+            if entry.notes and not existing.notes:
+                existing.notes = entry.notes
             if entry.corrosion_allowance_mm is not None and existing.corrosion_allowance_mm is None:
                 existing.corrosion_allowance_mm = entry.corrosion_allowance_mm
 
@@ -110,14 +116,20 @@ async def import_linelist_endpoint(
                     p["fluid_phase"] = entry.fluid_phase
                 if entry.operating_pressure_barg is not None:
                     p["operating_pressure"] = entry.operating_pressure_barg
+                    p["operating_pressure_barg"] = entry.operating_pressure_barg
                 if entry.operating_temperature_c is not None:
                     p["operating_temperature"] = entry.operating_temperature_c
+                    p["operating_temperature_c"] = entry.operating_temperature_c
                 if entry.design_pressure_barg is not None:
                     p["design_pressure"] = entry.design_pressure_barg
+                    p["design_pressure_barg"] = entry.design_pressure_barg
                 if entry.design_temperature_c is not None:
                     p["design_temperature"] = entry.design_temperature_c
+                    p["design_temperature_c"] = entry.design_temperature_c
                 if entry.insulation:
                     p["insulation"] = entry.insulation
+                if entry.notes:
+                    p["notes"] = entry.notes
                 if entry.corrosion_allowance_mm is not None:
                     p["corrosion_allowance"] = entry.corrosion_allowance_mm
                 if entry.corrosion_loop:
@@ -135,12 +147,15 @@ async def import_linelist_endpoint(
     await db.commit()
 
     return LineListImportResult(
+        status="success",
+        entries_parsed=len(entries),
+        pids_enriched=matched_pids,
         filename=filename,
         total_rows=len(entries),
         matched_pids=matched_pids,
         unmatched_pids=unmatched_pids,
         enriched_sheets=enriched_sheets,
-        entries=entries[:100]  # Return preview of first 100
+        entries=entries[:100],  # Return preview of first 100
     )
 
 
