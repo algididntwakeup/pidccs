@@ -67,6 +67,31 @@ def _hex_ops(stream, rgb):
             return True
     return False
 
+
+def test_dashed_run_exports_with_dashed_pdf_annotation(tmp_path):
+    source = tmp_path / "source.pdf"
+    document = pymupdf.open()
+    document.new_page(width=400, height=400)
+    document.save(source)
+    document.close()
+
+    output = tmp_path / "dashed.pdf"
+    result = {
+        "image_path": str(source),
+        "dpi": 72,
+        "w": 400,
+        "h": 400,
+        "runs": [{"points": [[40, 60], [300, 60]], "line_style": "dashed", "color": "#2563EB"}],
+        "piping_ids": [],
+    }
+    assert export_marked_pdf(result, str(output), mode="engineer") == 1
+
+    exported = pymupdf.open(output)
+    page = exported[0]
+    annotation = next(page.annots())
+    border = exported.xref_get_key(annotation.xref, "BS")[1]
+    assert "/S/D" in border and "/D[3 2]" in border
+
 def test_stamp_annotation_placed_at_longest_run_midpoint(tmp_path):
     out, n = _export(tmp_path)
     assert n == 3, "stempel tidak boleh menambah hitungan annotation garis"

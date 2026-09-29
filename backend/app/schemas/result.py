@@ -53,6 +53,7 @@ class ManualGroup(BaseModel):
     id: str = Field(..., description="Unique group identifier")
     name: str = Field(..., description="Engineer-facing group name (dipakai sebagai stempel export)")
     color: str = Field(default="#F59E0B", description="Hex color applied to member runs")
+    kind: Literal["system", "circuit"] = Field(default="circuit", description="Jenis grup corrosion manual")
 
 class DigitizationResult(BaseModel):
     image_path: str = Field(default="", description="Path or reference identifier of base drawing")

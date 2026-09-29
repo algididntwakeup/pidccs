@@ -14,7 +14,11 @@ if _ROOT_DIR not in sys.path:
 
 from worker.celery_app import celery_app
 from app.config import settings
-from app.services.detection_service import execute_sheet_detection, execute_sheet_enrichment
+from app.services.detection_service import (
+    execute_sheet_detection,
+    execute_sheet_enrichment,
+    merge_enrichment_into_result,
+)
 from app.services.tile_service import TileService
 
 
@@ -120,16 +124,7 @@ async def _save_enrichment_to_db(job_id: str, sheet_id: str, enrichment_result: 
     async with get_worker_session() as session:
         sheet = await session.get(Sheet, sheet_id)
         if sheet:
-            res = dict(sheet.result_json or {})
-            res["symbols"] = enrichment_result.get("symbols", [])
-            res["piping_ids"] = enrichment_result.get("piping_ids", [])
-            res["runs"] = enrichment_result.get("runs", res.get("runs", []))
-            if "furniture" in enrichment_result:
-                res["furniture"] = enrichment_result["furniture"]
-            if "conn_points" in enrichment_result:
-                res["conn_points"] = enrichment_result["conn_points"]
-            if "opcs" in enrichment_result:
-                res["opcs"] = enrichment_result["opcs"]
+            res = merge_enrichment_into_result(sheet.result_json, enrichment_result)
 
             try:
                 sheet.systems_json = GroupingService.compute_circuits(res)

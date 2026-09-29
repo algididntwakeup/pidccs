@@ -637,6 +637,22 @@ class SkeletonLineTracer(BaseLineTracer):
                 dil_y2 = min(H, ty2 + dil_r_bottom)
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
+        # Keep an actual break at detected inline valves and instrument bubbles.
+        # These symbol boxes are also passed to every gap-bridging pass below so
+        # collinear pipe fragments cannot be rejoined through the symbol body.
+        symbol_gap_boxes = []
+        symbol_pad = max(1, int(round(dpi / 350.0)))
+        for detection in detections or []:
+            if detection.get("coarse") not in ("valve", "instrument"):
+                continue
+            x1 = max(0, int(detection.get("x1", 0)) - symbol_pad)
+            y1 = max(0, int(detection.get("y1", 0)) - symbol_pad)
+            x2 = min(W, int(detection.get("x2", 0)) + symbol_pad)
+            y2 = min(H, int(detection.get("y2", 0)) + symbol_pad)
+            if x2 > x1 and y2 > y1:
+                clean_binary[y1:y2, x1:x2] = 0
+                symbol_gap_boxes.append((x1, y1, x2, y2))
+
         # 2. Equipment Interior Masking: buang ISI equipment, PERTAHANKAN dinding + nozzle.
         #
         # Bug yang diperbaiki 2026-09-24: versi lama mem-blackout SELURUH bbox equipment
@@ -757,14 +773,16 @@ class SkeletonLineTracer(BaseLineTracer):
         # (mayoritas titik sampelnya tidak menyentuh tinta). Terukur: satu run
         # 1017 px di lembar referensi hanya 20% tinta — bukan pipa, bukan gambar.
         filtered = suppress_low_ink_diagonals(filtered, img_bgr=gray)
-        filtered = bridge_collinear_headers(filtered, max_gap_px=55)
+        filtered = bridge_collinear_headers(filtered, max_gap_px=55, block_boxes=symbol_gap_boxes)
 
-        # 7. Bridge pipe runs cut by inline valves
-        filtered = bridge_inline_valve_gaps(filtered, detections=detections, max_gap_px=90)
+        # 7. Bridge ordinary gaps but preserve every detected symbol-body gap.
+        filtered = bridge_inline_valve_gaps(
+            filtered, detections=detections, max_gap_px=90, block_boxes=symbol_gap_boxes
+        )
 
         # 7b. Rekonstruksi bengkokan: sambung potongan siku 45° kembali ke polyline
         #     supaya satu pipa bengkok = satu run (klik-ID menyala penuh).
-        filtered = bridge_polyline_elbows(filtered)
+        filtered = bridge_polyline_elbows(filtered, block_boxes=symbol_gap_boxes)
 
         # 8. Post-filter: drop isolated short diagonal strokes (surviving text/hand scratches)
         #    that do not attach to any detected symbol. No-op when detections is empty.

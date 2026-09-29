@@ -140,8 +140,26 @@ def render_marked_png(img_bgr, result, mode="engineer"):
 
 def _poly(vis, run, rgb):
     pts = run.get("points") or [[run["x1"], run["y1"]], [run["x2"], run["y2"]]]
-    cv2.polylines(vis, [np.array(pts, np.int32).reshape(-1, 1, 2)], False,
-                  (rgb[2], rgb[1], rgb[0]), 6)
+    color = (rgb[2], rgb[1], rgb[0])
+    if run.get("line_style") != "dashed":
+        cv2.polylines(vis, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, color, 6)
+        return
+    dash_px, gap_px = 14.0, 9.0
+    for start, end in zip(pts, pts[1:]):
+        x0, y0 = float(start[0]), float(start[1])
+        x1, y1 = float(end[0]), float(end[1])
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length <= 0:
+            continue
+        offset = 0.0
+        while offset < length:
+            stop = min(length, offset + dash_px)
+            p0 = (int(round(x0 + (x1 - x0) * offset / length)),
+                  int(round(y0 + (y1 - y0) * offset / length)))
+            p1 = (int(round(x0 + (x1 - x0) * stop / length)),
+                  int(round(y0 + (y1 - y0) * stop / length)))
+            cv2.line(vis, p0, p1, color, 6, lineType=cv2.LINE_AA)
+            offset += dash_px + gap_px
 
 
 # ------------------------------------------------------------ PDF (Acrobat-editable) --
@@ -175,8 +193,15 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
     manual_groups = result.get("manual_groups") or []
     manual_by_run = {}                             # run_idx -> indeks grup manual
     for gi, g in enumerate(manual_groups):
+        kind = g.get("kind", "circuit")
+        if mode in ("system", "circuit") and kind != mode:
+            continue
         for ri, r in enumerate(runs):
-            if r.get("group_id") and r.get("group_id") == g.get("id"):
+            if kind == "system":
+                group_id = r.get("system_group_id") or r.get("group_id")
+            else:
+                group_id = r.get("circuit_group_id") or r.get("group_id")
+            if group_id and group_id == g.get("id"):
                 manual_by_run[ri] = gi
 
     # (warna_rgb, subject, [run_idx], teks_legend, teks_stempel)
@@ -219,6 +244,9 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
     # Grup manual engineer: warna & nama grup menang atas mode; nama dipakai sebagai
     # stempel di kanvas PDF (pengganti legend).
     for gi, g in enumerate(manual_groups):
+        kind = g.get("kind", "circuit")
+        if mode in ("system", "circuit") and kind != mode:
+            continue
         idxs = sorted(ri for ri, mgi in manual_by_run.items() if mgi == gi)
         if not idxs:
             continue
@@ -268,7 +296,10 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
                 continue
             a = page.add_polyline_annot(fp)
             a.set_colors(stroke=col)
-            a.set_border(width=lw)
+            if run.get("line_style") == "dashed":
+                a.set_border(width=lw, style="D", dashes=[3, 2])
+            else:
+                a.set_border(width=lw)
             a.set_opacity(opacity)
             ids = ", ".join(run_pids.get(int(ri), [])) or "(tanpa piping ID terasosiasi)"
             a.set_info(title=subj, subject=subj, content=ids)

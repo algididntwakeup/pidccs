@@ -22,7 +22,7 @@ router = APIRouter(tags=["detection"])
 class DetectRequest(BaseModel):
     dpi: Optional[int] = None
     rot: Optional[int] = None
-    mode: Optional[str] = "full"
+    mode: Optional[str] = "lines_only"
     sheet_id: Optional[str] = None
 
 
@@ -37,7 +37,7 @@ async def trigger_detection(
     background_tasks: BackgroundTasks,
     dpi: Optional[int] = None,
     rot: Optional[int] = None,
-    mode: Optional[str] = "full",
+    mode: Optional[str] = "lines_only",
     payload: Optional[DetectRequest] = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -46,7 +46,7 @@ async def trigger_detection(
     if not sheet or sheet.project_id != project_id:
         raise HTTPException(status_code=404, detail="Sheet not found")
 
-    target_mode = (payload.mode if payload and payload.mode else None) or mode or "full"
+    target_mode = (payload.mode if payload and payload.mode else None) or mode or "lines_only"
     target_dpi = (payload.dpi if payload and payload.dpi is not None else None) or dpi or sheet.dpi or 350
     target_rot = (payload.rot if payload and payload.rot is not None else None) or (rot if rot is not None else sheet.rot or 0)
 
@@ -79,7 +79,7 @@ async def trigger_project_detection(
     payload: Optional[DetectRequest] = None,
     dpi: Optional[int] = None,
     rot: Optional[int] = None,
-    mode: Optional[str] = "full",
+    mode: Optional[str] = "lines_only",
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger detection for a project using its active or first sheet."""
@@ -117,6 +117,16 @@ async def trigger_enrichment(
     sheet = await ProjectService.get_sheet(db, sheet_id)
     if not sheet or sheet.project_id != project_id:
         raise HTTPException(status_code=404, detail="Sheet not found")
+
+    marked_runs = [
+        run for run in (sheet.result_json or {}).get("runs", [])
+        if isinstance(run, dict) and run.get("marked") is True
+    ]
+    if not marked_runs:
+        raise HTTPException(
+            status_code=400,
+            detail="Mark at least one traced pipe before syncing with AI",
+        )
 
     target_dpi = dpi or sheet.dpi or 350
     target_rot = rot if rot is not None else sheet.rot or 0

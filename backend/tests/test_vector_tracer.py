@@ -34,6 +34,8 @@ from pidcorr.implementations.vector_tracer import (
     _cluster_rows,
     _table_regions,
     _drop_inside_regions,
+    _inline_symbol_regions,
+    _split_runs_at_symbol_regions,
 )
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
 from pidcorr.interfaces.perception import BaseLineTracer
@@ -108,6 +110,27 @@ def test_to_runs_classifies_axes():
     segs = [((0, 0), (100, 0)), ((0, 0), (0, 100)), ((0, 0), (60, 60))]
     runs, axes = _to_runs(segs)
     assert "h" in axes and "v" in axes and "d" in axes
+
+
+def test_inline_valve_geometry_leaves_a_gap_in_collinear_vector_pipe():
+    """A compact open V valve interrupts an otherwise merged pipe run."""
+    segments = [
+        ((0.0, 0.0), (100.0, 0.0)),
+        ((45.0, 0.0), (50.0, 5.0)),
+        ((50.0, 5.0), (55.0, 0.0)),
+    ]
+    regions = _inline_symbol_regions(segments)
+    runs, axes = _to_runs(segments)
+    split_runs, split_axes = _split_runs_at_symbol_regions(runs, axes, regions)
+
+    horizontal = [run for run, axis in zip(split_runs, split_axes) if axis == "h"]
+    assert len(horizontal) == 2
+    assert all(not (run[0][0] < 50 < run[1][0]) for run in horizontal)
+
+
+def test_isolated_elbow_does_not_create_inline_valve_gap():
+    segments = [((0.0, 0.0), (8.0, 8.0)), ((8.0, 8.0), (16.0, 16.0))]
+    assert _inline_symbol_regions(segments) == []
 
 
 def test_drop_glyph_noise_keeps_short_run_when_connected():

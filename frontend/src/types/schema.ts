@@ -52,12 +52,15 @@ export interface PipeRun {
   y2: number;
   underline?: boolean;
   color?: string;
+  line_style?: 'solid' | 'dashed';
   marked?: boolean;
   label?: string;
   pid?: string;
   fluid?: string;
   manual?: boolean;
   group_id?: string;
+  system_group_id?: string;
+  circuit_group_id?: string;
   equipment_outline?: boolean;
   length?: number;
 }
@@ -113,6 +116,7 @@ export interface ManualGroup {
   id: string;
   name: string;
   color: string;
+  kind: 'system' | 'circuit';
 }
 
 export interface CircuitProvenance {

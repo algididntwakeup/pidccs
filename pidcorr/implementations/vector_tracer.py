@@ -358,6 +358,126 @@ def _to_runs(segs: Sequence[Segment], min_run_pt: float = MIN_RUN_PT,
     return runs, axes
 
 
+def _inline_symbol_regions(segs: Sequence[Segment], tol_pt: float = 1.5):
+    """Recognize compact open V-shaped valve bodies and return conservative masks.
+
+    Vector CAD valves are often drawn as two open diagonal strokes, so the existing
+    closed-path filter cannot recognize them. A compact pair sharing an apex with
+    aligned tips is a stronger symbol cue than an isolated diagonal (for example,
+    an ordinary pipe elbow).
+    """
+    diagonals = []
+    for a, b in segs:
+        if abs(a[0] - b[0]) > 1.5 and abs(a[1] - b[1]) > 1.5:
+            diagonals.append((a, b))
+
+    # Spatial hash keeps this pass near-linear on dense CAD sheets with thousands
+    # of diagonal glyph and symbol strokes.
+    from collections import defaultdict
+    cell_size = max(tol_pt, 1.0)
+    endpoint_cells = defaultdict(list)
+    pairs = {}
+    for index, (a, b) in enumerate(diagonals):
+        for point, tip in ((a, b), (b, a)):
+            cx, cy = int(math.floor(point[0] / cell_size)), int(math.floor(point[1] / cell_size))
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for other_index, other_point, other_tip in endpoint_cells.get((cx + dx, cy + dy), ()):
+                        if other_index != index and _dist(point, other_point) <= tol_pt:
+                            key = (min(index, other_index), max(index, other_index))
+                            if key not in pairs:
+                                pairs[key] = (((point[0] + other_point[0]) / 2,
+                                               (point[1] + other_point[1]) / 2),
+                                              (tip, other_tip) if index < other_index else (other_tip, tip))
+            endpoint_cells[(cx, cy)].append((index, point, tip))
+
+    regions = []
+    for shared, tips in pairs.values():
+        p, q = tips
+        lo_x, hi_x = sorted((p[0], q[0]))
+        lo_y, hi_y = sorted((p[1], q[1]))
+        if 4.0 <= hi_x - lo_x <= 24.0 and abs(p[1] - q[1]) <= 2.5:
+            if lo_x - 2.5 <= shared[0] <= hi_x + 2.5 and abs(shared[1] - (p[1] + q[1]) / 2) >= 2.5:
+                regions.append(("h", lo_x - 1.5, min(p[1], q[1], shared[1]) - 1.5,
+                                hi_x + 1.5, max(p[1], q[1], shared[1]) + 1.5))
+        elif 4.0 <= hi_y - lo_y <= 24.0 and abs(p[0] - q[0]) <= 2.5:
+            if lo_y - 2.5 <= shared[1] <= hi_y + 2.5 and abs(shared[0] - (p[0] + q[0]) / 2) >= 2.5:
+                regions.append(("v", min(p[0], q[0], shared[0]) - 1.5, lo_y - 1.5,
+                                max(p[0], q[0], shared[0]) + 1.5, hi_y + 1.5))
+    # Duplicate pairs can describe the same valve when a PDF path is segmented.
+    unique = []
+    for region in regions:
+        if not any(region[0] == prev[0] and max(region[1], prev[1]) <= min(region[3], prev[3])
+                   and max(region[2], prev[2]) <= min(region[4], prev[4]) for prev in unique):
+            unique.append(region)
+    return unique
+
+
+def _split_runs_at_symbol_regions(runs: Sequence[Segment], axes: Sequence[str], regions):
+    """Keep pipe geometry on both sides of a compact inline valve, leaving a gap."""
+    if not regions:
+        return list(runs), list(axes)
+    out_runs, out_axes = [], []
+    for (a, b), axis in zip(runs, axes):
+        if axis not in ("h", "v"):
+            if any(region[0] in ("h", "v", "both") and min(a[0], b[0]) >= region[1] and max(a[0], b[0]) <= region[3]
+                   and min(a[1], b[1]) >= region[2] and max(a[1], b[1]) <= region[4]
+                   for region in regions):
+                continue
+            out_runs.append((a, b))
+            out_axes.append(axis)
+            continue
+
+        lo, hi = (sorted((a[0], b[0])) if axis == "h" else sorted((a[1], b[1])))
+        cross = (a[1] + b[1]) / 2 if axis == "h" else (a[0] + b[0]) / 2
+        cuts = []
+        for orient, x1, y1, x2, y2 in regions:
+            if orient not in (axis, "both"):
+                continue
+            region_lo, region_hi = (x1, x2) if axis == "h" else (y1, y2)
+            region_cross_lo, region_cross_hi = (y1, y2) if axis == "h" else (x1, x2)
+            if region_cross_lo <= cross <= region_cross_hi and lo < region_hi and hi > region_lo:
+                cuts.append((max(lo, region_lo), min(hi, region_hi)))
+        pieces = []
+        cursor = lo
+        for cut_lo, cut_hi in sorted(cuts):
+            if cut_lo > cursor:
+                pieces.append((cursor, cut_lo))
+            cursor = max(cursor, cut_hi)
+        if cursor < hi:
+            pieces.append((cursor, hi))
+        for p0, p1 in pieces:
+            if p1 - p0 < MIN_RUN_PT:
+                continue
+            if axis == "h":
+                out_runs.append(((p0, cross), (p1, cross)))
+            else:
+                out_runs.append(((cross, p0), (cross, p1)))
+            out_axes.append(axis)
+    return out_runs, out_axes
+
+
+def _rotate_symbol_regions(regions, rot: int, W_pt: float, H_pt: float, dpi: int):
+    """Rotate PDF-space symbol boxes with the same transform as traced runs."""
+    rot = int(rot) % 360
+    if not rot or not regions:
+        return list(regions or [])
+    scale = dpi / 72.0
+    W_px, H_px = W_pt * scale, H_pt * scale
+    rotated = []
+    for orientation, x1, y1, x2, y2 in regions:
+        corners = [_rotate_point(x * scale, y * scale, rot, W_px, H_px)
+                   for x, y in ((x1, y1), (x1, y2), (x2, y1), (x2, y2))]
+        rx1 = min(p[0] for p in corners) / scale
+        ry1 = min(p[1] for p in corners) / scale
+        rx2 = max(p[0] for p in corners) / scale
+        ry2 = max(p[1] for p in corners) / scale
+        if orientation != "both" and rot in (90, 270):
+            orientation = "v" if orientation == "h" else "h"
+        rotated.append((orientation, rx1, ry1, rx2, ry2))
+    return rotated
+
+
 def _drop_glyph_noise(runs: Sequence[Segment], axes: Sequence[str],
                       max_run_pt: float = GLYPH_MAX_RUN_PT,
                       tol: float = 2.0) -> Tuple[List[Segment], List[str]]:
@@ -542,7 +662,7 @@ def _drop_inside_regions(runs: Sequence[Segment], axes: Sequence[str],
 
 
 def page_segments_pdfplumber(pdf_path: str, page_index: int = 0,
-                             include_closed: bool = False) -> Tuple[List[Segment], Tuple[float, float]]:
+                             include_closed: bool = False):
     """Ruas lurus via pdfplumber (koordinat SUDAH display-space).
 
     Keunggulan pdfplumber: `/Rotate` halaman diterapkan otomatis, jadi tidak ada
@@ -684,6 +804,8 @@ def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
                   keep_furniture: bool = False) -> List[PipeRun]:
     """Ruas lurus (pt, display-space) -> PipeRun (px) — merge, filter, konversi."""
     runs_pt, axes = _to_runs(segs, min_seg_pt=GLYPH_MAX_SEG_PT)
+    symbol_regions = _rotate_symbol_regions(_inline_symbol_regions(segs), rot, W_pt, H_pt, dpi)
+    runs_pt, axes = _split_runs_at_symbol_regions(runs_pt, axes, symbol_regions)
     # Buang sisa glyph/dash yang tidak tersambung ke jaringan mana pun.
     runs_pt, axes = _drop_glyph_noise(runs_pt, axes)
     # Buang baris/kolom TABEL (title block, TAG list, NOTES) berdasarkan

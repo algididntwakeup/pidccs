@@ -17,6 +17,7 @@ def test_pipe_run_color_attribute():
     """Verify PipeRun default color is #2563EB and supports dict access."""
     run = PipeRun(points=[(10, 20), (100, 20)], axis="h")
     assert run.color == "#2563EB"
+    assert run.line_style == "solid"
     assert run["color"] == "#2563EB"
 
     custom = PipeRun(points=[(0, 0), (50, 50)], axis="d", color="#DC2626")

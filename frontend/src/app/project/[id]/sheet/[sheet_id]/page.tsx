@@ -5,7 +5,6 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   ArrowLeft,
-  Play,
   Download,
   CheckCircle2,
   Trash2,
@@ -35,9 +34,7 @@ import {
   Palette,
   CheckSquare,
   Square,
-  ChevronDown,
   Zap,
-  Bot,
   Sparkles,
 } from 'lucide-react';
 import InteractivePipeCanvas from '@/components/InteractivePipeCanvas';
@@ -135,18 +132,6 @@ export default function ProjectWorkspace() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showDeleteSheetModal, setShowDeleteSheetModal] = useState(false);
   const [deletingSheet, setDeletingSheet] = useState(false);
-  const [detectDropdownOpen, setDetectDropdownOpen] = useState(false);
-  const detectDropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (detectDropdownRef.current && !detectDropdownRef.current.contains(event.target as Node)) {
-        setDetectDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
 
   // Interactive Pipe Canvas & Tooling state (Phase B.5)
   //
@@ -338,7 +323,7 @@ export default function ProjectWorkspace() {
   }, [projectId]);
 
   // ---------------------------------------------------------------------------
-  // SINGLE job waiter, used by BOTH the "Detect P&ID"/Enrich buttons and the
+  // SINGLE job waiter, used by BOTH Fast Trace and AI Sync buttons and the
   // resume-after-remount effect. Three near-identical waiters used to exist, each
   // polling the SHEET status only: when the worker died, or when it reported
   // 'completed' without committing the result, the bar stayed at "Detection job
@@ -441,7 +426,7 @@ export default function ProjectWorkspace() {
         if (s?.status === 'detected' || s?.status === 'completed') { void finish(); return; }
         if (s?.status === 'error') { fail('Detection gagal di server.'); return; }
         if (Date.now() - lastProgressAt > JOB_STALL_MS) {
-          fail('Belum ada progres dari server selama 60 detik — pastikan Celery worker berjalan, lalu klik "Detect P&ID" lagi.');
+          fail('Belum ada progres dari server selama 60 detik — pastikan Celery worker berjalan, lalu jalankan Fast Trace lagi.');
         }
       } catch {}
     }, JOB_POLL_MS);
@@ -465,18 +450,43 @@ export default function ProjectWorkspace() {
     showToast(`Warna diperbarui ke ${newColor}`, 2000);
   };
 
+  const handleUpdateRunLineStyle = (runIdxs: number[], style: 'solid' | 'dashed') => {
+    if (!result || runIdxs.length === 0) return;
+    const prevRuns = [...result.runs];
+    const nextRuns = result.runs.map((run, idx) =>
+      runIdxs.includes(idx) ? { ...run, line_style: style } : run
+    );
+    pushHistory(
+      `Ubah gaya ${runIdxs.length} garis`,
+      prevRuns,
+      nextRuns,
+      result.piping_ids,
+      result.piping_ids
+    );
+    setResult({ ...result, runs: nextRuns });
+    showToast(`Gaya garis diubah ke ${style === 'dashed' ? 'putus-putus' : 'solid'}. Simpan perubahan untuk menyimpan.`, 2500);
+  };
+
   const handleMarkRun = useCallback(async (runIdx: number) => {
     if (!result || !projectId || !activeSheet) return;
     const run = result.runs[runIdx];
     if (!run || run.marked !== false) return;
-    const nextRuns = result.runs.map((item, idx) => idx === runIdx ? { ...item, marked: true } : item);
+    const nextRuns = result.runs.map((item, idx) => idx === runIdx
+      ? { ...item, marked: true, color: item.color || '#2563EB' }
+      : item);
     const updatedResult = { ...result, runs: nextRuns };
+    // Show the confirmed marking immediately; persistence continues in the background.
+    setResult(updatedResult);
     try {
       const savedResult = await patchResult(projectId, activeSheet.id, updatedResult);
-      pushHistory('Tandai pipa', result.runs, savedResult.runs, result.piping_ids, savedResult.piping_ids || result.piping_ids);
+      pushHistory('Tandai pipa', result.runs, savedResult.runs, result.piping_ids, savedResult.piping_ids || result.piping_ids, true);
       setResult(savedResult);
       showToast('Garis ditandai. Klik lagi untuk mengedit nama dan warna.', 3000);
     } catch (error) {
+      setResult((current) => current ? {
+        ...current,
+        runs: current.runs.map((item, idx) => idx === runIdx ? { ...item, marked: false } : item),
+      } : current);
       showToast(error instanceof Error ? `Gagal menyimpan penandaan: ${error.message}` : 'Gagal menyimpan penandaan.', 3500);
     }
   }, [result, projectId, activeSheet, pushHistory, setResult, showToast]);
@@ -975,6 +985,7 @@ export default function ProjectWorkspace() {
   // `activeSheet.status === 'detecting'` here made the bar impossible to dismiss when a
   // job ended without committing its result.
   const showDetectionProgress = detecting;
+  const hasMarkedRuns = Boolean(result?.runs?.some((run) => run.marked === true));
   useEffect(() => {
     if (!viewerRef.current || !activeSheet || !projectId) return;
     const viewer = viewerRef.current;
@@ -1013,7 +1024,11 @@ export default function ProjectWorkspace() {
     // explicitly marked those pipes, so their chosen color must be what is displayed.
     for (const g of result?.manual_groups || []) {
       (result?.runs || []).forEach((r, i) => {
-        if (r.group_id === g.id) map.set(i, g.color);
+        const kind = g.kind || 'circuit';
+        const belongs = kind === 'system'
+          ? (r.system_group_id === g.id || (!r.system_group_id && r.group_id === g.id))
+          : (r.circuit_group_id === g.id || (!r.circuit_group_id && r.group_id === g.id));
+        if (belongs && r.marked !== false && kind === mode) map.set(i, g.color);
       });
     }
 
@@ -1329,7 +1344,7 @@ export default function ProjectWorkspace() {
     [projectId, activeSheet, showToast]
   );
 
-  const handleAddGroup = useCallback(async () => {
+  const handleAddGroup = useCallback(async (kind: 'system' | 'circuit') => {
     if (!result || !activeSheet) return;
     const name = newGroupName.trim();
     if (!name) {
@@ -1340,34 +1355,42 @@ export default function ProjectWorkspace() {
       id: `grp-${Date.now().toString(36)}`,
       name,
       color: newGroupColor,
+      kind,
     };
     await persistGroups({
       ...result,
       manual_groups: [...(result.manual_groups || []), group],
     });
     setNewGroupName('');
-    showToast(`Grup "${name}" dibuat`, 2500);
+    showToast(`${kind === 'system' ? 'Corrosion System' : 'Corrosion Circuit'} "${name}" dibuat`, 2500);
   }, [result, activeSheet, newGroupName, newGroupColor, persistGroups, showToast]);
 
   const handleAssignToGroup = useCallback(
     async (group: ManualGroup) => {
       if (!result || !activeSheet) return;
-      if (selectedRunIndices.size === 0) {
+      const selectedMarked = new Set(
+        [...selectedRunIndices].filter((idx) => result.runs[idx]?.marked === true)
+      );
+      if (selectedMarked.size === 0) {
         showToast('Pilih pipa di kanvas dulu (Pan & Select / Multi-Select)', 2500);
         return;
       }
-      const nextRuns = result.runs.map((r, i) =>
-        selectedRunIndices.has(i) ? { ...r, group_id: group.id, color: group.color } : r
-      );
+      const kind = group.kind || 'circuit';
+      const nextRuns = result.runs.map((r, i) => {
+        if (!selectedMarked.has(i)) return r;
+        return kind === 'system'
+          ? { ...r, system_group_id: group.id, color: group.color }
+          : { ...r, circuit_group_id: group.id, group_id: group.id, color: group.color };
+      });
       pushHistory(
-        `Assign pipa ke grup ${group.name}`,
+        `Assign pipa ke ${kind === 'system' ? 'system' : 'circuit'} ${group.name}`,
         result.runs,
         nextRuns,
         result.piping_ids,
         result.piping_ids
       );
       await persistGroups({ ...result, runs: nextRuns });
-      showToast(`${selectedRunIndices.size} pipa di-assign ke ${group.name}`, 2500);
+      showToast(`${selectedMarked.size} pipa ditandai ke ${group.name}`, 2500);
     },
     [result, activeSheet, selectedRunIndices, persistGroups, pushHistory, showToast]
   );
@@ -1378,9 +1401,14 @@ export default function ProjectWorkspace() {
       if (!window.confirm(`Hapus grup "${group.name}"? Pipa anggotanya tetap ada.`)) return;
       const nextGroups = (result.manual_groups || []).filter((g) => g.id !== group.id);
       // JSON.stringify drops `undefined` keys, so the run simply loses its group_id.
-      const nextRuns = result.runs.map((r) =>
-        r.group_id === group.id ? { ...r, group_id: undefined } : r
-      );
+      const kind = group.kind || 'circuit';
+      const nextRuns = result.runs.map((r) => {
+        if (kind === 'system' && r.system_group_id === group.id) return { ...r, system_group_id: undefined };
+        if (kind === 'circuit' && (r.circuit_group_id === group.id || r.group_id === group.id)) {
+          return { ...r, circuit_group_id: undefined, group_id: undefined };
+        }
+        return r;
+      });
       await persistGroups({ ...result, runs: nextRuns, manual_groups: nextGroups });
       showToast(`Grup "${group.name}" dihapus`, 2500);
     },
@@ -1406,8 +1434,8 @@ export default function ProjectWorkspace() {
     }
   };
 
-  // Trigger Detection Pipeline (fast "lines_only" mode or "full" mode)
-  const handleRunDetection = async (detectionMode: 'full' | 'lines_only' = 'full') => {
+  // Fast Trace is the only tracing action in the editor. AI runs afterward on demand.
+  const handleRunDetection = async () => {
     if (!projectId || !activeSheet) return;
     try {
       // Ensure any previous job's resources are torn down first.
@@ -1415,13 +1443,9 @@ export default function ProjectWorkspace() {
 
       setDetecting(true);
       setProgressPct(0);
-      setProgressMsg(
-        detectionMode === 'lines_only'
-          ? 'Tracing jalur pipa (Fast Line Only)...'
-          : 'Initializing P&ID pipeline...'
-      );
+      setProgressMsg('Tracing jalur pipa (Fast Line Only)...');
 
-      const job = await triggerDetection(projectId, activeSheet.id, undefined, undefined, detectionMode);
+      const job = await triggerDetection(projectId, activeSheet.id, undefined, undefined, 'lines_only');
       attachToJob(job.job_id, activeSheet.id, 'detection');
     } catch (err: any) {
       stopDetectionResources();
@@ -1439,7 +1463,7 @@ export default function ProjectWorkspace() {
 
       setDetecting(true);
       setProgressPct(0);
-      setProgressMsg('Memulai pindai AI OCR & Simbol (Enrich)...');
+      setProgressMsg('Memulai Sync with AI / Auto-Fill...');
 
       const job = await triggerEnrichment(projectId, activeSheet.id);
       attachToJob(job.job_id, activeSheet.id, 'enrichment');
@@ -1447,7 +1471,7 @@ export default function ProjectWorkspace() {
       stopDetectionResources();
       setDetecting(false);
       resumedJobRef.current = null;
-      alert('Failed to trigger enrichment: ' + (err.message || err));
+      alert('Gagal menjalankan Sync with AI / Auto-Fill: ' + (err.message || err));
     }
   };
 
@@ -1547,8 +1571,8 @@ export default function ProjectWorkspace() {
   return (
     <div className="h-full flex flex-col bg-slate-100 text-slate-900 overflow-hidden select-none">
       {/* Top Navigation Bar */}
-      <header className="bg-white border-b border-slate-200 px-3 lg:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2 gap-y-2 shadow-sm z-20">
-        <div className="flex items-center space-x-2 lg:space-x-4 min-w-0">
+      <header className="bg-white border-b border-slate-200 px-3 lg:px-6 py-2.5 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 shadow-sm z-20">
+        <div className="order-1 flex items-center space-x-2 lg:space-x-4 min-w-0">
           <Link
             href={`/project/${projectId}`}
             className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-indigo-700 transition"
@@ -1601,7 +1625,7 @@ export default function ProjectWorkspace() {
         </div>
 
         {/* View Mode Switcher */}
-        <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 overflow-x-auto max-w-full order-3 lg:order-none">
+        <div className="order-3 xl:order-2 justify-self-start xl:justify-self-center flex bg-slate-100 p-1 rounded-xl border border-slate-200 overflow-x-auto max-w-full">
           <button
             onClick={() => setMode('digitize')}
             className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
@@ -1654,26 +1678,27 @@ export default function ProjectWorkspace() {
           </button>
         </div>
 
-        {/* Enrich Button (On-Demand AI) right next to Digitize / System mode switcher */}
+        <div className="order-2 xl:order-3 justify-self-start xl:justify-self-end flex flex-wrap items-center gap-2 min-w-0">
+        {/* AI only synchronizes lines that the engineer has marked. */}
         {activeSheet && (
           <button
             onClick={handleRunEnrichment}
-            disabled={showDetectionProgress}
+            disabled={showDetectionProgress || !hasMarkedRuns}
             className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition border ${
-              showDetectionProgress
+              showDetectionProgress || !hasMarkedRuns
                 ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
                 : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white shadow-sm hover:shadow'
             }`}
-            title="Pindai OCR line number dan simbol YOLO pada sheet yang sudah di-trace"
+            title="Isi nama pipa yang sudah di-marking dengan bantuan OCR dan YOLO"
           >
             <Sparkles className="w-3.5 h-3.5 fill-current text-amber-300" />
-            <span className="hidden sm:inline"> Pindai Simbol & Teks (Enrich)</span>
-            <span className="sm:hidden"> Enrich</span>
+            <span className="hidden sm:inline">Sync with AI / Auto-Fill</span>
+            <span className="sm:hidden">Sync AI</span>
           </button>
         )}
 
         {/* Action Controls */}
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Import Line List Button */}
           <button
             onClick={() => setShowLineListModal(true)}
@@ -1685,62 +1710,19 @@ export default function ProjectWorkspace() {
           </button>
 
           {activeSheet && (
-            <div className="relative inline-block text-left" ref={detectDropdownRef}>
-              <button
-                onClick={() => setDetectDropdownOpen(!detectDropdownOpen)}
-                disabled={showDetectionProgress}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition ${
-                  showDetectionProgress
-                    ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                }`}
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span className="hidden xl:inline">{showDetectionProgress ? 'Detecting...' : 'Detect P&ID'}</span>
-                <ChevronDown className="w-3.5 h-3.5 opacity-80" />
-              </button>
-
-              {detectDropdownOpen && !showDetectionProgress && (
-                <div className="absolute right-0 mt-1.5 w-64 rounded-xl bg-white shadow-xl border border-slate-200 z-50 py-1.5 text-xs animate-in fade-in slide-in-from-top-1 duration-150">
-                  <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                    Pilih Mode Deteksi
-                  </div>
-                  <button
-                    onClick={() => {
-                      setDetectDropdownOpen(false);
-                      handleRunDetection('lines_only');
-                    }}
-                    className="w-full text-left px-3 py-2 hover:bg-amber-50/80 text-slate-800 flex items-start space-x-2.5 transition"
-                  >
-                    <Zap className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                    <div>
-                      <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                        <span> Trace Lines Only</span>
-                        <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-1.5 py-0.5 rounded">Cepat &lt;5s</span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">Ekstrak garis pipa saja. Lewati OCR & YOLO.</div>
-                    </div>
-                  </button>
-                  <div className="h-px bg-slate-100 my-1" />
-                  <button
-                    onClick={() => {
-                      setDetectDropdownOpen(false);
-                      handleRunDetection('full');
-                    }}
-                    className="w-full text-left px-3 py-2 hover:bg-indigo-50/80 text-slate-800 flex items-start space-x-2.5 transition"
-                  >
-                    <Bot className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
-                    <div>
-                      <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                        <span> Trace Full</span>
-                        <span className="bg-indigo-100 text-indigo-800 text-[10px] font-bold px-1.5 py-0.5 rounded">AI & OCR</span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">Lengkap: Tracing pipa + OCR 3-angle + Simbol YOLO.</div>
-                    </div>
-                  </button>
-                </div>
-              )}
-            </div>
+            <button
+              onClick={handleRunDetection}
+              disabled={showDetectionProgress}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition ${
+                showDetectionProgress
+                  ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+              }`}
+              title="Jalankan Fast Trace tanpa OCR dan YOLO"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span>{showDetectionProgress ? 'Tracing...' : 'Fast Trace'}</span>
+            </button>
           )}
 
           {/* Circuit Overlay Toggle Button in Header Bar */}
@@ -1770,6 +1752,7 @@ export default function ProjectWorkspace() {
               <span className="hidden xl:inline">Export</span>
             </button>
           )}
+        </div>
         </div>
       </header>
 
@@ -1847,6 +1830,7 @@ export default function ProjectWorkspace() {
               onSelectRunIndices={setSelectedRunIndices}
               onMarkRun={handleMarkRun}
               onRecolorRuns={handleRecolorRuns}
+              onUpdateRunLineStyle={handleUpdateRunLineStyle}
               onSplitRun={handleSplitRun}
               onDeleteRuns={handleDeleteRuns}
               onUpdateRunLabel={handleUpdateRunLabel}
@@ -2759,13 +2743,11 @@ export default function ProjectWorkspace() {
               </div>
             ) : mode === 'circuit' ? (
               <div className="p-4 space-y-3 overflow-y-auto h-full">
-                {/* Manual Groups (HITL) — engineer-defined marking groups. Sits above the
-                    auto-derived circuits because it is the primary HITL workflow now:
-                    select pipes in the canvas, then assign them to a named group. */}
+                {/* Engineer-defined system and circuit groups. */}
                 <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800">
-                      Manual Groups (HITL)
+                      Corrosion Groups
                     </span>
                     <span className="text-[11px] font-semibold text-amber-700">
                       {(result?.manual_groups || []).length} grup
@@ -2773,8 +2755,12 @@ export default function ProjectWorkspace() {
                   </div>
 
                   {(result?.manual_groups || []).map((g) => {
-                    const n = (result?.runs || []).filter((r) => r.group_id === g.id).length;
-                    const canAssign = selectedRunIndices.size > 0;
+                    const kind = g.kind || 'circuit';
+                    const n = (result?.runs || []).filter((r) => r.marked === true && (kind === 'system'
+                      ? (r.system_group_id === g.id || (!r.system_group_id && r.group_id === g.id))
+                      : (r.circuit_group_id === g.id || (!r.circuit_group_id && r.group_id === g.id)))).length;
+                    const selectedMarkedCount = [...selectedRunIndices].filter((idx) => result?.runs?.[idx]?.marked === true).length;
+                    const canAssign = selectedMarkedCount > 0;
                     return (
                       <div key={g.id} className="bg-white border border-slate-200 rounded-lg p-2 space-y-1.5">
                         <div className="flex items-center justify-between gap-2">
@@ -2785,6 +2771,9 @@ export default function ProjectWorkspace() {
                             />
                             <span className="font-bold text-slate-900 text-sm truncate">{g.name}</span>
                           </div>
+                          <span className="text-[10px] uppercase font-semibold text-slate-400 shrink-0">
+                            {kind === 'system' ? 'System' : 'Circuit'}
+                          </span>
                           <button
                             onClick={() => handleDeleteGroup(g)}
                             className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition shrink-0"
@@ -2804,7 +2793,7 @@ export default function ProjectWorkspace() {
                                 : 'bg-slate-100 text-slate-400 cursor-not-allowed'
                             }`}
                           >
-                            Assign ({selectedRunIndices.size}) ke {g.name}
+                            Assign to Group {g.name} ({selectedMarkedCount})
                           </button>
                         </div>
                       </div>
@@ -2815,7 +2804,7 @@ export default function ProjectWorkspace() {
                     <input
                       value={newGroupName}
                       onChange={(e) => setNewGroupName(e.target.value)}
-                      placeholder="Nama grup, mis. CC #07-06-12"
+                      placeholder="Nama system/circuit, mis. CC-01"
                       className="flex-1 min-w-0 px-2 py-1 border border-slate-300 rounded text-xs text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
                     />
                     <input
@@ -2825,11 +2814,19 @@ export default function ProjectWorkspace() {
                       className="w-8 h-7 rounded border border-slate-300 cursor-pointer shrink-0"
                       title="Warna grup"
                     />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
                     <button
-                      onClick={handleAddGroup}
-                      className="px-2 py-1 rounded text-[11px] font-semibold bg-amber-600 hover:bg-amber-700 text-white transition shrink-0"
+                      onClick={() => handleAddGroup('system')}
+                      className="px-2 py-1.5 rounded text-[11px] font-semibold bg-amber-600 hover:bg-amber-700 text-white transition"
                     >
-                      Add New Group
+                      Create New System
+                    </button>
+                    <button
+                      onClick={() => handleAddGroup('circuit')}
+                      className="px-2 py-1.5 rounded text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-700 text-white transition"
+                    >
+                      Create New Circuit
                     </button>
                   </div>
                 </div>

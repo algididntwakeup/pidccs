@@ -16,6 +16,8 @@ import {
   GripVertical,
   BoxSelect,
   Wand2,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { PipeRun, PipingID } from '@/types/schema';
 import { useCanvasOverlay, applyMouseNav } from '@/hooks/useCanvasOverlay';
@@ -75,6 +77,7 @@ interface InteractivePipeCanvasProps {
   onSelectRunIndices: (indices: Set<number>) => void;
   onMarkRun: (runIdx: number) => Promise<void>;
   onRecolorRuns: (runIdxs: number[], newColor: string) => void;
+  onUpdateRunLineStyle: (runIdxs: number[], style: 'solid' | 'dashed') => void;
   onSplitRun: (runIdx: number, x: number, y: number) => Promise<void>;
   onDeleteRuns?: (runIdxs: number[]) => Promise<void>;
   onUpdateRunLabel?: (runIdx: number, label: string) => Promise<void>;
@@ -106,6 +109,7 @@ export default function InteractivePipeCanvas({
   onSelectRunIndices,
   onMarkRun,
   onRecolorRuns,
+  onUpdateRunLineStyle,
   onSplitRun,
   onDeleteRuns,
   onUpdateRunLabel,
@@ -120,6 +124,7 @@ export default function InteractivePipeCanvas({
   hiddenRunIndices,
   dimUncolored,
 }: InteractivePipeCanvasProps) {
+  const [showDetectedLines, setShowDetectedLines] = useState(true);
   const [hoveredRunIdx, setHoveredRunIdx] = useState<number | null>(null);
   const [splitPreview, setSplitPreview] = useState<{ x: number; y: number } | null>(null);
   const [customColor, setCustomColor] = useState('#2563EB');
@@ -456,6 +461,11 @@ export default function InteractivePipeCanvas({
   const handleApplyColor = (colorHex: string) => {
     if (selectedRunIndices.size === 0) return;
     onRecolorRuns(Array.from(selectedRunIndices), colorHex);
+  };
+
+  const handleApplyLineStyle = (style: 'solid' | 'dashed') => {
+    if (selectedRunIndices.size === 0) return;
+    onUpdateRunLineStyle(Array.from(selectedRunIndices), style);
   };
 
   // Delete selected runs
@@ -899,6 +909,7 @@ export default function InteractivePipeCanvas({
   // Render an individual pipe run (polyline + hit area + halo)
   const renderPipeRun = (run: PipeRun, idx: number, isSelected: boolean) => {
     if (hiddenRunIndices?.has(idx)) return null;
+    if (run.marked === false && !showDetectedLines) return null;
     if (!run.points || run.points.length < 2) return null;
     const isHovered = hoveredRunIdx === idx;
     const isEquipOutline = Boolean(run.equipment_outline);
@@ -973,13 +984,13 @@ export default function InteractivePipeCanvas({
         <polyline
           points={ptsStr}
           fill="none"
-          stroke={isSelected ? '#F59E0B' : run.marked === false ? (isHovered ? '#94A3B8' : 'transparent') : strokeColor}
+          stroke={isSelected ? '#F59E0B' : run.marked === false ? '#94A3B8' : strokeColor}
           strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : isEquipOutline ? 2.5 : 3.5}
           strokeLinecap="round"
           strokeLinejoin="round"
-          strokeDasharray={isSelected ? '10 5' : run.marked === false ? '5 6' : isEquipOutline ? '7 4' : undefined}
+          strokeDasharray={isSelected ? '10 5' : run.marked === false ? '5 6' : run.line_style === 'dashed' ? '8 6' : isEquipOutline ? '7 4' : undefined}
           filter={isHovered && !isSelected && run.marked !== false ? 'url(#hover-glow)' : undefined}
-          opacity={isDimmed ? 0.18 : isEquipOutline ? 0.95 : 1}
+          opacity={isDimmed ? 0.18 : run.marked === false ? (isHovered ? 0.82 : 0.18) : isEquipOutline ? 0.95 : 1}
           style={{
             pointerEvents: 'none',
             transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',
@@ -1055,19 +1066,21 @@ export default function InteractivePipeCanvas({
 
             {/* 1. Unselected Pipe Runs (background layer) */}
             {runs.map((run, idx) => {
+              if (run.marked === false && !showDetectedLines) return null;
               if (selectedRunIndices.has(idx)) return null;
               return renderPipeRun(run, idx, false);
             })}
 
             {/* 2. Selected Pipe Runs (elevated above unselected runs so halo and stroke take priority) */}
             {runs.map((run, idx) => {
+              if (run.marked === false && !showDetectedLines) return null;
               if (!selectedRunIndices.has(idx)) return null;
               return renderPipeRun(run, idx, true);
             })}
 
             {/* 3. Draggable Vertex Control Points for Selected Lines (ALWAYS on top of all pipe runs) */}
             {runs.map((run, idx) => {
-              if (hiddenRunIndices?.has(idx) || !selectedRunIndices.has(idx) || !run.points || run.points.length < 2) return null;
+              if (hiddenRunIndices?.has(idx) || (run.marked === false && !showDetectedLines) || !selectedRunIndices.has(idx) || !run.points || run.points.length < 2) return null;
               const basePoints =
                 draggingVertex?.runIdx === idx && liveDragPoints ? liveDragPoints : run.points;
               const nudge = nudgeOffsets.get(idx);
@@ -1244,7 +1257,7 @@ export default function InteractivePipeCanvas({
                   strokeWidth="3"
                   paintOrder="stroke"
                 >
-                  ✂ Potong ({splitPreview.x}, {splitPreview.y})
+                  Potong ({splitPreview.x}, {splitPreview.y})
                 </text>
               </g>
             )}
@@ -1336,6 +1349,34 @@ export default function InteractivePipeCanvas({
                   className="opacity-0 absolute inset-0 cursor-pointer"
                 />
               </label>
+            </div>
+          </div>
+
+          {/* Line style: solid or dashed */}
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+              Gaya Garis
+            </span>
+            <div className="flex items-center gap-1.5">
+              {([{ style: 'solid', label: 'Solid' }, { style: 'dashed', label: 'Putus-putus' }] as const).map((item) => {
+                const active = singleSelectedIdx !== null && (
+                  singleSelectedRun?.line_style === item.style ||
+                  (item.style === 'solid' && !singleSelectedRun?.line_style)
+                );
+                return (
+                  <button
+                    key={item.style}
+                    onClick={() => handleApplyLineStyle(item.style)}
+                    className={`px-2.5 py-1 rounded-md border text-[11px] font-medium transition ${active ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+                    title={`Ubah gaya garis menjadi ${item.label.toLowerCase()}`}
+                  >
+                    <svg aria-hidden="true" width="30" height="8" viewBox="0 0 30 8" className="inline-block mr-1.5 align-middle">
+                      <line x1="1" y1="4" x2="29" y2="4" stroke="currentColor" strokeWidth="2" strokeDasharray={item.style === 'dashed' ? '4 3' : undefined} />
+                    </svg>
+                    {item.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -1476,6 +1517,18 @@ export default function InteractivePipeCanvas({
           page-controls bar (Pipa ON/OFF + opacity) at every viewport width, so no
           overlap logic / band-splitting is needed anymore. */}
       <div className="absolute right-3 top-1/2 -translate-y-1/2 z-50 flex flex-col items-stretch gap-1 rounded-2xl bg-white/95 backdrop-blur-md p-1.5 shadow-2xl border border-slate-200">
+        <button
+          onClick={() => setShowDetectedLines((shown) => !shown)}
+          aria-pressed={showDetectedLines}
+          className={`px-2.5 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition ${
+            showDetectedLines ? 'bg-slate-100 text-slate-800' : 'hover:bg-slate-100 text-slate-500'
+          }`}
+          title={showDetectedLines ? 'Sembunyikan garis hasil auto-trace yang belum ditandai' : 'Tampilkan garis hasil auto-trace yang belum ditandai'}
+        >
+          {showDetectedLines ? <Eye className="w-4 h-4 shrink-0" /> : <EyeOff className="w-4 h-4 shrink-0" />}
+          <span className="hidden xl:inline">Show Detected Lines</span>
+        </button>
+
         <button
           onClick={() => {
             onSetTraceTool('pan');

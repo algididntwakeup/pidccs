@@ -36,9 +36,9 @@ export function useHistory(
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
   const pushHistory = useCallback(
-    (desc: string, prevRuns: PipeRun[], nextRuns: PipeRun[], prevPids: PipingID[], nextPids: PipingID[]) => {
+    (desc: string, prevRuns: PipeRun[], nextRuns: PipeRun[], prevPids: PipingID[], nextPids: PipingID[], alreadyPersisted = false) => {
       dispatch({ type: 'push', entry: { desc, prevRuns, nextRuns, prevPids, nextPids } });
-      setHasUnsavedChanges(true);
+      if (!alreadyPersisted) setHasUnsavedChanges(true);
     },
     [],
   );

@@ -187,6 +187,7 @@ def test_orchestrator_run_enrichment_preserves_runs():
     existing_runs = [
         {
             "id": "run-0",
+            "marked": True,
             "points": [[100, 200], [500, 200]],
             "axis": "h",
             "x1": 100,
@@ -200,6 +201,7 @@ def test_orchestrator_run_enrichment_preserves_runs():
         },
         {
             "id": "manual-run-12345",
+            "marked": True,
             "points": [[500, 200], [500, 800]],
             "axis": "v",
             "x1": 500,
@@ -246,6 +248,116 @@ def test_orchestrator_run_enrichment_preserves_runs():
     assert enrichment["piping_ids"][0]["pid"] == "605-4\"-HC-001"
 
 
+def test_orchestrator_enrichment_associates_only_marked_runs(monkeypatch):
+    from pidcorr import orchestrator as orchestrator_module
+
+    mock_detector = MagicMock()
+    mock_detector.detect.return_value = []
+    mock_extractor = MagicMock()
+    mock_extractor.extract.return_value = ([{"pid": "LINE-01", "x1": 10, "y1": 10, "x2": 80, "y2": 20}], [])
+    captured = {}
+
+    def capture_association(pids, runs, img_bgr, dpi=350):
+        captured["run_ids"] = [run.get("id") if isinstance(run, dict) else run.id for run in runs]
+        return []
+
+    monkeypatch.setattr(orchestrator_module, "associate", capture_association)
+    orchestrator = PipelineOrchestrator(
+        detector=mock_detector,
+        extractor=mock_extractor,
+        tracer=MagicMock(),
+        classifier=MagicMock(),
+        layout_weights="",
+    )
+    existing_runs = [
+        {"id": "unmarked", "marked": False, "points": [[10, 15], [80, 15]], "label": ""},
+        {"id": "marked", "marked": True, "points": [[10, 15], [80, 15]], "label": ""},
+    ]
+
+    result = orchestrator.run_enrichment(
+        img_bgr=np.zeros((100, 100, 3), dtype=np.uint8),
+        existing_runs=existing_runs,
+    )
+
+    assert captured["run_ids"] == ["marked"]
+    assert [run["id"] for run in result["runs"]] == ["unmarked", "marked"]
+
+
+def test_enrichment_merge_preserves_unmarked_and_latest_manual_edits():
+    from app.services.detection_service import merge_enrichment_into_result
+
+    current = {
+        "runs": [
+            {"id": "marked", "marked": True, "points": [[1, 1], [11, 1]], "label": "", "color": "#F00", "system_group_id": "sys-1"},
+            {"id": "unmarked", "marked": False, "points": [[2, 2], [12, 2]], "label": "", "color": "#0F0"},
+            {"id": "manual", "marked": True, "points": [[3, 3], [13, 3]], "label": "USER-NAME", "color": "#00F", "manual": True},
+        ],
+        "piping_ids": [{"pid": "OLD-UNMARKED", "run_idx": 1, "manual": False}],
+        "manual_groups": [{"id": "sys-1", "kind": "system", "name": "CC-01", "color": "#F00"}],
+    }
+    enriched = {
+        "runs": [
+            {"id": "marked", "points": [[99, 99], [110, 99]], "label": "AI-LINE-01", "color": "#000"},
+            {"id": "unmarked", "points": [], "label": "AI-UNMARKED"},
+            {"id": "manual", "points": [], "label": "AI-OVERWRITE"},
+        ],
+        "piping_ids": [
+            {"pid": "AI-LINE-01", "run_idx": 0},
+            {"pid": "AI-UNMARKED", "run_idx": 1},
+            {"pid": "AI-UNATTACHED", "run_idx": -1},
+        ],
+    }
+
+    merged = merge_enrichment_into_result(current, enriched)
+
+    assert merged["runs"][0]["label"] == "AI-LINE-01"
+    assert merged["runs"][0]["points"] == [[1, 1], [11, 1]]
+    assert merged["runs"][0]["color"] == "#F00"
+    assert merged["runs"][0]["system_group_id"] == "sys-1"
+    assert merged["runs"][1] == current["runs"][1]
+    assert merged["runs"][2]["label"] == "USER-NAME"
+    assert merged["piping_ids"] == [
+        {"pid": "OLD-UNMARKED", "run_idx": 1, "manual": False},
+        {"pid": "AI-LINE-01", "run_idx": 0},
+    ]
+    assert merged["manual_groups"] == current["manual_groups"]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_requires_at_least_one_marked_run():
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with TestSessionLocal() as session:
+        project = Project(
+            id="proj-no-mark-test",
+            name="No Mark Test",
+            tenant_id="default_tenant",
+            user_id="default_user",
+        )
+        session.add(project)
+        session.add(Sheet(
+            id="sheet-no-mark-test",
+            project_id=project.id,
+            filename="sheet.png",
+            file_path="test_sheet.png",
+            status="uploaded",
+            tenant_id="default_tenant",
+            user_id="default_user",
+            result_json={"runs": [{"id": "run-0", "marked": False, "points": [[0, 0], [10, 0]]}]},
+        ))
+        await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/projects/proj-no-mark-test/sheets/sheet-no-mark-test/enrich"
+        )
+    assert response.status_code == 400
+    assert "mark at least one" in response.json()["detail"].lower()
+
+
 @pytest.mark.asyncio
 async def test_api_detect_mode_and_enrich_endpoints():
     """Verify REST API /detect with mode and /enrich endpoints."""
@@ -275,6 +387,7 @@ async def test_api_detect_mode_and_enrich_endpoints():
                 "runs": [
                     {
                         "id": "run-0",
+                        "marked": True,
                         "points": [[50, 100], [400, 100]],
                         "axis": "h",
                         "x1": 50,

@@ -1,6 +1,8 @@
 import os
 import sys
 import numpy as np
+import cv2
+import pytest
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT not in sys.path:
@@ -39,6 +41,20 @@ def test_bridge_inline_valve_gaps():
     pts = bridged[0].points if hasattr(bridged[0], "points") else bridged[0]["points"]
     assert pts[0] == (50, 100)
     assert pts[-1] == (200, 100)
+
+
+@pytest.mark.parametrize("coarse", ["valve", "instrument"])
+def test_skeleton_tracer_leaves_detected_symbol_gap(coarse):
+    image = np.full((350, 350, 3), 255, dtype=np.uint8)
+    cv2.line(image, (20, 175), (330, 175), (0, 0, 0), 3)
+    symbol = {"coarse": coarse, "x1": 165, "y1": 160, "x2": 185, "y2": 190}
+
+    runs = SkeletonLineTracer(min_length_px=5).trace(
+        image, dpi=350, detections=[symbol], furniture=[]
+    )
+
+    assert len(runs) >= 2
+    assert all(not (min(p[0] for p in run.points) < 165 and max(p[0] for p in run.points) > 185) for run in runs)
 
 
 def test_low_ink_diagonal_keeps_connected_elbow_only():

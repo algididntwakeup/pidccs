@@ -2,9 +2,13 @@
 
 > Reference Architecture Document for the Re-Engineered P&ID Digitization & Corrosion Marking System
 
-> **Current path (September 2026):** The sheet workspace uses HITL Fast Trace (`lines_only`) as its primary action. Vector PDFs bypass OCR/YOLO and full-size raster loading; raster inputs fall back to the raster tracer. Full detection and AI enrichment remain explicit optional actions. The automated OCR/YOLO diagrams below describe those optional paths.
+> **Current path (September 2026):** The sheet workspace uses HITL Fast Trace (`lines_only`) as its primary and default trace action. Vector PDFs bypass OCR/YOLO and full-size raster loading; raster inputs fall back to the raster tracer. OCR/YOLO run later through the explicit Sync with AI / Auto-Fill action after at least one run is marked. The old full-trace UI choice is removed; the legacy full-detection API mode remains for compatibility.
 
 > **Opt-in marking:** Upload queues `lines_only` tracing in the background. Newly traced runs are stored with `marked: false`; the canvas keeps them hit-testable but transparent, shows a dashed gray hover hint, and persists the first click through `PATCH /result`. A subsequent click opens the run inspector. There is no `/trace-click` route; Magic Wand acts on the already traced geometry.
+
+> **Line styling and symbol gaps:** The first opt-in click immediately previews the default `#2563EB` stroke while persistence runs. The inspector supports solid and dashed runs through the ordinary result JSON and exports. Vector tracing leaves gaps at compact inline V-shaped valves; skeleton tracing masks valve/instrument boxes supplied by symbol detection and passes those boxes to gap-bridging guards. `lines_only` still bypasses OCR/YOLO, so raster Fast Trace has no detector boxes unless supplied by another explicit path.
+
+> **Manual corrosion groups and AI synchronization:** System and circuit groups created by the engineer are stored in `result_json.manual_groups`; their run membership, color, and kind are persisted alongside the line geometry. AI enrichment reads the saved result, detects page-wide OCR text and symbols, but associates OCR names only with `marked: true` runs. Unmarked geometry and its existing piping IDs remain unchanged. The canvas can hide/show unmarked detected lines without changing their stored data. Automatic AI systemization suggestions are not applied by this sync action.
 
 > **For future contributors and agents:** Read [`AGENTS.md`](../AGENTS.md) for the current product constraints and verification checklist before changing this pipeline. Treat diagrams below as architecture context; the active sheet page, detection service, and orchestrator are the source of truth for runtime behavior.
 

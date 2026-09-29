@@ -172,6 +172,65 @@ def execute_sheet_enrichment(
     )
     return enrichment_result
 
+
+def merge_enrichment_into_result(current_result: Optional[dict], enrichment_result: dict) -> dict:
+    """Merge AI suggestions into the latest saved result without replacing engineer edits.
+
+    The orchestrator returns the same run order it received. This merge is intentionally
+    conservative: only marked runs with an empty label can receive an AI name, and
+    unmatched OCR candidates are not promoted into piping IDs.
+    """
+    result = dict(current_result or {})
+    current_runs = list(result.get("runs", []))
+    enriched_runs = list(enrichment_result.get("runs", []))
+    enriched_by_id = {
+        run.get("id"): run for run in enriched_runs
+        if isinstance(run, dict) and run.get("id")
+    }
+    marked_indices = set()
+    merged_runs = []
+    for index, current in enumerate(current_runs):
+        if not isinstance(current, dict):
+            merged_runs.append(current)
+            continue
+        if current.get("marked") is not True:
+            merged_runs.append(current)
+            continue
+        marked_indices.add(index)
+        enriched = enriched_by_id.get(current.get("id"))
+        if enriched is None and index < len(enriched_runs):
+            enriched = enriched_runs[index]
+        merged = dict(current)
+        if isinstance(enriched, dict) and not current.get("label"):
+            suggested_name = enriched.get("label") or enriched.get("pid")
+            if suggested_name:
+                merged["label"] = suggested_name
+                merged["pid"] = suggested_name
+        if isinstance(enriched, dict) and not current.get("fluid") and enriched.get("fluid"):
+            merged["fluid"] = enriched["fluid"]
+        merged_runs.append(merged)
+    result["runs"] = merged_runs
+
+    current_pids = list(result.get("piping_ids", []))
+    known_pids = {str(p.get("pid", "")).strip().lower() for p in current_pids if isinstance(p, dict)}
+    for piping_id in enrichment_result.get("piping_ids", []):
+        if not isinstance(piping_id, dict):
+            continue
+        run_idx = piping_id.get("run_idx")
+        if not isinstance(run_idx, int) or run_idx not in marked_indices:
+            continue
+        pid = str(piping_id.get("pid", "")).strip()
+        if not pid or pid.lower() in known_pids:
+            continue
+        current_pids.append(piping_id)
+        known_pids.add(pid.lower())
+    result["piping_ids"] = current_pids
+
+    for key in ("symbols", "furniture", "conn_points", "opcs"):
+        if key in enrichment_result:
+            result[key] = enrichment_result[key]
+    return result
+
 # ---------------------------------------------------------------------------
 # Job dispatch helpers (see queue_sheet_detection below).
 # ---------------------------------------------------------------------------
@@ -355,16 +414,10 @@ async def run_enrichment_in_background(job_id: str, sheet_id: str, file_path: st
                 rot,
             )
 
-            res = dict(sheet.result_json or {})
-            res["symbols"] = enrichment_result.get("symbols", [])
-            res["piping_ids"] = enrichment_result.get("piping_ids", [])
-            res["runs"] = enrichment_result.get("runs", res.get("runs", []))
-            if "furniture" in enrichment_result:
-                res["furniture"] = enrichment_result["furniture"]
-            if "conn_points" in enrichment_result:
-                res["conn_points"] = enrichment_result["conn_points"]
-            if "opcs" in enrichment_result:
-                res["opcs"] = enrichment_result["opcs"]
+            # A user may continue editing while OCR/YOLO runs. Read the latest JSON
+            # before the conservative merge so geometry and labels do not go stale.
+            await session.refresh(sheet, attribute_names=["result_json"])
+            res = merge_enrichment_into_result(sheet.result_json, enrichment_result)
 
             circuits = GroupingService.compute_circuits(res)
             sheet.result_json = res

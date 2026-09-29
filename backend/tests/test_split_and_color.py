@@ -22,6 +22,8 @@ def test_split_poly_run_geometry():
         "axis": "h",
         "x1": 0, "y1": 0, "x2": 100, "y2": 0,
         "color": "#2563EB",
+        "line_style": "dashed",
+        "marked": True,
     }]
     # Split at (40, 3) -> projects to (40, 0)
     new_runs, _, run_a, run_b, new_idx = split_poly_run(
@@ -36,6 +38,8 @@ def test_split_poly_run_geometry():
     # Check run_a
     assert run_a["points"] == [[0, 0], [40, 0]]
     assert run_a["color"] == "#2563EB"
+    assert run_a["line_style"] == run_b["line_style"] == "dashed"
+    assert run_a["marked"] is True and run_b["marked"] is True
     # Check run_b
     assert run_b["points"] == [[40, 0], [100, 0]]
     assert run_b["color"] == "#2563EB"

@@ -64,7 +64,7 @@ export async function triggerDetection(
   sheetId: string,
   dpi?: number,
   rot?: number,
-  mode: 'full' | 'lines_only' = 'full'
+  mode: 'full' | 'lines_only' = 'lines_only'
 ): Promise<JobResponse> {
   const params = new URLSearchParams();
   if (dpi) params.append('dpi', dpi.toString());

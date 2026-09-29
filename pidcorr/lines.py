@@ -34,9 +34,14 @@ class PipeRun:
     fluid: str = ""
     underline: bool = False                   # True = garis-penunjuk ber-label (BUKAN pipa)
     color: str = "#2563EB"                    # Default neutral blue (Phase B.5)
+    line_style: str = "solid"                  # Display/export line style
     id: str = ""                              # Unique run identifier (e.g. run-0)
     label: str = ""                           # Custom tag or line label
     manual: bool = False                      # True if manually created/edited by engineer
+    marked: bool = False                      # True after engineer opts into marking
+    group_id: str = ""                         # Legacy circuit group membership
+    system_group_id: str = ""                  # Manual corrosion system membership
+    circuit_group_id: str = ""                 # Manual corrosion circuit membership
     equipment_outline: bool = False           # True if run is equipment outline (default False)
 
     # kompat lama: x1,y1,x2,y2 = ujung-ujung polyline
@@ -64,6 +69,11 @@ class PipeRun:
         if key == "fluid": return self.fluid
         if key == "underline": return self.underline
         if key == "color": return getattr(self, "color", "#2563EB")
+        if key == "line_style": return getattr(self, "line_style", "solid")
+        if key == "marked": return getattr(self, "marked", False)
+        if key == "group_id": return getattr(self, "group_id", "")
+        if key == "system_group_id": return getattr(self, "system_group_id", "")
+        if key == "circuit_group_id": return getattr(self, "circuit_group_id", "")
         if key == "id": return getattr(self, "id", "")
         if key == "label": return getattr(self, "label", getattr(self, "pid", ""))
         if key == "manual": return getattr(self, "manual", False)
@@ -578,9 +588,14 @@ def split_poly_run(
                 fluid=getattr(base_run, "fluid", ""),
                 underline=getattr(base_run, "underline", False),
                 color=color,
+                line_style=getattr(base_run, "line_style", "solid"),
                 id=run_id,
                 label=base_label or "",
                 manual=True,
+                marked=getattr(base_run, "marked", False),
+                group_id=getattr(base_run, "group_id", ""),
+                system_group_id=getattr(base_run, "system_group_id", ""),
+                circuit_group_id=getattr(base_run, "circuit_group_id", ""),
             )
         else:
             r = dict(base_run)
@@ -1202,7 +1217,7 @@ def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
     return out
 
 
-def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
+def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4, block_boxes=None):
     """Sambungkan segmen pipa kolinear yang terpotong celah kecil (gap di sekitar label/nozzle/header).
     Menjaga kontinuitas pipa panjang seperti HP/LP Production Headers."""
     if not segs or len(segs) < 2:
@@ -1233,6 +1248,16 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
 
     out = list(others)
 
+    block_boxes = block_boxes or []
+
+    def gap_is_blocked(orientation, cross, gap_start, gap_end):
+        for x1, y1, x2, y2 in block_boxes:
+            if orientation == "h" and y1 <= cross <= y2 and gap_start < x2 and gap_end > x1:
+                return True
+            if orientation == "v" and x1 <= cross <= x2 and gap_start < y2 and gap_end > y1:
+                return True
+        return False
+
     # Process horizontal groups
     for key, items in horiz_groups.items():
         items.sort(key=lambda it: it[0])
@@ -1241,7 +1266,7 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
         label = getattr(base_s, "label", "")
 
         for next_min, next_max, next_y, s in items[1:]:
-            if next_min - curr_max <= max_gap_px:
+            if next_min - curr_max <= max_gap_px and not gap_is_blocked("h", curr_y, curr_max, next_min):
                 curr_max = max(curr_max, next_max)
                 curr_y = int(round((curr_y + next_y) / 2.0))
             else:
@@ -1259,7 +1284,7 @@ def bridge_collinear_headers(segs, max_gap_px=45, tol_px=4):
         label = getattr(base_s, "label", "")
 
         for next_min, next_max, next_x, s in items[1:]:
-            if next_min - curr_max <= max_gap_px:
+            if next_min - curr_max <= max_gap_px and not gap_is_blocked("v", curr_x, curr_max, next_min):
                 curr_max = max(curr_max, next_max)
                 curr_x = int(round((curr_x + next_x) / 2.0))
             else:
@@ -1371,7 +1396,7 @@ def suppress_low_ink_diagonals(segs, img_bgr=None, min_ink_frac=0.5, min_len_px=
 
 
 def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
-                           max_turn_deg=75.0):
+                           max_turn_deg=75.0, block_boxes=None):
     """Sambung potongan SIKU 45° kembali ke polyline pipa (rekonstruksi bengkokan).
 
     Saat pipa menikung, skeletonisasi memecahnya menjadi tiga run: horizontal,
@@ -1396,6 +1421,7 @@ def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
     """
     if not runs or len(runs) < 2:
         return runs
+    block_boxes = block_boxes or []
 
     def _pts(r):
         return [tuple(p) for p in (r.points if hasattr(r, "points") else r.get("points", []))]
@@ -1491,6 +1517,10 @@ def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
                     for bi, bp in ((0, pb[0]), (-1, pb[-1])):
                         if _dist(ap, bp) > max_gap_px:
                             continue
+                        if any(min(ap[0], bp[0]) <= x2 and max(ap[0], bp[0]) >= x1
+                               and min(ap[1], bp[1]) <= y2 and max(ap[1], bp[1]) >= y1
+                               for x1, y1, x2, y2 in block_boxes):
+                            continue
                         # arah datang (menuju titik sambung pada a) dan arah
                         # lanjut (meninggalkan titik sambung pada b)
                         if ai == -1:
@@ -1535,9 +1565,9 @@ def bridge_polyline_elbows(runs, max_gap_px=60.0, max_len_px=140.0,
     return out
 
 
-def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
+def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6, block_boxes=None):
     """Sambungkan pipa lurus yang terpotong oleh katup inline (valve) atau celah kecil.
-    Menghubungkan dua PipeRun terpisah melewati gap katup menjadi satu polyline bersambung."""
+    `block_boxes` mengecualikan gap valve/instrument tertentu yang harus tetap terbuka."""
     if not runs or len(runs) < 2:
         return runs
 
@@ -1546,6 +1576,7 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
         return runs
 
     valve_boxes = [(float(v["x1"]), float(v["y1"]), float(v["x2"]), float(v["y2"])) for v in valves]
+    block_boxes = block_boxes or []
 
     def near_any_valve(pt):
         px, py = pt
@@ -1601,6 +1632,13 @@ def bridge_inline_valve_gaps(runs, detections=None, max_gap_px=75, tol_px=6):
                     dist = math.hypot(dx, dy)
 
                     if not (0 < dist <= max_gap_px):
+                        continue
+
+                    # A caller can explicitly preserve gaps across valve or
+                    # instrument bodies even when their endpoints are collinear.
+                    if any(min(pA[0], pB[0]) <= bx2 and max(pA[0], pB[0]) >= bx1
+                           and min(pA[1], pB[1]) <= by2 and max(pA[1], pB[1]) >= by1
+                           for bx1, by1, bx2, by2 in block_boxes):
                         continue
 
                     # Tangent check: both incoming segment (prevA -> pA) and outgoing (pB -> nextB) must be collinear

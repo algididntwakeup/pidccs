@@ -301,13 +301,17 @@ class PipelineOrchestrator:
                 axis = getattr(r, "axis", "poly")
                 underline = bool(getattr(r, "underline", False))
                 color = getattr(r, "color", "#2563EB")
+                line_style = getattr(r, "line_style", "solid")
                 manual = bool(getattr(r, "manual", False))
+                marked = bool(getattr(r, "marked", False))
             else:
                 pts = r.get("points", [])
                 axis = r.get("axis", "poly")
                 underline = bool(r.get("underline", False))
                 color = r.get("color", "#2563EB")
+                line_style = r.get("line_style", "solid")
                 manual = bool(r.get("manual", False))
+                marked = bool(r.get("marked", False))
 
             run_recs.append({
                 "id": run_id,
@@ -319,9 +323,10 @@ class PipelineOrchestrator:
                 "y2": max(p[1] for p in pts) if pts else 0,
                 "underline": underline,
                 "color": color,
+                "line_style": line_style if line_style in ("solid", "dashed") else "solid",
                 "label": assigned_label or "",
                 "manual": manual,
-                "marked": False,
+                "marked": marked,
             })
 
         # Stage 5: Connection Points (Spec breaks) detection
@@ -365,6 +370,8 @@ class PipelineOrchestrator:
                 run_item["id"] = f"run-{idx}"
             if "color" not in run_item or not run_item["color"]:
                 run_item["color"] = "#2563EB"
+            if run_item.get("line_style") not in ("solid", "dashed"):
+                run_item["line_style"] = "solid"
             if "label" not in run_item:
                 run_item["label"] = ""
             if "manual" not in run_item:
@@ -514,9 +521,14 @@ class PipelineOrchestrator:
                     fluid=r.get("fluid", ""),
                     underline=bool(r.get("underline", False)),
                     color=r.get("color", "#2563EB"),
+                    line_style=r.get("line_style", "solid"),
                     id=r.get("id", f"run-{i}"),
                     label=r.get("label", ""),
                     manual=bool(r.get("manual", False)),
+                    marked=bool(r.get("marked", False)),
+                    group_id=r.get("group_id"),
+                    system_group_id=r.get("system_group_id"),
+                    circuit_group_id=r.get("circuit_group_id"),
                     equipment_outline=bool(r.get("equipment_outline", False)),
                 )
                 run_objs.append(pr)
@@ -526,23 +538,39 @@ class PipelineOrchestrator:
         # 5. Association between newly extracted pids and existing runs
         if progress:
             progress("Menghubungkan line number ke pipa eksisting...")
-        assoc = associate(pids, run_objs, img_bgr, dpi=dpi) if (pids and run_objs) else []
+        # AI may synchronize IDs only onto lines the engineer explicitly marked.
+        # Keep every run in run_objs/updated_runs so geometry, indices and manual
+        # edits remain stable, but exclude unmarked candidates from association.
+        marked_run_objs = [
+            r for r in run_objs
+            if (r.get("marked", False) if isinstance(r, dict) else getattr(r, "marked", False))
+        ]
+        assoc = associate(pids, marked_run_objs, img_bgr, dpi=dpi) if (pids and marked_run_objs) else []
         run_index = {id(r): i for i, r in enumerate(run_objs)}
 
         # Identify which runs have manual labels from user
         manual_run_idxs = set()
+        unmarked_run_idxs = set()
         for i, r in enumerate(existing_runs):
             is_man = r.get("manual") if isinstance(r, dict) else getattr(r, "manual", False)
             lab = r.get("label") if isinstance(r, dict) else getattr(r, "label", "")
             if is_man and lab:
                 manual_run_idxs.add(i)
+            is_marked = r.get("marked", False) if isinstance(r, dict) else getattr(r, "marked", False)
+            if not is_marked:
+                unmarked_run_idxs.add(i)
 
         # Preserve existing user manual PipingIDs
         user_manual_pids = []
+        preserved_unmarked_pids = []
         for ep in (existing_pids or []):
             is_man = ep.get("manual") or ep.get("run_idx") in manual_run_idxs
             if is_man:
                 user_manual_pids.append(copy.deepcopy(ep))
+            elif ep.get("run_idx") in unmarked_run_idxs:
+                # Do not replace or re-associate AI records belonging to lines that
+                # have not been opted into marking yet.
+                preserved_unmarked_pids.append(copy.deepcopy(ep))
 
         new_pid_recs = []
         run_label_map = {}
@@ -610,7 +638,7 @@ class PipelineOrchestrator:
             new_pid_recs.append(rec)
 
         # Merge user manual PIDs (first) and newly detected PIDs
-        combined_pids = user_manual_pids + new_pid_recs
+        combined_pids = user_manual_pids + preserved_unmarked_pids + new_pid_recs
         pid_recs = _dedup_pid_recs(combined_pids)
 
         # 6. Update existing runs with new labels WITHOUT changing run IDs or structure
@@ -620,12 +648,12 @@ class PipelineOrchestrator:
             if not new_label:
                 continue
             if isinstance(r, dict):
-                # Don't overwrite if manual user edit already assigned a custom label
-                if not r.get("manual") or not r.get("label"):
+                # AI is an auto-fill: it may only name an otherwise unlabeled run.
+                if not r.get("label"):
                     r["label"] = new_label
                     r["pid"] = new_label
             else:
-                if not getattr(r, "manual", False) or not getattr(r, "label", ""):
+                if not getattr(r, "label", ""):
                     r.label = new_label
                     r.pid = new_label
 
