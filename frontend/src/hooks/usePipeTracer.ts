@@ -1,5 +1,5 @@
 import { Dispatch, SetStateAction, useCallback } from 'react';
-import { patchResult, traceClick, traceRegion, updateRunPoints } from '@/lib/api';
+import { patchResult, traceRegion, updateRunPoints } from '@/lib/api';
 import { DigitizationResult, PipeRun, PipingID } from '@/types/schema';
 
 type PushHistory = (
@@ -35,6 +35,7 @@ export function usePipeTracer({
       x2: points[points.length - 1][0], y2: points[points.length - 1][1],
       color: '#2563EB',
       manual: true,
+      marked: true,
     };
     const nextRuns = [...result.runs, nextRun];
     pushHistory('Tambah pipa manual', [...result.runs], nextRuns, result.piping_ids, result.piping_ids);
@@ -86,32 +87,5 @@ export function usePipeTracer({
     }
   }, [projectId, sheetId, result, pushHistory, setResult, showToast, setTraceTool]);
 
-  const handleTraceClick = useCallback(async (x: number, y: number) => {
-    if (!projectId || !sheetId || !result) return;
-    try {
-      const data = await traceClick(projectId, sheetId, x, y, 15);
-      if (data.result) {
-        pushHistory(
-          'Magic Wand trace', result.runs, data.result.runs, result.piping_ids,
-          data.result.piping_ids || result.piping_ids,
-        );
-        setResult(data.result);
-      }
-      if (data.added) {
-        const added = data.result?.runs?.[data.run_idx ?? -1];
-        selectRunIds(added?.id ? [added.id] : []);
-        showToast(`Magic Wand: pipa ditambahkan (${data.distance ?? 0} px dari klik)`, 2500);
-      } else if (data.reason === 'duplicate') {
-        const duplicate = result.runs[data.run_idx ?? -1];
-        if (duplicate?.id) selectRunIds([duplicate.id]);
-        showToast('Pipa ini sudah ter-trace — tidak ditambahkan ulang', 2500);
-      } else {
-        showToast('Tidak ada garis CAD dalam radius 15 px dari klik', 2500);
-      }
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Magic Wand gagal', 3000);
-    }
-  }, [projectId, sheetId, result, pushHistory, setResult, selectRunIds, showToast]);
-
-  return { handleManualRun, handleUpdateRunPoints, handleRescan, handleTraceClick };
+  return { handleManualRun, handleUpdateRunPoints, handleRescan };
 }

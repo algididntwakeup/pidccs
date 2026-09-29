@@ -12,6 +12,7 @@ class PipeRun(BaseModel):
     y2: int = Field(..., description="End point y")
     underline: bool = Field(default=False, description="True if detected as title/tag text underline rather than process pipe")
     color: str = Field(default="#2563EB", description="Display and export stroke color hex")
+    marked: bool = Field(default=False, description="True after an engineer opts this run into visible marking")
     label: str = Field(default="", description="Piping line label or tag (e.g. 605-6\"-GR-BDA-029-H50)")
     manual: bool = Field(default=False, description="True if manually edited or created by engineer")
     group_id: Optional[str] = Field(default=None, description="ID grup manual (HITL) pemilik run ini")

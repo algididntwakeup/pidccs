@@ -73,6 +73,7 @@ interface InteractivePipeCanvasProps {
   opacity: number;
   selectedRunIndices: Set<number>;
   onSelectRunIndices: (indices: Set<number>) => void;
+  onMarkRun: (runIdx: number) => Promise<void>;
   onRecolorRuns: (runIdxs: number[], newColor: string) => void;
   onSplitRun: (runIdx: number, x: number, y: number) => Promise<void>;
   onDeleteRuns?: (runIdxs: number[]) => Promise<void>;
@@ -83,7 +84,6 @@ interface InteractivePipeCanvasProps {
   traceTool: 'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand';
   onSetTraceTool: (tool: 'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand') => void;
   onRescan: (bounds: { x1: number; y1: number; x2: number; y2: number }) => Promise<void>;
-  onTraceClick: (x: number, y: number) => Promise<void>;
   onManualRun: (points: [number, number][]) => Promise<void>;
   // Optional mode-driven color override: maps run index -> CSS color.
   // Used for Corrosion System / Circuit views so circuit coloring is rendered
@@ -104,6 +104,7 @@ export default function InteractivePipeCanvas({
   opacity,
   selectedRunIndices,
   onSelectRunIndices,
+  onMarkRun,
   onRecolorRuns,
   onSplitRun,
   onDeleteRuns,
@@ -114,7 +115,6 @@ export default function InteractivePipeCanvas({
   traceTool,
   onSetTraceTool,
   onRescan,
-  onTraceClick,
   onManualRun,
   colorOverrideMap,
   hiddenRunIndices,
@@ -172,6 +172,7 @@ export default function InteractivePipeCanvas({
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const pointerDownRecordRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const markingRunIdsRef = useRef<Set<string | number>>(new Set());
   const { container, tempPan } = useCanvasOverlay(viewer, osdModule, width, height, traceTool);
 
   // Commit accumulated nudge offset for one run via onUpdateRunPoints.
@@ -363,6 +364,15 @@ export default function InteractivePipeCanvas({
   const handleLineClick = (idx: number, e: React.MouseEvent | React.PointerEvent) => {
     e.stopPropagation();
 
+    const clickedRun = runs[idx];
+    if (clickedRun?.marked === false) {
+      const markKey = clickedRun.id || idx;
+      if (markingRunIdsRef.current.has(markKey)) return;
+      markingRunIdsRef.current.add(markKey);
+      void onMarkRun(idx).finally(() => markingRunIdsRef.current.delete(markKey));
+      return;
+    }
+
     // If split mode is active and this is the selected line, execute split.
     // Prefer the live hover preview point; if the cursor hadn't produced one yet
     // (e.g. the pointer events only just started reaching the SVG), fall back to
@@ -392,7 +402,7 @@ export default function InteractivePipeCanvas({
       return;
     }
 
-    if (traceTool !== 'pan') return;
+    if (traceTool !== 'pan' && traceTool !== 'wand') return;
 
     const rect = viewer?.element?.getBoundingClientRect();
     const imgCoords = getImageCoordinates(e);
@@ -580,21 +590,6 @@ export default function InteractivePipeCanvas({
   // BOX TRACE (RESCAN) HANDLER
   // -------------------------------------------------------------
   const handleSvgMouseDown = async (e: React.MouseEvent) => {
-    if (traceTool === 'wand') {
-      // Magic Wand: satu klik = satu garis vektor CAD terdekat. Sengaja TIDAK
-      // me-reset tool ke 'pan' setelah sukses — engineer biasanya mengklik
-      // beberapa pipa berturut-turut.
-      e.stopPropagation();
-      const point = getImageCoordinates(e);
-      if (!point || toolBusy) return;
-      setToolBusy(true);
-      try {
-        await onTraceClick(Math.round(point.x), Math.round(point.y));
-      } finally {
-        setToolBusy(false);
-      }
-      return;
-    }
     if (traceTool === 'multiselect') {
       e.stopPropagation();
       const point = getImageCoordinates(e);
@@ -933,11 +928,11 @@ export default function InteractivePipeCanvas({
           points={ptsStr}
           fill="none"
           stroke="transparent"
-          strokeWidth={isSelected ? 26 : 22}
+          strokeWidth={isSelected ? 26 : run.marked === false ? 20 : 22}
           strokeLinecap="round"
           strokeLinejoin="round"
           style={{
-            pointerEvents: traceTool === 'multiselect' || traceTool === 'wand' ? 'none' : 'stroke',
+            pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
             cursor: splitMode ? 'crosshair' : 'pointer',
           }}
           onPointerDown={(e) => {
@@ -956,7 +951,6 @@ export default function InteractivePipeCanvas({
               }
             }
           }}
-          onClick={(e) => handleLineClick(idx, e)}
           onMouseEnter={() => setHoveredRunIdx(idx)}
           onMouseLeave={() => setHoveredRunIdx(null)}
         />
@@ -979,12 +973,12 @@ export default function InteractivePipeCanvas({
         <polyline
           points={ptsStr}
           fill="none"
-          stroke={isSelected ? '#F59E0B' : strokeColor}
+          stroke={isSelected ? '#F59E0B' : run.marked === false ? (isHovered ? '#94A3B8' : 'transparent') : strokeColor}
           strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : isEquipOutline ? 2.5 : 3.5}
           strokeLinecap="round"
           strokeLinejoin="round"
-          strokeDasharray={isSelected ? '10 5' : isEquipOutline ? '7 4' : undefined}
-          filter={isHovered && !isSelected ? 'url(#hover-glow)' : undefined}
+          strokeDasharray={isSelected ? '10 5' : run.marked === false ? '5 6' : isEquipOutline ? '7 4' : undefined}
+          filter={isHovered && !isSelected && run.marked !== false ? 'url(#hover-glow)' : undefined}
           opacity={isDimmed ? 0.18 : isEquipOutline ? 0.95 : 1}
           style={{
             pointerEvents: 'none',
@@ -1514,7 +1508,7 @@ export default function InteractivePipeCanvas({
               ? 'bg-amber-500 text-white shadow-md'
               : 'hover:bg-slate-100 text-slate-700'
           }`}
-          title="Magic Wand (1-Click Trace): klik satu kali pada garis pipa untuk mengambil jejak vektor CAD"
+          title="Magic Wand: klik jalur auto-trace untuk menandainya; klik lagi untuk mengedit"
         >
           <Wand2 className="w-4 h-4 shrink-0" />
           <span className="hidden xl:inline">Magic Wand</span>

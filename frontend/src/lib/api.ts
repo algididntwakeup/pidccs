@@ -1,4 +1,4 @@
-import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse, TraceClickResponse } from '@/types/schema';
+import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse } from '@/types/schema';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -270,25 +270,6 @@ export async function traceRegion(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to trace region' }));
     throw new Error(err.detail || 'Failed to trace region');
-  }
-  return res.json();
-}
-
-export async function traceClick(
-  projectId: string,
-  sheetId: string,
-  x: number,
-  y: number,
-  radius: number = 15
-): Promise<TraceClickResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/trace-click`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ x, y, radius }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Magic Wand gagal' }));
-    throw new Error(err.detail || 'Magic Wand gagal');
   }
   return res.json();
 }

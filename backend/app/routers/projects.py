@@ -22,13 +22,6 @@ class TraceRegionRequest(BaseModel):
     y2: float = Field(..., ge=0)
     sheet_id: Optional[str] = None
 
-class TraceClickRequest(BaseModel):
-    """Satu klik pada garis pipa (koordinat ruang citra = ruang `runs`)."""
-    x: float = Field(..., ge=0)
-    y: float = Field(..., ge=0)
-    radius: float = Field(15.0, gt=0, le=300)
-
-
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
@@ -95,9 +88,9 @@ async def upload_sheet(
     menunjuk file PDF 1 halaman sendiri. PDF 1 halaman / PNG / JPG tetap 1 Sheet.
     Response selalu berupa daftar agar pemanggil tidak perlu tahu jumlah halaman.
 
-    Setiap sheet langsung di-Fast-Trace (`lines_only`) di background kecuali
-    `AUTO_TRACE_ON_UPLOAD=false` atau Celery berjalan eager (`.delay()` inline akan
-    memblokir respons upload sampai tracing selesai).
+    Setiap sheet dijadwalkan untuk Fast Trace (`lines_only`) di background secara
+    default. Job masuk antrean Celery; jika Celery eager atau broker tidak tersedia,
+    BackgroundTasks menjalankan fallback tanpa menahan respons upload.
     """
     project = await ProjectService.get_project(db=db, project_id=project_id)
     if not project:
@@ -113,7 +106,7 @@ async def upload_sheet(
         user_id=user_id,
     )
 
-    if settings.AUTO_TRACE_ON_UPLOAD and not settings.CELERY_TASK_ALWAYS_EAGER:
+    if settings.AUTO_TRACE_ON_UPLOAD:
         jobs = [(queue_sheet_detection(s, mode="lines_only"), s) for s in sheets]
         # Baris Job harus sudah ter-commit sebelum task dikirim, kalau tidak worker
         # bisa memproses task untuk Job yang belum terlihat di DB.
@@ -259,7 +252,7 @@ async def trace_region(
             "points": points,
             "x1": min(p[0] for p in points), "y1": min(p[1] for p in points),
             "x2": max(p[0] for p in points), "y2": max(p[1] for p in points),
-            "color": "#2563EB", "manual": True, "source": "rescan",
+            "color": "#2563EB", "manual": True, "marked": True, "source": "rescan",
             "label": record.get("label", ""),
             "pid": record.get("pid", ""),
         })
@@ -402,85 +395,6 @@ async def trace_region(
         "total_runs": len(result["runs"]),
         "result": result,
     }
-
-@router.post("/{project_id}/sheets/{sheet_id}/trace-click")
-async def trace_click(
-    project_id: str,
-    sheet_id: str,
-    payload: TraceClickRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """Magic Wand (HITL): ambil SATU garis vektor CAD terdekat dari titik klik.
-
-    Tanpa OCR, tanpa YOLO, tanpa routing — murni geometri: indeks vektor PDF
-    (di-prewarm saat sheet dibuka) -> `nearest_run_at` -> dedupe -> append run.
-    """
-    from ..adapters.storage import LocalStorageAdapter
-    from ..config import settings
-    from pidcorr.lines import get_vector_index, nearest_run_at, find_duplicate_run
-
-    sheet = await ProjectService.get_sheet(db, sheet_id)
-    if not sheet or sheet.project_id != project_id:
-        raise HTTPException(status_code=404, detail="Sheet not found in this project")
-
-    result = dict(sheet.result_json or {})
-    if not result:
-        raise HTTPException(
-            status_code=400,
-            detail="Sheet belum punya hasil tracing — jalankan Detect P&ID dulu",
-        )
-
-    if not str(sheet.filename or sheet.file_path).lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Magic Wand hanya bekerja pada sheet PDF vektor. "
-                   "Untuk PNG/JPG gunakan Box Trace atau Manual Pen.",
-        )
-
-    image_path = LocalStorageAdapter(settings.STORAGE_DIR).get_file_path(sheet.file_path)
-    if not os.path.exists(image_path):
-        raise HTTPException(status_code=404, detail="File gambar sheet tidak ditemukan di storage")
-
-    dpi = float(result.get("dpi") or sheet.dpi or 350)
-    rot = int(result.get("rot") or 0)
-    index = get_vector_index(image_path, dpi=dpi, rot=rot)
-    runs = list(result.get("runs", []))
-
-    cand, dist = nearest_run_at(index, float(payload.x), float(payload.y),
-                               radius=float(payload.radius))
-    if cand is None:
-        return {
-            "status": "success", "added": False, "reason": "none",
-            "distance": None, "total_runs": len(runs), "result": result,
-        }
-
-    dup = find_duplicate_run(runs, cand)
-    if dup is not None:
-        return {
-            "status": "success", "added": False, "reason": "duplicate",
-            "run_idx": dup, "distance": round(dist, 2),
-            "total_runs": len(runs), "result": result,
-        }
-
-    pts = [[int(p[0]), int(p[1])] for p in cand.points]
-    new_run = {
-        "id": f"wand-{uuid.uuid4().hex[:12]}",
-        "points": pts,
-        "axis": cand.axis if cand.axis in ("h", "v", "d", "poly") else "poly",
-        "x1": min(p[0] for p in pts), "y1": min(p[1] for p in pts),
-        "x2": max(p[0] for p in pts), "y2": max(p[1] for p in pts),
-        "color": "#2563EB", "manual": True, "label": "",
-    }
-    runs.append(new_run)
-    result["runs"] = runs
-    sheet.result_json = result
-    await db.commit()
-    return {
-        "status": "success", "added": True, "reason": None,
-        "run_idx": len(runs) - 1, "run": new_run, "distance": round(dist, 2),
-        "total_runs": len(runs), "result": result,
-    }
-
 
 @router.get("/{project_id}/sheets/{sheet_id}", response_model=SheetResponse)
 async def get_sheet(

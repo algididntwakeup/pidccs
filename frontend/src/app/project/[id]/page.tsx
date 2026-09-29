@@ -91,8 +91,8 @@ export default function ProjectFolderPage() {
       const created = await uploadSheet(projectId, file);
       setUploadMsg(
         created.length > 1
-          ? `${created.length} halaman dipecah menjadi ${created.length} sheet antrean.`
-          : `${created.length} sheet ditambahkan ke antrean.`
+          ? `${created.length} halaman dipecah menjadi ${created.length} sheet; Fast Trace berjalan di background.`
+          : `${created.length} sheet ditambahkan; Fast Trace berjalan di background.`
       );
       await load();
       window.setTimeout(() => setUploadMsg(''), 4500);
@@ -295,7 +295,7 @@ export default function ProjectFolderPage() {
 
                       <span className="relative z-10 text-[11px] font-bold text-amber-800 bg-white/95 border border-amber-200 px-2.5 py-1 rounded-full shadow-xs flex items-center space-x-1.5">
                         <Clock className="w-3 h-3 text-amber-600" />
-                        <span>Menunggu Antrean...</span>
+                        <span>Menunggu Fast Trace...</span>
                       </span>
 
                       <span className="relative z-10 text-[10px] text-slate-400 mt-1.5 font-medium">

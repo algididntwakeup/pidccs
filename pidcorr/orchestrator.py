@@ -321,6 +321,7 @@ class PipelineOrchestrator:
                 "color": color,
                 "label": assigned_label or "",
                 "manual": manual,
+                "marked": False,
             })
 
         # Stage 5: Connection Points (Spec breaks) detection
@@ -368,6 +369,8 @@ class PipelineOrchestrator:
                 run_item["label"] = ""
             if "manual" not in run_item:
                 run_item["manual"] = False
+            if "marked" not in run_item:
+                run_item["marked"] = False
 
         # Detect Off-Page Connectors (OPC)
         opcs = []

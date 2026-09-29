@@ -77,22 +77,19 @@ async def get_sheet_result(
                 detail="Sheet has not been processed yet. Call /detect first."
             )
 
-    # Prewarm indeks vektor Magic Wand di daemon thread: klik pertama engineer
-    # tidak perlu menunggu build indeks (~1 s PyMuPDF). Best-effort, tidak boleh
-    # menggagalkan pembacaan result.
-    try:
-        if str(sheet.filename or sheet.file_path).lower().endswith(".pdf"):
-            from ..adapters.storage import LocalStorageAdapter
-            from ..config import settings
-            from pidcorr.lines import prewarm_vector_index
-            path = LocalStorageAdapter(settings.STORAGE_DIR).get_file_path(sheet.file_path)
-            prewarm_vector_index(
-                path,
-                dpi=float(sheet.result_json.get("dpi") or sheet.dpi or 350),
-                rot=int(sheet.result_json.get("rot") or 0),
-            )
-    except Exception:
-        pass
+    # Backfill the opt-in flag for older saved results. Legacy manual runs were
+    # already explicit engineer actions; auto-traced runs stay unmarked.
+    result = dict(sheet.result_json)
+    runs = [dict(run) for run in result.get("runs", [])]
+    changed = False
+    for run in runs:
+        if "marked" not in run:
+            run["marked"] = bool(run.get("manual", False))
+            changed = True
+    if changed:
+        result["runs"] = runs
+        sheet.result_json = result
+        await db.commit()
 
     return sheet.result_json
 

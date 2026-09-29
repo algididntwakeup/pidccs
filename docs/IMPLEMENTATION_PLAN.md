@@ -1,3 +1,11 @@
+## HANDOFF UPDATE — Opt-In Marking & Folder Upload (2026-09-29)
+
+- Upload sheet menjadwalkan Fast Trace (`lines_only`) sebagai background job. Celery menjadi jalur utama; Celery eager atau broker yang tidak tersedia memakai `BackgroundTasks` supaya respons upload tidak menunggu tracing. Folder View menampilkan progres job per sheet dan pesan bahwa Fast Trace berjalan di background.
+- Setiap run hasil tracing otomatis tersimpan dengan `marked: false`. Di `InteractivePipeCanvas`, run tersebut tetap punya hit target 20 px tetapi stroke visual transparan; hover memberi petunjuk garis abu-abu putus-putus.
+- Klik pertama pada run yang belum ditandai menyimpan `marked: true` lewat `PATCH /result` dan tidak membuka inspector. Klik berikutnya memakai alur seleksi/inspector yang sudah ada. Hasil lama di-backfill berdasarkan `manual`: run manual tetap terlihat, run auto-trace menjadi opt-in.
+- Endpoint dan API frontend `/trace-click` telah dihapus. Magic Wand sekarang menandai run hasil auto-trace yang sudah tersedia; geometri yang belum ter-trace tetap ditangani Box Trace atau pen manual.
+- Verifikasi lokal: ESLint, `npx tsc --noEmit`, production build, `compileall`, dan pemeriksaan diff bersih. `pytest backend/tests/` belum dapat mengumpulkan suite pada lingkungan lokal Python 3.14 karena dependency `cv2` tidak tersedia. Ini bukan hasil GitHub CI.
+
 ## HANDOFF UPDATE — FASE 1: Multi-Page PDF Splitter & Folder-Style Workspace (2026-09-28)
 
 **Masalah:** klien EPC kerap mengirim SATU PDF berisi puluhan halaman P&ID. Melemparnya ke kanvas
@@ -72,7 +80,7 @@ berperan sebagai **folder**, dan kanvas dibuka per halaman.
 
 ---
 
-## HANDOFF UPDATE — PIVOT FASE C: HITL Manual Marking (Magic Wand, Manual Groups, Stamp Export) (2026-09-28)
+## HANDOFF UPDATE — PIVOT FASE C: HITL Manual Marking (historis; alur Magic Wand diubah 2026-09-29)
 
 **Arahan CTO:** integrasi AI lanjutan (enrichment otomatis lanjutan) dan RBAC **ditunda**. Fokus digeser ke
 Human-in-the-Loop manual yang ultra-cepat agar engineer bisa men-marking P&ID sendiri tanpa menunggu model.

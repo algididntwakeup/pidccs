@@ -220,19 +220,20 @@ def dispatch_detection_job(
     background_tasks: BackgroundTasks,
 ) -> None:
     """Send the job to Celery; fall back to an in-process task if the broker is unavailable."""
-    try:
-        from worker.tasks import detect_sheet_task
-        detect_sheet_task.delay(
-            job_id=job.id,
-            sheet_id=sheet.id,
-            file_rel_path=sheet.file_path,
-            dpi=dpi,
-            rot=rot,
-            mode=mode,
-        )
-        return
-    except Exception:
-        pass
+    if not settings.CELERY_TASK_ALWAYS_EAGER:
+        try:
+            from worker.tasks import detect_sheet_task
+            detect_sheet_task.delay(
+                job_id=job.id,
+                sheet_id=sheet.id,
+                file_rel_path=sheet.file_path,
+                dpi=dpi,
+                rot=rot,
+                mode=mode,
+            )
+            return
+        except Exception:
+            pass
     background_tasks.add_task(
         run_detection_in_background,
         job_id=job.id,

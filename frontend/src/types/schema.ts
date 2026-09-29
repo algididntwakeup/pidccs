@@ -52,6 +52,7 @@ export interface PipeRun {
   y2: number;
   underline?: boolean;
   color?: string;
+  marked?: boolean;
   label?: string;
   pid?: string;
   fluid?: string;
@@ -112,17 +113,6 @@ export interface ManualGroup {
   id: string;
   name: string;
   color: string;
-}
-
-export interface TraceClickResponse {
-  status: string;
-  added: boolean;
-  reason?: 'none' | 'duplicate' | null;
-  run_idx?: number;
-  run?: PipeRun;
-  distance?: number | null;
-  total_runs?: number;
-  result?: DigitizationResult;
 }
 
 export interface CircuitProvenance {

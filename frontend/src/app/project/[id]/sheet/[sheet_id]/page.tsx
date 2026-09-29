@@ -465,6 +465,22 @@ export default function ProjectWorkspace() {
     showToast(`Warna diperbarui ke ${newColor}`, 2000);
   };
 
+  const handleMarkRun = useCallback(async (runIdx: number) => {
+    if (!result || !projectId || !activeSheet) return;
+    const run = result.runs[runIdx];
+    if (!run || run.marked !== false) return;
+    const nextRuns = result.runs.map((item, idx) => idx === runIdx ? { ...item, marked: true } : item);
+    const updatedResult = { ...result, runs: nextRuns };
+    try {
+      const savedResult = await patchResult(projectId, activeSheet.id, updatedResult);
+      pushHistory('Tandai pipa', result.runs, savedResult.runs, result.piping_ids, savedResult.piping_ids || result.piping_ids);
+      setResult(savedResult);
+      showToast('Garis ditandai. Klik lagi untuk mengedit nama dan warna.', 3000);
+    } catch (error) {
+      showToast(error instanceof Error ? `Gagal menyimpan penandaan: ${error.message}` : 'Gagal menyimpan penandaan.', 3500);
+    }
+  }, [result, projectId, activeSheet, pushHistory, setResult, showToast]);
+
   // Split selected line via backend API
   const handleSplitRun = async (runIdx: number, x: number, y: number) => {
     if (!result || !projectId || !activeSheet) return;
@@ -791,7 +807,7 @@ export default function ProjectWorkspace() {
     }
   }, [result, projectId, activeSheet, savingChanges, showToast, setHasUnsavedChanges]);
 
-  const { handleManualRun, handleUpdateRunPoints, handleRescan, handleTraceClick } = usePipeTracer({
+  const { handleManualRun, handleUpdateRunPoints, handleRescan } = usePipeTracer({
     projectId, sheetId: activeSheet?.id, result, setResult, pushHistory,
     selectRunIds, setTraceTool, showToast,
   });
@@ -1829,6 +1845,7 @@ export default function ProjectWorkspace() {
               opacity={traceOpacity}
               selectedRunIndices={selectedRunIndices}
               onSelectRunIndices={setSelectedRunIndices}
+              onMarkRun={handleMarkRun}
               onRecolorRuns={handleRecolorRuns}
               onSplitRun={handleSplitRun}
               onDeleteRuns={handleDeleteRuns}
@@ -1839,7 +1856,6 @@ export default function ProjectWorkspace() {
                traceTool={traceTool}
                onSetTraceTool={setTraceTool}
                onRescan={handleRescan}
-               onTraceClick={handleTraceClick}
                onManualRun={handleManualRun}
                colorOverrideMap={colorOverrideMap}
                dimUncolored={mode === 'system' || mode === 'circuit'}
