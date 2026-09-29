@@ -407,7 +407,8 @@ export default function InteractivePipeCanvas({
     };
   }, [popoverDragging, viewer]);
 
-  // Line click handler with Shift+Click multi-select and dynamic popover placement
+  // A single click marks an unmarked trace or selects a marked run. Editing is
+  // deliberately reserved for the explicit double-click handler below.
   const handleLineClick = (idx: number, e: React.MouseEvent | React.PointerEvent) => {
     e.stopPropagation();
 
@@ -449,28 +450,7 @@ export default function InteractivePipeCanvas({
       return;
     }
 
-    if (traceTool !== 'pan' && traceTool !== 'wand') return;
-
-    const rect = viewer?.element?.getBoundingClientRect();
-    const imgCoords = getImageCoordinates(e);
-    if (rect) {
-      const px = e.clientX - rect.left;
-      const py = e.clientY - rect.top;
-      // Keep the popover OFF the clicked line: place it just below-right of the cursor
-      // (its top edge ~28px under the pointer). Flip above/left when the panel would
-      // run off the canvas. This guarantees the line you clicked stays visible and grabbable.
-      const PANEL_W = 320;
-      const PANEL_H = 240;
-      const GAP = 28;
-      let x = px + GAP;
-      let y = py + GAP;
-      if (x + PANEL_W > rect.width - 12) x = px - GAP - PANEL_W; // flip to the left
-      if (y + PANEL_H > rect.height - 12) y = py - GAP - PANEL_H; // flip above
-      // Final clamp so the panel never leaves the viewport.
-      x = Math.max(12, Math.min(rect.width - PANEL_W - 12, x));
-      y = Math.max(12, Math.min(rect.height - 120, y));
-      setPopoverPos({ x, y, imgX: imgCoords?.x ?? 0, imgY: imgCoords?.y ?? 0 });
-    }
+    if (splitMode || (traceTool !== 'pan' && traceTool !== 'wand')) return;
 
     if (e.shiftKey) {
       const next = new Set(selectedRunIndices);
@@ -483,6 +463,32 @@ export default function InteractivePipeCanvas({
     } else {
       onSelectRunIndices(new Set([idx]));
     }
+    setPopoverPos(null);
+  };
+
+  const handleLineDoubleClick = (idx: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const clickedRun = runs[idx];
+    if (!clickedRun || (clickedRun.marked === false && !markingRunIdsRef.current.has(clickedRun.id || idx))) return;
+    if (splitMode || (traceTool !== 'pan' && traceTool !== 'wand')) return;
+
+    const rect = viewer?.element?.getBoundingClientRect();
+    const imgCoords = getImageCoordinates(e);
+    if (rect) {
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      const panelWidth = 320;
+      const panelHeight = 240;
+      const gap = 28;
+      let x = px + gap;
+      let y = py + gap;
+      if (x + panelWidth > rect.width - 12) x = px - gap - panelWidth;
+      if (y + panelHeight > rect.height - 12) y = py - gap - panelHeight;
+      x = Math.max(12, Math.min(rect.width - panelWidth - 12, x));
+      y = Math.max(12, Math.min(rect.height - 120, y));
+      setPopoverPos({ x, y, imgX: imgCoords?.x ?? 0, imgY: imgCoords?.y ?? 0 });
+    }
+    onSelectRunIndices(new Set([idx]));
   };
 
   // Execute line splitting
@@ -1006,6 +1012,7 @@ export default function InteractivePipeCanvas({
           }}
           onMouseEnter={() => setHoveredRunIdx(idx)}
           onMouseLeave={() => setHoveredRunIdx(null)}
+          onDoubleClick={(e) => handleLineDoubleClick(idx, e)}
         />
 
         {/* Selection Background Halo */}
@@ -1026,13 +1033,13 @@ export default function InteractivePipeCanvas({
         <polyline
           points={ptsStr}
           fill="none"
-          stroke={isSelected ? '#F59E0B' : run.marked === false ? '#94A3B8' : strokeColor}
-          strokeWidth={isSelected ? 5.5 : isHovered ? 5.0 : isEquipOutline ? 2.5 : 3.5}
+          stroke={isSelected ? '#F59E0B' : run.marked === false ? '#94A3B8' : isDimmed ? '#CBD5E1' : strokeColor}
+          strokeWidth={isSelected ? 9 : isHovered ? 8 : isEquipOutline ? 6 : 7}
           strokeLinecap="round"
           strokeLinejoin="round"
           strokeDasharray={isSelected ? '10 5' : run.marked === false ? '5 6' : run.line_style === 'dashed' ? '8 6' : isEquipOutline ? '7 4' : undefined}
           filter={isHovered && !isSelected && run.marked !== false ? 'url(#hover-glow)' : undefined}
-          opacity={isDimmed ? 0.18 : run.marked === false ? (isHovered ? 0.82 : 0.18) : isEquipOutline ? 0.95 : 1}
+          opacity={run.marked === false ? opacity * (isHovered ? 0.82 : 0.18) : 1}
           style={{
             pointerEvents: 'none',
             transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',
@@ -1191,8 +1198,7 @@ export default function InteractivePipeCanvas({
                 : 'default',
               overflow: 'visible',
               display: showOverlay ? 'block' : 'none',
-              opacity: opacity,
-              transition: 'opacity 0.2s ease',
+              opacity: 1,
             }}
             onMouseDown={handleSvgMouseDown}
             onMouseMove={handleSvgMouseMove}
@@ -1694,7 +1700,7 @@ export default function InteractivePipeCanvas({
               ? 'bg-indigo-600 text-white shadow-md'
               : 'hover:bg-slate-100 text-slate-700'
           }`}
-          title="Pan & Select Tool: Geser kanvas atau klik garis pipa untuk edit"
+          title="Pan & Select Tool: Klik sekali untuk memilih/menandai, klik dua kali untuk edit"
         >
           <Hand className="w-4 h-4 shrink-0" />
           <span className="hidden xl:inline">Pan &amp; Select</span>
@@ -1713,7 +1719,7 @@ export default function InteractivePipeCanvas({
               ? 'bg-amber-500 text-white shadow-md'
               : 'hover:bg-slate-100 text-slate-700'
           }`}
-          title="Magic Wand: klik jalur auto-trace untuk menandainya; klik lagi untuk mengedit"
+          title="Magic Wand: Klik sekali untuk menandai, klik dua kali untuk edit"
         >
           <Wand2 className="w-4 h-4 shrink-0" />
           <span className="hidden xl:inline">Magic Wand</span>

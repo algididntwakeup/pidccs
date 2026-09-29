@@ -205,7 +205,7 @@ export default function ProjectWorkspace() {
   const [splitMode, setSplitMode] = useState<boolean>(false);
   const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand'>('pan');
   const [newGroupName, setNewGroupName] = useState('');
-  const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
+  const [traceOpacity, setTraceOpacity] = useState<number>(1);
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
@@ -2027,7 +2027,7 @@ export default function ProjectWorkspace() {
                       value={traceOpacity}
                       onChange={(e) => setTraceOpacity(parseFloat(e.target.value))}
                       className="w-16 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-                      title={`Transparansi Pipa: ${Math.round(traceOpacity * 100)}%`}
+                      title={`Opasitas guideline auto-trace: ${Math.round(traceOpacity * 100)}%`}
                     />
                     <span className="text-[10px] font-mono text-slate-500 w-7">
                       {Math.round(traceOpacity * 100)}%

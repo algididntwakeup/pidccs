@@ -27,7 +27,12 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 
 from ..interfaces.perception import BaseLineTracer
-from ..lines import PipeRun, is_furniture_geometry, suppress_furniture_geometry
+from ..lines import (
+    PipeRun,
+    is_furniture_geometry,
+    split_runs_at_t_junctions,
+    suppress_furniture_geometry,
+)
 
 # --------------------------------------------------------------- konstanta -----
 AXIS_TOL_PT = 1.2        # toleransi kolinieritas H/V (pt): |y0-y1| <= tol
@@ -404,6 +409,70 @@ def _inline_symbol_regions(segs: Sequence[Segment], tol_pt: float = 1.5):
             if lo_y - 2.5 <= shared[1] <= hi_y + 2.5 and abs(shared[0] - (p[0] + q[0]) / 2) >= 2.5:
                 regions.append(("v", min(p[0], q[0], shared[0]) - 1.5, lo_y - 1.5,
                                 max(p[0], q[0], shared[0]) + 1.5, hi_y + 1.5))
+
+    # Some CAD valve symbols are drawn as two triangles meeting at one apex
+    # (four short diagonal strokes), rather than as one open V. Recognize only a
+    # compact four-way diagonal junction with two opposed direction pairs; this
+    # avoids treating an ordinary elbow as a valve.
+    vertices = []
+    vertex_cells = defaultdict(list)
+    cell_size = max(tol_pt, 1.0)
+    for a, b in diagonals:
+        for endpoint, tip in ((a, b), (b, a)):
+            cx = int(math.floor(endpoint[0] / cell_size))
+            cy = int(math.floor(endpoint[1] / cell_size))
+            candidates = [
+                vertex_id
+                for dx in (-1, 0, 1)
+                for dy in (-1, 0, 1)
+                for vertex_id in vertex_cells.get((cx + dx, cy + dy), ())
+                if _dist(endpoint, vertices[vertex_id]["center"]) <= tol_pt
+            ]
+            if candidates:
+                vertex = vertices[candidates[0]]
+            else:
+                vertex = {"center": endpoint, "tips": []}
+                vertex_id = len(vertices)
+                vertices.append(vertex)
+                vertex_cells[(cx, cy)].append(vertex_id)
+            vertex["tips"].append(tip)
+    for vertex in vertices:
+        tips = vertex["tips"]
+        if len(tips) != 4:
+            continue
+        center = vertex["center"]
+        vectors = []
+        for tip in tips:
+            dx, dy = tip[0] - center[0], tip[1] - center[1]
+            length = math.hypot(dx, dy)
+            if length <= 1e-9:
+                break
+            vectors.append((dx / length, dy / length))
+        if len(vectors) != 4:
+            continue
+        pairings = [((0, 1), (2, 3)), ((0, 2), (1, 3)), ((0, 3), (1, 2))]
+        opposed = any(
+            vectors[a][0] * vectors[b][0] + vectors[a][1] * vectors[b][1] <= -0.45
+            and vectors[c][0] * vectors[d][0] + vectors[c][1] * vectors[d][1] <= -0.45
+            for (a, b), (c, d) in pairings
+        )
+        x_values = [center[0], *(tip[0] for tip in tips)]
+        y_values = [center[1], *(tip[1] for tip in tips)]
+        x1, x2 = min(x_values), max(x_values)
+        y1, y2 = min(y_values), max(y_values)
+        width, height = x2 - x1, y2 - y1
+        if not opposed or not (4.0 <= width <= 30.0 and 4.0 <= height <= 30.0):
+            continue
+        touches_h = any(
+            abs(a[1] - b[1]) <= tol_pt and min(a[0], b[0]) <= center[0] <= max(a[0], b[0])
+            and abs(a[1] - center[1]) <= tol_pt for a, b in segs
+        )
+        touches_v = any(
+            abs(a[0] - b[0]) <= tol_pt and min(a[1], b[1]) <= center[1] <= max(a[1], b[1])
+            and abs(a[0] - center[0]) <= tol_pt for a, b in segs
+        )
+        orientation = "h" if touches_h or (not touches_v and width >= height) else "v"
+        regions.append((orientation, x1 - 1.5, y1 - 1.5, x2 + 1.5, y2 + 1.5))
     # Duplicate pairs can describe the same valve when a PDF path is segmented.
     unique = []
     for region in regions:
@@ -838,9 +907,13 @@ def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
     # di ruang PDF belum ada deteksi YOLO maupun bbox OCR, jadi guard-nya tidak
     # aktif — yang bekerja adalah band simetris, aturan tepi, dan aturan span.
     # Ini yang membuang tabel TAG/NOTES di puncak lembar dan title block bawah.
-    if keep_furniture:
-        return out
-    return suppress_furniture_geometry(out, page_wh=(W_pt * scale, H_pt * scale), dpi=dpi)
+    if not keep_furniture:
+        out = suppress_furniture_geometry(out, page_wh=(W_pt * scale, H_pt * scale), dpi=dpi)
+    return split_runs_at_t_junctions(
+        out,
+        tol_px=max(2.0, 1.5 * scale),
+        min_piece_px=max(6.0, 3.0 * scale),
+    )
 
 
 class VectorLineTracer(BaseLineTracer):

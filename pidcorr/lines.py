@@ -20,6 +20,7 @@ import math
 import os
 import threading
 import time
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from collections import defaultdict, OrderedDict
 import numpy as np
@@ -90,6 +91,101 @@ class PipeRun:
             return self[key]
         except KeyError:
             return default
+
+
+def split_runs_at_t_junctions(runs, tol_px: float = 2.0, min_piece_px: float = 6.0):
+    """Split straight H/V runs where a perpendicular branch terminates.
+
+    A through-run can remain continuous for topology, but the marking editor needs
+    independent legs ending at a T so users can opt into each leg separately.
+    A perpendicular line crossing the main line has no endpoint at the crossing
+    and therefore does not cause a split.
+    """
+    if not runs or len(runs) < 2:
+        return runs
+
+    def axis_of(run):
+        return run.axis if hasattr(run, "axis") else run.get("axis", "poly")
+
+    def points_of(run):
+        return run.points if hasattr(run, "points") else run.get("points", [])
+
+    cuts_by_run = defaultdict(list)
+    branch_endpoints = {"h": [], "v": []}
+    for run_idx, run in enumerate(runs):
+        axis = axis_of(run)
+        points = points_of(run)
+        if axis not in ("h", "v") or len(points) < 2:
+            continue
+        for endpoint, far_endpoint in ((points[0], points[-1]),
+                                       (points[-1], points[0])):
+            off = endpoint[1] if axis == "h" else endpoint[0]
+            along = endpoint[0] if axis == "h" else endpoint[1]
+            far_off = far_endpoint[1] if axis == "h" else far_endpoint[0]
+            branch_endpoints[axis].append((off, along, far_off))
+    for axis in branch_endpoints:
+        branch_endpoints[axis].sort(key=lambda item: item[0])
+    endpoint_offsets = {
+        axis: [item[0] for item in items]
+        for axis, items in branch_endpoints.items()
+    }
+
+    for main_idx, main in enumerate(runs):
+        main_axis = axis_of(main)
+        points = points_of(main)
+        if main_axis not in ("h", "v") or len(points) < 2:
+            continue
+        (x0, y0), (x1, y1) = points[0], points[-1]
+        cross = (y0 + y1) / 2 if main_axis == "h" else (x0 + x1) / 2
+        lo, hi = sorted((x0, x1) if main_axis == "h" else (y0, y1))
+        branch_axis = "v" if main_axis == "h" else "h"
+        candidates = branch_endpoints[branch_axis]
+        offsets = endpoint_offsets[branch_axis]
+        first = bisect_left(offsets, cross - tol_px)
+        last = bisect_right(offsets, cross + tol_px)
+        for off, along, far_off in candidates[first:last]:
+            if (lo + min_piece_px <= along <= hi - min_piece_px
+                    and abs(far_off - cross) > tol_px):
+                cuts_by_run[main_idx].append(float(along))
+
+    output = []
+    for run_idx, run in enumerate(runs):
+        points = points_of(run)
+        axis = axis_of(run)
+        cuts = cuts_by_run.get(run_idx, [])
+        if not cuts:
+            output.append(run)
+            continue
+        (x0, y0), (x1, y1) = points[0], points[-1]
+        lo, hi = sorted((x0, x1) if axis == "h" else (y0, y1))
+        unique_cuts = []
+        for cut in sorted(cuts):
+            if lo + min_piece_px <= cut <= hi - min_piece_px and (
+                not unique_cuts or cut - unique_cuts[-1] > tol_px
+            ):
+                unique_cuts.append(cut)
+        boundaries = [lo, *unique_cuts, hi]
+        for start, end in zip(boundaries, boundaries[1:]):
+            if end - start < min_piece_px:
+                continue
+            piece_points = ([(start, (y0 + y1) / 2), (end, (y0 + y1) / 2)]
+                            if axis == "h"
+                            else [((x0 + x1) / 2, start), ((x0 + x1) / 2, end)])
+            if isinstance(run, PipeRun):
+                output.append(PipeRun(
+                    points=piece_points, axis=axis, pid=run.pid, fluid=run.fluid,
+                    underline=run.underline, color=run.color, line_style=run.line_style,
+                    label=run.label, manual=run.manual, marked=run.marked,
+                    group_id=run.group_id, system_group_id=run.system_group_id,
+                    circuit_group_id=run.circuit_group_id,
+                    equipment_outline=run.equipment_outline,
+                ))
+            else:
+                piece = dict(run)
+                piece["points"] = piece_points
+                piece["axis"] = axis
+                output.append(piece)
+    return output
 
 
 # --------------------------------------------------- 1) ekstraksi segmen ----------

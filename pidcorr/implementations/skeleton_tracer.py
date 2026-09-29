@@ -23,6 +23,7 @@ from ..lines import (
     bridge_collinear_headers,
     bridge_inline_valve_gaps,
     bridge_polyline_elbows,
+    split_runs_at_t_junctions,
 )
 
 
@@ -653,6 +654,57 @@ class SkeletonLineTracer(BaseLineTracer):
                 clean_binary[y1:y2, x1:x2] = 0
                 symbol_gap_boxes.append((x1, y1, x2, y2))
 
+        # Fast Trace intentionally skips YOLO, so use a conservative geometric
+        # valve cue for raster pages: paired short diagonal strokes around a
+        # compact valve body. Reuse the vector geometry classifier after mapping
+        # Hough segments into PDF-point units; no model inference is introduced.
+        try:
+            hough_scale = min(1.0, 1800.0 / max(H, W))
+            hough_image = clean_binary
+            if hough_scale < 1.0:
+                hough_image = cv2.resize(
+                    clean_binary,
+                    (max(1, int(round(W * hough_scale))), max(1, int(round(H * hough_scale)))),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            hough_dpi = dpi * hough_scale
+            hough = cv2.HoughLinesP(
+                hough_image,
+                rho=1,
+                theta=np.pi / 180,
+                threshold=max(8, int(2.0 * hough_dpi / 72.0)),
+                minLineLength=max(6, int(4.0 * hough_dpi / 72.0)),
+                maxLineGap=max(2, int(1.0 * hough_dpi / 72.0)),
+            )
+            if hough is not None:
+                from .vector_tracer import _inline_symbol_regions
+
+                scale_to_pt = 72.0 / hough_dpi
+                scale_to_original_px = 72.0 / dpi
+                hough_segments = []
+                for line in hough:
+                    coords = np.asarray(line).reshape(-1)
+                    if coords.size < 4:
+                        continue
+                    hough_segments.append(
+                        (
+                            (float(coords[0]) * scale_to_pt, float(coords[1]) * scale_to_pt),
+                            (float(coords[2]) * scale_to_pt, float(coords[3]) * scale_to_pt),
+                        )
+                    )
+                for _orientation, sx1, sy1, sx2, sy2 in _inline_symbol_regions(hough_segments):
+                    x1 = max(0, int(math.floor(sx1 / scale_to_original_px)))
+                    y1 = max(0, int(math.floor(sy1 / scale_to_original_px)))
+                    x2 = min(W, int(math.ceil(sx2 / scale_to_original_px)))
+                    y2 = min(H, int(math.ceil(sy2 / scale_to_original_px)))
+                    if x2 > x1 and y2 > y1:
+                        clean_binary[y1:y2, x1:x2] = 0
+                        symbol_gap_boxes.append((x1, y1, x2, y2))
+        except (cv2.error, ImportError, ValueError):
+            # Geometric masking is a conservative enhancement; a Hough failure
+            # must not prevent the ordinary skeleton trace from running.
+            pass
+
         # 2. Equipment Interior Masking: buang ISI equipment, PERTAHANKAN dinding + nozzle.
         #
         # Bug yang diperbaiki 2026-09-24: versi lama mem-blackout SELURUH bbox equipment
@@ -792,4 +844,10 @@ class SkeletonLineTracer(BaseLineTracer):
                 max_len_px=self.floating_stub_max_len_px,
             )
 
-        return filtered
+        # Keep T-junction legs as independently markable runs after all bridge
+        # passes have had a chance to restore genuine drafting gaps.
+        return split_runs_at_t_junctions(
+            filtered,
+            tol_px=max(2.0, 2.0 * dpi / 350.0),
+            min_piece_px=max(6.0, 6.0 * dpi / 350.0),
+        )
