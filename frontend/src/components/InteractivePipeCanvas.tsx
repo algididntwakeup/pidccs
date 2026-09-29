@@ -19,7 +19,7 @@ import {
   Eye,
   EyeOff,
 } from 'lucide-react';
-import { PipeRun, PipingID } from '@/types/schema';
+import { ManualGroup, PipeRun, PipingID } from '@/types/schema';
 import { useCanvasOverlay, applyMouseNav } from '@/hooks/useCanvasOverlay';
 
 // Liang-Barsky/Cohen-Sutherland style test: does segment (x0,y0)-(x1,y1) intersect an
@@ -62,7 +62,35 @@ export const QUICK_COLORS = [
   { name: 'Merah (Corrosion)', hex: '#EF4444' },
   { name: 'Kuning (Hazard)', hex: '#F59E0B' },
   { name: 'Ungu (Spec Break)', hex: '#8B5CF6' },
+  { name: 'Biru Muda', hex: '#0EA5E9' },
+  { name: 'Teal', hex: '#14B8A6' },
+  { name: 'Pink', hex: '#EC4899' },
+  { name: 'Lime', hex: '#84CC16' },
+  { name: 'Indigo', hex: '#6366F1' },
+  { name: 'Slate', hex: '#64748B' },
 ];
+
+function runMidpoint(points: [number, number][]) {
+  const segments = points.slice(1).map((point, index) => ({
+    from: points[index],
+    to: point,
+    length: Math.hypot(point[0] - points[index][0], point[1] - points[index][1]),
+  }));
+  const total = segments.reduce((sum, segment) => sum + segment.length, 0);
+  if (total <= 0) return points[0];
+  let remaining = total / 2;
+  for (const segment of segments) {
+    if (remaining <= segment.length) {
+      const ratio = segment.length === 0 ? 0 : remaining / segment.length;
+      return [
+        segment.from[0] + (segment.to[0] - segment.from[0]) * ratio,
+        segment.from[1] + (segment.to[1] - segment.from[1]) * ratio,
+      ] as [number, number];
+    }
+    remaining -= segment.length;
+  }
+  return points[points.length - 1];
+}
 
 interface InteractivePipeCanvasProps {
   viewer: any;
@@ -70,6 +98,8 @@ interface InteractivePipeCanvasProps {
   width: number;
   height: number;
   runs: PipeRun[];
+  manualGroups: ManualGroup[];
+  onUpdateGroupStamp: (groupId: string, position: { x: number; y: number }) => Promise<void>;
   pipingIds: PipingID[];
   showOverlay: boolean;
   opacity: number;
@@ -102,6 +132,8 @@ export default function InteractivePipeCanvas({
   width,
   height,
   runs,
+  manualGroups,
+  onUpdateGroupStamp,
   pipingIds,
   showOverlay,
   opacity,
@@ -126,6 +158,16 @@ export default function InteractivePipeCanvas({
 }: InteractivePipeCanvasProps) {
   const [showDetectedLines, setShowDetectedLines] = useState(true);
   const [hoveredRunIdx, setHoveredRunIdx] = useState<number | null>(null);
+  const [stampDrag, setStampDrag] = useState<{
+    groupId: string;
+    startX: number;
+    startY: number;
+    pointerOffsetX: number;
+    pointerOffsetY: number;
+    x: number;
+    y: number;
+    moved: boolean;
+  } | null>(null);
   const [splitPreview, setSplitPreview] = useState<{ x: number; y: number } | null>(null);
   const [customColor, setCustomColor] = useState('#2563EB');
   const [splitting, setSplitting] = useState(false);
@@ -1000,6 +1042,113 @@ export default function InteractivePipeCanvas({
     );
   };
 
+  const renderGroupStamp = (group: ManualGroup) => {
+    const kind = group.kind || 'circuit';
+    const members = runs.filter((run) => run.marked === true && run.points?.length >= 2 && (
+      kind === 'system'
+        ? run.system_group_id === group.id || (!run.system_group_id && run.group_id === group.id)
+        : run.circuit_group_id === group.id || (!run.circuit_group_id && run.group_id === group.id)
+    ));
+    if (members.length === 0) return null;
+
+    const longest = members.reduce((best, run) => {
+      const length = run.points.slice(1).reduce((sum, point, idx) =>
+        sum + Math.hypot(point[0] - run.points[idx][0], point[1] - run.points[idx][1]), 0);
+      const bestLength = best.points.slice(1).reduce((sum, point, idx) =>
+        sum + Math.hypot(point[0] - best.points[idx][0], point[1] - best.points[idx][1]), 0);
+      return length > bestLength ? run : best;
+    });
+    const midpoint = runMidpoint(longest.points);
+    const boxWidth = Math.max(82, (group.name || '').length * 10 + 14);
+    const defaultPosition = {
+      x: Math.max(0, Math.min(width - boxWidth, midpoint[0] - boxWidth / 2)),
+      y: Math.max(0, Math.min(height - 30, midpoint[1] - 50)),
+    };
+    const position = stampDrag?.groupId === group.id
+      ? { x: stampDrag.x, y: stampDrag.y }
+      : group.stampPosition || defaultPosition;
+    const isDragging = stampDrag?.groupId === group.id;
+
+    return (
+      <g
+        key={`stamp-${group.id}`}
+        data-group-stamp={group.id}
+        style={{ pointerEvents: 'all', cursor: isDragging ? 'grabbing' : 'grab', touchAction: 'none' }}
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const pointer = getImageCoordinates(e);
+          if (!pointer) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          setStampDrag({
+            groupId: group.id,
+            startX: position.x,
+            startY: position.y,
+            pointerOffsetX: pointer.x - position.x,
+            pointerOffsetY: pointer.y - position.y,
+            x: position.x,
+            y: position.y,
+            moved: false,
+          });
+        }}
+        onPointerMove={(e) => {
+          if (stampDrag?.groupId !== group.id) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const pointer = getImageCoordinates(e);
+          if (!pointer) return;
+          const x = Math.max(0, Math.min(width - boxWidth, pointer.x - stampDrag.pointerOffsetX));
+          const y = Math.max(0, Math.min(height - 30, pointer.y - stampDrag.pointerOffsetY));
+          setStampDrag({
+            ...stampDrag,
+            x,
+            y,
+            moved: stampDrag.moved || Math.hypot(x - stampDrag.startX, y - stampDrag.startY) > 2,
+          });
+        }}
+        onPointerUp={(e) => {
+          if (stampDrag?.groupId !== group.id) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const pointer = getImageCoordinates(e);
+          const x = pointer
+            ? Math.max(0, Math.min(width - boxWidth, pointer.x - stampDrag.pointerOffsetX))
+            : stampDrag.x;
+          const y = pointer
+            ? Math.max(0, Math.min(height - 30, pointer.y - stampDrag.pointerOffsetY))
+            : stampDrag.y;
+          if (stampDrag.moved) {
+            void onUpdateGroupStamp(group.id, { x: Math.round(x), y: Math.round(y) });
+          }
+          setStampDrag(null);
+        }}
+        onPointerCancel={() => setStampDrag(null)}
+      >
+        <rect
+          x={position.x}
+          y={position.y}
+          width={boxWidth}
+          height={30}
+          rx={2}
+          fill="#FFFFFF"
+          fillOpacity={0.88}
+          stroke={group.color || '#2563EB'}
+          strokeWidth={2}
+        />
+        <text
+          x={position.x + 7}
+          y={position.y + 21}
+          fill={group.color || '#2563EB'}
+          fontSize={17}
+          fontWeight="600"
+          style={{ pointerEvents: 'none', userSelect: 'none' }}
+        >
+          {group.name}
+        </text>
+      </g>
+    );
+  };
+
   return (
     <>
       {/* 1. Interactive SVG Overlay inside OpenSeadragon Canvas */}
@@ -1134,6 +1283,9 @@ export default function InteractivePipeCanvas({
                 </g>
               );
             })}
+
+            {/* Draggable corrosion group stamps sit above the pipe and selection layers. */}
+            {manualGroups.map(renderGroupStamp)}
 
             {/* Snap Guide Line during vertex dragging */}
             {snapGuide && (

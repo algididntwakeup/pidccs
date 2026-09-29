@@ -117,6 +117,7 @@ export interface ManualGroup {
   name: string;
   color: string;
   kind: 'system' | 'circuit';
+  stampPosition?: { x: number; y: number };
 }
 
 export interface CircuitProvenance {

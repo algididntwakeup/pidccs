@@ -48,12 +48,22 @@ class OffPageConnector(BaseModel):
     )
 
 
+class GroupStampPosition(BaseModel):
+    """Stamp anchor in source drawing pixel coordinates."""
+    x: float
+    y: float
+
+
 class ManualGroup(BaseModel):
     """Grup marking manual engineer (HITL): nama + warna untuk sekumpulan run."""
     id: str = Field(..., description="Unique group identifier")
     name: str = Field(..., description="Engineer-facing group name (dipakai sebagai stempel export)")
     color: str = Field(default="#F59E0B", description="Hex color applied to member runs")
     kind: Literal["system", "circuit"] = Field(default="circuit", description="Jenis grup corrosion manual")
+    stampPosition: Optional[GroupStampPosition] = Field(
+        default=None,
+        description="Top-left stamp position in source drawing pixels",
+    )
 
 class DigitizationResult(BaseModel):
     image_path: str = Field(default="", description="Path or reference identifier of base drawing")

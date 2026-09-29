@@ -37,7 +37,7 @@ import {
   Zap,
   Sparkles,
 } from 'lucide-react';
-import InteractivePipeCanvas from '@/components/InteractivePipeCanvas';
+import InteractivePipeCanvas, { QUICK_COLORS } from '@/components/InteractivePipeCanvas';
 import {
   ProjectResponse,
   SheetResponse,
@@ -83,6 +83,67 @@ const JOB_POLL_MS = 3000;
 const JOB_POLL_MAX_TICKS = 200;   // ~10 menit, sama seperti batas lama
 const JOB_STALL_MS = 60000;       // tidak ada progres sama sekali => worker tidak jalan
 const EMPTY_RUN_INDEX_SET: Set<number> = new Set();
+
+function colorFromHue(hue: number): string {
+  const saturation = 0.68;
+  const lightness = 0.46;
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const section = hue / 60;
+  const x = chroma * (1 - Math.abs((section % 2) - 1));
+  const [r, g, b] = section < 1 ? [chroma, x, 0]
+    : section < 2 ? [x, chroma, 0]
+    : section < 3 ? [0, chroma, x]
+    : section < 4 ? [0, x, chroma]
+    : section < 5 ? [x, 0, chroma]
+    : [chroma, 0, x];
+  const m = lightness - chroma / 2;
+  return `#${[r, g, b].map((channel) => Math.round((channel + m) * 255)
+    .toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+}
+
+function nextGroupColor(groups: ManualGroup[]): string {
+  const used = new Set(groups.map((group) => (group.color || '').toUpperCase()));
+  const paletteColor = QUICK_COLORS.find((color) => !used.has(color.hex.toUpperCase()));
+  if (paletteColor) return paletteColor.hex;
+  for (let hue = 0; hue < 360; hue += 1) {
+    const color = colorFromHue(hue);
+    if (!used.has(color)) return color;
+  }
+  return '#2563EB';
+}
+
+function initialStampPosition(
+  runs: PipeRun[],
+  stampName: string,
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number } | undefined {
+  const validRuns = runs.filter((run) => run.points?.length >= 2);
+  if (validRuns.length === 0) return undefined;
+  const lengthOf = (run: PipeRun) => run.points.slice(1).reduce((sum, point, index) =>
+    sum + Math.hypot(point[0] - run.points[index][0], point[1] - run.points[index][1]), 0);
+  const longest = validRuns.reduce((best, run) => lengthOf(run) > lengthOf(best) ? run : best);
+  const totalLength = lengthOf(longest);
+  let remaining = totalLength / 2;
+  let midpoint = longest.points[0];
+  for (let i = 1; i < longest.points.length; i += 1) {
+    const from = longest.points[i - 1];
+    const to = longest.points[i];
+    const segmentLength = Math.hypot(to[0] - from[0], to[1] - from[1]);
+    if (remaining <= segmentLength) {
+      const ratio = segmentLength ? remaining / segmentLength : 0;
+      midpoint = [from[0] + (to[0] - from[0]) * ratio, from[1] + (to[1] - from[1]) * ratio];
+      break;
+    }
+    remaining -= segmentLength;
+    midpoint = to;
+  }
+  const width = Math.max(82, stampName.length * 10 + 14);
+  return {
+    x: Math.max(0, Math.min(imageWidth - width, midpoint[0] - width / 2)),
+    y: Math.max(0, Math.min(imageHeight - 30, midpoint[1] - 50)),
+  };
+}
 
 export default function ProjectWorkspace() {
   const params = useParams();
@@ -144,7 +205,6 @@ export default function ProjectWorkspace() {
   const [splitMode, setSplitMode] = useState<boolean>(false);
   const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand'>('pan');
   const [newGroupName, setNewGroupName] = useState('');
-  const [newGroupColor, setNewGroupColor] = useState('#F59E0B');
   const [traceOpacity, setTraceOpacity] = useState<number>(0.85);
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
@@ -1354,7 +1414,7 @@ export default function ProjectWorkspace() {
     const group: ManualGroup = {
       id: `grp-${Date.now().toString(36)}`,
       name,
-      color: newGroupColor,
+      color: nextGroupColor(result.manual_groups || []),
       kind,
     };
     await persistGroups({
@@ -1363,7 +1423,7 @@ export default function ProjectWorkspace() {
     });
     setNewGroupName('');
     showToast(`${kind === 'system' ? 'Corrosion System' : 'Corrosion Circuit'} "${name}" dibuat`, 2500);
-  }, [result, activeSheet, newGroupName, newGroupColor, persistGroups, showToast]);
+  }, [result, activeSheet, newGroupName, persistGroups, showToast]);
 
   const handleAssignToGroup = useCallback(
     async (group: ManualGroup) => {
@@ -1382,6 +1442,22 @@ export default function ProjectWorkspace() {
           ? { ...r, system_group_id: group.id, color: group.color }
           : { ...r, circuit_group_id: group.id, group_id: group.id, color: group.color };
       });
+      const groupRuns = nextRuns.filter((run) => run.marked === true && (
+        kind === 'system'
+          ? run.system_group_id === group.id || (!run.system_group_id && run.group_id === group.id)
+          : run.circuit_group_id === group.id || (!run.circuit_group_id && run.group_id === group.id)
+      ));
+      const stampPosition = group.stampPosition || initialStampPosition(
+        groupRuns,
+        group.name,
+        result.w || activeSheet.width || 3000,
+        result.h || activeSheet.height || 2000,
+      );
+      const nextGroups = (result.manual_groups || []).map((item) =>
+        item.id === group.id && !item.stampPosition && stampPosition
+          ? { ...item, stampPosition }
+          : item
+      );
       pushHistory(
         `Assign pipa ke ${kind === 'system' ? 'system' : 'circuit'} ${group.name}`,
         result.runs,
@@ -1389,10 +1465,43 @@ export default function ProjectWorkspace() {
         result.piping_ids,
         result.piping_ids
       );
-      await persistGroups({ ...result, runs: nextRuns });
+      await persistGroups({ ...result, runs: nextRuns, manual_groups: nextGroups });
       showToast(`${selectedMarked.size} pipa ditandai ke ${group.name}`, 2500);
     },
     [result, activeSheet, selectedRunIndices, persistGroups, pushHistory, showToast]
+  );
+
+  const handleUpdateGroupStamp = useCallback(
+    async (groupId: string, stampPosition: { x: number; y: number }) => {
+      if (!result || !activeSheet) return;
+      const manualGroups = (result.manual_groups || []).map((group) =>
+        group.id === groupId ? { ...group, stampPosition } : group
+      );
+      const updated = { ...result, manual_groups: manualGroups };
+      setResult(updated);
+      await persistGroups(updated);
+    },
+    [result, activeSheet, persistGroups]
+  );
+
+  const handleUpdateGroupColor = useCallback(
+    async (group: ManualGroup, color: string) => {
+      if (!result || !activeSheet) return;
+      const manualGroups = (result.manual_groups || []).map((item) =>
+        item.id === group.id ? { ...item, color } : item
+      );
+      const kind = group.kind || 'circuit';
+      const runs = result.runs.map((run) => {
+        const isMember = kind === 'system'
+          ? run.system_group_id === group.id || (!run.system_group_id && run.group_id === group.id)
+          : run.circuit_group_id === group.id || (!run.circuit_group_id && run.group_id === group.id);
+        return isMember ? { ...run, color } : run;
+      });
+      const updated = { ...result, manual_groups: manualGroups, runs };
+      setResult(updated);
+      await persistGroups(updated);
+    },
+    [result, activeSheet, persistGroups]
   );
 
   const handleDeleteGroup = useCallback(
@@ -1823,6 +1932,8 @@ export default function ProjectWorkspace() {
               width={result.w || activeSheet.width || 3000}
               height={result.h || activeSheet.height || 2000}
               runs={result.runs || []}
+              manualGroups={result.manual_groups || []}
+              onUpdateGroupStamp={handleUpdateGroupStamp}
               pipingIds={result.piping_ids || []}
               showOverlay={showOverlay}
               opacity={traceOpacity}
@@ -2765,9 +2876,12 @@ export default function ProjectWorkspace() {
                       <div key={g.id} className="bg-white border border-slate-200 rounded-lg p-2 space-y-1.5">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center space-x-2 min-w-0">
-                            <span
-                              className="w-3.5 h-3.5 rounded shadow-sm shrink-0"
-                              style={{ backgroundColor: g.color }}
+                            <input
+                              type="color"
+                              value={g.color || '#2563EB'}
+                              onChange={(e) => void handleUpdateGroupColor(g, e.target.value)}
+                              className="w-5 h-5 rounded border border-slate-300 cursor-pointer shrink-0"
+                              title={`Edit warna grup ${g.name}`}
                             />
                             <span className="font-bold text-slate-900 text-sm truncate">{g.name}</span>
                           </div>
@@ -2806,13 +2920,6 @@ export default function ProjectWorkspace() {
                       onChange={(e) => setNewGroupName(e.target.value)}
                       placeholder="Nama system/circuit, mis. CC-01"
                       className="flex-1 min-w-0 px-2 py-1 border border-slate-300 rounded text-xs text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
-                    />
-                    <input
-                      type="color"
-                      value={newGroupColor}
-                      onChange={(e) => setNewGroupColor(e.target.value)}
-                      className="w-8 h-7 rounded border border-slate-300 cursor-pointer shrink-0"
-                      title="Warna grup"
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-2">

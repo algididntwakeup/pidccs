@@ -10,6 +10,8 @@
 
 > **Manual corrosion groups and AI synchronization:** System and circuit groups created by the engineer are stored in `result_json.manual_groups`; their run membership, color, and kind are persisted alongside the line geometry. AI enrichment reads the saved result, detects page-wide OCR text and symbols, but associates OCR names only with `marked: true` runs. Unmarked geometry and its existing piping IDs remain unchanged. The canvas can hide/show unmarked detected lines without changing their stored data. Automatic AI systemization suggestions are not applied by this sync action.
 
+> **Group colors and stamps:** New manual groups take the first unused color from the canvas quick-color palette, with additional distinct hues when that palette is exhausted. The engineer can still change a group's color; assigned runs are updated with it. Groups with marked runs render a draggable name stamp in the SVG overlay. Its `stampPosition` is saved on the group in source drawing pixel coordinates, initialized above the midpoint of its longest member run, and persisted through the existing whole-result `PATCH /result`. PDF export draws a bordered text box at that saved position in the group color. Groups from older results without a saved position retain the legacy longest-run stamp placement. The default PDF legend remains disabled.
+
 > **For future contributors and agents:** Read [`AGENTS.md`](../AGENTS.md) for the current product constraints and verification checklist before changing this pipeline. Treat diagrams below as architecture context; the active sheet page, detection service, and orchestrator are the source of truth for runtime behavior.
 
 ---

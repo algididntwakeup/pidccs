@@ -152,3 +152,41 @@ def test_legend_absent_by_default_and_present_when_requested(tmp_path):
     titles2 = [a.info.get("title") for a in doc[0].annots()]
     assert titles2.count("Legend") >= 1, "include_legend=True tidak menghasilkan legend"
     doc.close()
+
+
+def test_saved_stamp_position_exports_bordered_text_at_position(tmp_path):
+    source = tmp_path / "position-source.pdf"
+    document = pymupdf.open()
+    document.new_page(width=400, height=400)
+    document.save(source)
+    document.close()
+
+    output = tmp_path / "position-stamp.pdf"
+    result = {
+        "image_path": str(source),
+        "dpi": 72,
+        "w": 400,
+        "h": 400,
+        "runs": [{"points": [[40, 60], [300, 60]], "group_id": "g1", "color": "#2563EB"}],
+        "piping_ids": [],
+        "manual_groups": [{
+            "id": "g1",
+            "name": "STAMP-01",
+            "color": "#10B981",
+            "kind": "circuit",
+            "stampPosition": {"x": 60, "y": 80},
+        }],
+    }
+
+    assert export_marked_pdf(result, str(output), mode="engineer") == 1
+
+    exported = pymupdf.open(output)
+    page = exported[0]
+    stamp_rect = next(drawing["rect"] for drawing in page.get_drawings()
+                      if drawing["type"] == "fs")
+    assert abs(stamp_rect.x0 - 60) < 0.1
+    assert abs(stamp_rect.y0 - 80) < 0.1
+    assert "STAMP-01" in page.get_text()
+    assert stamp_rect.width >= 68 and stamp_rect.height == 24
+    assert stamp_rect in page.rect
+    exported.close()

@@ -169,9 +169,10 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
     Subject annotation diisi nama system/circuit supaya panel Comments Acrobat bisa
     sort-by-subject per corrosion system. Return jumlah annotation garis.
 
-    `include_legend=False` (default): TANPA kotak legenda di pojok kertas — sebagai
-    gantinya tiap grup manual engineer diberi STEMPEL FreeText berisi nama grup di titik
-    tengah run terpanjangnya (`_stamp_groups`). Set `True` untuk perilaku lama.
+    `include_legend=False` (default): TANPA kotak legenda di pojok kertas. Grup manual
+    memakai kotak teks pada `stampPosition` tersimpan; hasil lama tanpa posisi tetap
+    memakai penempatan otomatis di run terpanjang (`_stamp_groups`). Set `True` untuk
+    perilaku legenda lama.
     """
     import fitz
 
@@ -219,7 +220,7 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
             hex_label = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
             subj = f"Piping Run {hex_label}"
             groups.append((rgb, subj, r_idxs,
-                           f"Piping Run {hex_label} ({len(r_idxs)} segmen)", None))
+                           f"Piping Run {hex_label} ({len(r_idxs)} segmen)", None, None))
     elif mode == "system":
         title = "CORROSION SYSTEM (per process fluid)"
         for si, s in enumerate(systemize(result), 1):
@@ -228,7 +229,7 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
             if not idxs:
                 continue
             groups.append((s["color"], subj, idxs,
-                           f"{s['fluid']}  ({s['n_pipes']} pipa)", s["fluid"]))
+                           f"{s['fluid']}  ({s['n_pipes']} pipa)", s["fluid"], None))
     else:
         title = "CORROSION CIRCUIT (per fluid + material)"
         for s in circuitize(result):
@@ -239,7 +240,7 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
                     continue
                 groups.append((c["color"], subj, idxs,
                                f"{c['code']}  {s['fluid']}-{c['material'] or '-'}  "
-                               f"({len(c['pid_idxs'])} line)", c["code"]))
+                               f"({len(c['pid_idxs'])} line)", c["code"], None))
 
     # Grup manual engineer: warna & nama grup menang atas mode; nama dipakai sebagai
     # stempel di kanvas PDF (pengganti legend).
@@ -251,7 +252,8 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
         if not idxs:
             continue
         name = g.get("name") or f"Group {gi + 1}"
-        groups.append((_hex_to_rgb(g.get("color") or "#F59E0B"), name, idxs, name, name))
+        groups.append((_hex_to_rgb(g.get("color") or "#F59E0B"), name, idxs, name, name,
+                       g.get("stampPosition") or g.get("stamp_position")))
 
     # --- halaman dasar: PDF asli (vektor, tetap tajam) atau gambar dibungkus PDF ---
     from .pipeline import rotate_bgr, unrotate_matrix
@@ -286,7 +288,7 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
     opacity = 0.8
 
     n_annot = 0
-    for rgb, subj, run_idxs, _txt, _stamp in groups:
+    for rgb, subj, run_idxs, _txt, _stamp, _position in groups:
         col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
         for ri in run_idxs:
             run = runs[ri]
@@ -399,17 +401,33 @@ def _run_midpoint(run):
     return float(pts[-1][0]), float(pts[-1][1])
 
 def _stamp_groups(page, groups, runs, to_pdf, dpi):
-    """Stempel nama grup (FreeText annotation) di titik tengah run TERPANJANG tiap grup.
+    """Gambar stempel grup di posisi tersimpan atau di titik tengah run terpanjang.
 
     Pengganti kotak legend: label menempel pada pipa yang di-marking, jadi engineer
-    langsung tahu grup mana milik garis mana tanpa mencari ke pojok kertas. Stempel
-    TIDAK dihitung sebagai annotation garis (return `export_marked_pdf` tetap jumlah
-    PolyLine). Warna teks = warna grup; tanpa fill/border (gaya sama dgn legend).
+    langsung tahu grup mana milik garis mana tanpa mencari ke pojok kertas. Posisi yang
+    disimpan dirender sebagai kotak teks PDF; posisi lama dirender sebagai FreeText.
+    Stempel TIDAK dihitung sebagai annotation garis (return tetap jumlah PolyLine).
     """
     import fitz
 
-    for rgb, _subj, run_idxs, _txt, stamp in groups:
+    for rgb, _subj, run_idxs, _txt, stamp, stamp_position in groups:
         if not stamp or not run_idxs:
+            continue
+        col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+        if stamp_position and stamp_position.get("x") is not None and stamp_position.get("y") is not None:
+            # Persisted position uses source drawing pixels and identifies the stamp
+            # box's top-left. Bake a bordered text box into PDF content so export
+            # matches the engineer's canvas placement exactly.
+            anchor = fitz.Point(float(stamp_position["x"]), float(stamp_position["y"])) * to_pdf
+            width = max(68.0, 6.2 * len(stamp) + 12.0)
+            height = 24.0
+            rect = fitz.Rect(anchor.x, anchor.y, anchor.x + width, anchor.y + height)
+            page.draw_rect(rect, color=col, fill=(1, 1, 1), fill_opacity=0.88,
+                           width=1.0, overlay=True)
+            text_rect = fitz.Rect(rect.x0 + 4.0, rect.y0 + 2.0,
+                                  rect.x1 - 4.0, rect.y1 - 2.0)
+            page.insert_textbox(text_rect, stamp, fontsize=9.5, fontname="helv",
+                                color=col, align=fitz.TEXT_ALIGN_LEFT, overlay=True)
             continue
         longest = max((runs[ri] for ri in run_idxs if 0 <= ri < len(runs)),
                       key=_run_len, default=None)
@@ -432,7 +450,6 @@ def _stamp_groups(page, groups, runs, to_pdf, dpi):
         q2 = fitz.Point(dp.x + 6.2 * len(stamp) + 6.0, dp.y) * page.derotation_matrix
         rect = fitz.Rect(min(q1.x, q2.x), min(q1.y, q2.y),
                          max(q1.x, q2.x), max(q1.y, q2.y))
-        col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
         a = page.add_freetext_annot(rect, stamp, fontsize=9.5, text_color=col,
                                     fill_color=None, rotate=page.rotation,
                                     align=fitz.TEXT_ALIGN_LEFT)
