@@ -38,7 +38,16 @@ async def override_get_db():
         yield session
 
 
-app.dependency_overrides[get_db] = override_get_db
+@pytest.fixture(autouse=True)
+def _decoupled_db_override():
+    """Pasang DB override hanya selama test di modul ini, dengan teardown yang bersih."""
+    previous = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
+    yield
+    if previous is None:
+        app.dependency_overrides.pop(get_db, None)
+    else:
+        app.dependency_overrides[get_db] = previous
 
 
 def test_orchestrator_lines_only_mode():

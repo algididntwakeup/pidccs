@@ -1,3 +1,14 @@
+import os
+import sys
+import numpy as np
+
+_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_ROOT_DIR = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
 from pidcorr.detect import predict_tiled
 
 
@@ -27,17 +38,6 @@ def test_predict_tiled_reports_each_tile():
     assert tiles == 4
     assert progress == ["YOLO tile 1/4", "YOLO tile 2/4", "YOLO tile 3/4", "YOLO tile 4/4"]
 
-
-import os
-import sys
-import numpy as np
-
-_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_ROOT_DIR = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
-if _BACKEND_DIR not in sys.path:
-    sys.path.insert(0, _BACKEND_DIR)
-if _ROOT_DIR not in sys.path:
-    sys.path.insert(0, _ROOT_DIR)
 
 from pidcorr.interfaces.perception import (
     BaseSymbolDetector,
