@@ -28,6 +28,10 @@ from pidcorr.implementations.vector_tracer import (
     tier_of_pdf,
     _closed,
     _straight_segments,
+    _cubic_points,
+    drawing_curve_paths,
+    _pdfplumber_curve_paths,
+    _segs_to_runs,
     _merge_intervals,
     _to_runs,
     _drop_glyph_noise,
@@ -35,6 +39,8 @@ from pidcorr.implementations.vector_tracer import (
     _table_regions,
     _drop_inside_regions,
     _inline_symbol_regions,
+    _transverse_symbol_regions,
+    _split_curve_at_regions,
     _split_runs_at_symbol_regions,
 )
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
@@ -110,6 +116,113 @@ def test_to_runs_classifies_axes():
     segs = [((0, 0), (100, 0)), ((0, 0), (0, 100)), ((0, 0), (60, 60))]
     runs, axes = _to_runs(segs)
     assert "h" in axes and "v" in axes and "d" in axes
+def test_cubic_curve_samples_preserve_point_order_and_rotation():
+    class Rotation:
+        a, b, c, d, e, f = 0, 1, -1, 0, 200, 0
+
+    drawing = {
+        "color": (0, 0, 0),
+        "items": [("c", (10, 20), (30, 0), (50, 0), (70, 20))],
+    }
+    paths = drawing_curve_paths(drawing, rotation_matrix=Rotation())
+    assert len(paths) == 1 and len(paths[0]) == 9
+    assert paths[0][0] == (180.0, 10.0)
+    assert paths[0][-1] == (180.0, 70.0)
+    assert _cubic_points((10, 20), (30, 0), (50, 0), (70, 20))[0] == (10, 20)
+
+
+def test_pdfplumber_curve_helper_keeps_only_open_ordered_strokes():
+    objects = [
+        {"stroke": True, "fill": None, "pts": [(1, 2), (5, 3), (8, 7), (10, 12)]},
+        {"stroke": True, "fill": None, "pts": [(0, 0), (10, 0), (10, 10), (0, 0)]},
+        {"stroke": True, "fill": (0, 0, 0), "pts": [(1, 1), (4, 2), (7, 4), (10, 8)]},
+    ]
+    assert _pdfplumber_curve_paths(objects) == [[(1.0, 2.0), (5.0, 3.0), (8.0, 7.0), (10.0, 12.0)]]
+
+
+def test_segs_to_runs_preserves_curve_points_and_splits_symbol_regions():
+    curve = [(30, 80), (42, 70), (54, 64), (66, 61), (78, 62), (90, 66), (102, 75)]
+    straight = [((20, 60), (180, 60)), ((100, 52), (100, 68))]
+    runs = _segs_to_runs(straight, 300, 300, dpi=72, rot=90,
+                         keep_furniture=True, curve_paths=[curve])
+    curved = [run for run in runs if run.axis == "poly"]
+    assert len(curved) == 1
+    assert len(curved[0].points) >= 4
+    assert curved[0].points[0] == (219, 30)
+    assert curved[0].points[-1] == (224, 102)
+    straight_runs = [run for run in runs if run.axis in ("h", "v")]
+    assert len(straight_runs) == 2
+    assert all(not (min(p[0] for p in run.points) < 95 < max(p[0] for p in run.points))
+               for run in straight_runs)
+
+
+def test_transverse_bar_gaps_split_diagonal_and_horizontal_lines():
+    straight = [((20, 60), (180, 60)), ((100, 52), (100, 68))]
+    regions = _transverse_symbol_regions(straight)
+    assert len(regions) == 1
+    pieces = _split_curve_at_regions(((20, 60), (100, 60), (180, 60)), regions)
+    assert len(pieces) == 2
+
+
+def test_straight_line_and_sharp_elbow_behavior_remains_unchanged():
+    assert _straight_segments([(0, 0), (10, 0), (20, 0), (20, 10)]) == [
+        ((0.0, 0.0), (20.0, 0.0)), ((20.0, 0.0), (20.0, 10.0))]
+    assert _segs_to_runs([((20, 30), (100, 30))], 200, 200,
+                         dpi=72, keep_furniture=True)[0].axis == "h"
+
+
+def test_generated_pdf_extraction_keeps_bezier_and_valve_gap(tmp_path):
+    import pymupdf
+
+    path = tmp_path / "curves-and-valve.pdf"
+    document = pymupdf.open()
+    page = document.new_page(width=300, height=300)
+    page.draw_line((20, 80), (180, 80), color=(0, 0, 0), width=1)
+    page.draw_line((95, 75), (100, 80), color=(0, 0, 0), width=1)
+    page.draw_line((100, 80), (105, 75), color=(0, 0, 0), width=1)
+    page.draw_bezier((20, 180), (60, 130), (120, 130), (180, 180),
+                     color=(0, 0, 0), width=1)
+    document.save(path)
+    document.close()
+
+    runs = extract_vector_runs(str(path), dpi=72, engine="pymupdf", keep_furniture=True)
+    curved = [run for run in runs if run.axis == "poly"]
+    assert curved and len(curved[0].points) >= 4
+    assert any(run.axis == "h" and max(p[0] for p in run.points) < 95 for run in runs)
+    assert any(run.axis == "h" and min(p[0] for p in run.points) > 105 for run in runs)
+    assert all(not (run.axis == "h" and min(p[0] for p in run.points) < 95
+                    and max(p[0] for p in run.points) > 105) for run in runs)
+
+
+def test_segs_to_runs_splits_compact_v_into_distinct_runs():
+    segments = [
+        ((20.0, 80.0), (180.0, 80.0)),
+        ((95.0, 80.0), (100.0, 85.0)),
+        ((100.0, 85.0), (105.0, 80.0)),
+    ]
+    runs = _segs_to_runs(segments, 300, 300, dpi=72, keep_furniture=True)
+    horizontal = [run for run in runs if run.axis == "h"]
+    assert len(horizontal) == 2
+    assert any(max(point[0] for point in run.points) <= 94 for run in horizontal)
+    assert any(min(point[0] for point in run.points) >= 106 for run in horizontal)
+
+
+@pytest.mark.parametrize("symbol", ["v", "bar"])
+def test_segs_to_runs_splits_preserved_curve_at_symbol(symbol):
+    curve = [(20, 82), (50, 72), (80, 66), (100, 65), (120, 66), (150, 72), (180, 82)]
+    if symbol == "v":
+        segments = [((95, 65), (100, 70)), ((100, 70), (105, 65))]
+        box = (93.5, 63.5, 106.5, 71.5)
+    else:
+        segments = [((20, 65), (180, 65)), ((100, 57), (100, 73))]
+        box = (98.5, 55.5, 101.5, 74.5)
+    runs = _segs_to_runs(segments, 300, 300, dpi=72,
+                         keep_furniture=True, curve_paths=[curve])
+    pieces = [run for run in runs if run.axis == "poly"]
+    assert len(pieces) == 2
+    assert all(not any(box[0] + 1.0 < x < box[2] - 1.0
+                       and box[1] + 1.0 < y < box[3] - 1.0
+                       for x, y in run.points) for run in pieces)
 
 
 def test_inline_valve_geometry_leaves_a_gap_in_collinear_vector_pipe():

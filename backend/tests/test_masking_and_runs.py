@@ -8,7 +8,9 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from pidcorr.lines import PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts, suppress_floating_stubs, suppress_low_ink_diagonals
+from pidcorr.lines import (PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts,
+                           suppress_floating_stubs, suppress_low_ink_diagonals,
+                           suppress_revision_clouds, suppress_diagonal_artifacts)
 from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer, _graph_segments, _morphological_skeleton
 
 
@@ -247,3 +249,82 @@ def test_suppress_furniture_geometry_drops_furniture_contained_run():
     furniture = [(2600, 1200, 3250, 2300)]
     out = suppress_furniture_geometry([grid], page_wh=(W, H), furniture=furniture, dpi=350)
     assert grid not in out, "table grid line inside furniture must be dropped"
+def test_skeleton_tracer_preserves_gradual_arc_through_geometric_filters():
+    image = np.full((350, 350, 3), 255, dtype=np.uint8)
+    centerline = [(x, int(60 + 0.001 * (x - 30) ** 2)) for x in range(30, 271, 2)]
+    cv2.polylines(image, [np.asarray(centerline, dtype=np.int32)], False, (0, 0, 0), 2)
+    runs = SkeletonLineTracer(min_length_px=5, suppress_text_artifacts=False,
+                              suppress_floating_stubs=False).trace(
+                                  image, dpi=350, detections=[], furniture=[])
+    arcs = [run for run in suppress_diagonal_artifacts(
+        suppress_revision_clouds(runs), page_wh=(1200, 1200)) if len(run.points) >= 4]
+    assert arcs
+    for point in centerline:
+        assert min(_distance_to_run(point, run.points) for run in arcs) <= 4.0
+
+
+def _distance_to_run(point, points):
+    px, py = point
+    distances = []
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        dx, dy = x1 - x0, y1 - y0
+        squared = dx * dx + dy * dy
+        ratio = 0.0 if not squared else max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / squared))
+        distances.append(np.hypot(px - x0 - ratio * dx, py - y0 - ratio * dy))
+    return min(distances)
+
+
+def _trace_symbol_case(symbol):
+    image = np.full((1000, 1000, 3), 255, dtype=np.uint8)
+    cv2.line(image, (80, 500), (920, 500), (0, 0, 0), 2)
+    if symbol == "v":
+        cv2.line(image, (460, 500), (500, 460), (0, 0, 0), 2)
+        cv2.line(image, (500, 460), (540, 500), (0, 0, 0), 2)
+        symbol_box = (455, 455, 545, 505)
+    elif symbol == "bar":
+        cv2.line(image, (500, 460), (500, 540), (0, 0, 0), 2)
+        symbol_box = (490, 455, 510, 545)
+    else:
+        cv2.rectangle(image, (490, 470), (510, 530), (0, 0, 0), -1)
+        symbol_box = (490, 470, 510, 530)
+    runs = SkeletonLineTracer(min_length_px=5, suppress_text_artifacts=False,
+                              suppress_floating_stubs=False).trace(
+                                  image, dpi=350, detections=[], furniture=[])
+    return runs, symbol_box
+
+
+@pytest.mark.parametrize("symbol", ["v", "bar", "thick"])
+def test_raster_inline_symbols_leave_two_sides_and_no_symbol_interior(symbol):
+    runs, (x1, y1, x2, y2) = _trace_symbol_case(symbol)
+    assert any(max(p[0] for p in run.points) <= x1 for run in runs)
+    assert any(min(p[0] for p in run.points) >= x2 for run in runs)
+    assert all(not any(x1 <= x <= x2 and y1 <= y <= y2 for x, y in run.points)
+               for run in runs)
+
+
+@pytest.mark.parametrize("crossing", [False, True])
+def test_raster_t_and_full_crossover_keep_through_and_branch(crossing):
+    image = np.full((1000, 1000, 3), 255, dtype=np.uint8)
+    cv2.line(image, (200, 500), (800, 500), (0, 0, 0), 2)
+    cv2.line(image, (500, 250 if crossing else 350), (500, 750 if crossing else 500), (0, 0, 0), 2)
+    runs = SkeletonLineTracer(min_length_px=5, suppress_text_artifacts=False,
+                              suppress_floating_stubs=False).trace(
+                                  image, dpi=72, detections=[], furniture=[])
+    assert any(min(p[0] for p in run.points) <= 205 and max(p[0] for p in run.points) >= 795
+               for run in runs)
+    assert any(min(p[1] for p in run.points) <= (255 if crossing else 355)
+               and max(p[1] for p in run.points) >= (745 if crossing else 495)
+               for run in runs if run.axis == "v")
+def test_smooth_open_curve_survives_both_geometric_post_filters():
+    curve = PipeRun(
+        points=[(100, 500), (200, 470), (300, 450), (400, 445),
+                (500, 450), (600, 470), (700, 500)],
+        axis="poly",
+    )
+    loop = PipeRun(points=[(100, 100), (200, 50), (250, 150), (200, 220), (100, 100)], axis="poly")
+    long_diagonal = PipeRun(points=[(100, 200), (600, 700)], axis="d")
+    assert curve in suppress_revision_clouds([curve, loop])
+    assert loop not in suppress_revision_clouds([curve, loop])
+    filtered = suppress_diagonal_artifacts([curve, long_diagonal], page_wh=(1200, 1200))
+    assert curve in filtered
+    assert long_diagonal not in filtered

@@ -503,6 +503,101 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
     return runs
 
 
+def _mask_compact_thickenings(clean_binary: np.ndarray, dpi: int) -> np.ndarray:
+    """Mask compact distance-transform thickenings on continuing skeleton paths."""
+    if not clean_binary.any():
+        return clean_binary
+    scale = dpi / 72.0
+    skeleton = _morphological_skeleton(clean_binary) > 0
+    if not skeleton.any():
+        return clean_binary
+    height, width_px = skeleton.shape
+    padded = cv2.copyMakeBorder(clean_binary, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    background = padded.copy()
+    cv2.floodFill(background, None, (0, 0), 128)
+    width_source = np.where(background[1:-1, 1:-1] == 128, 0, 255).astype(np.uint8)
+    stroke_width = cv2.distanceTransform((width_source > 0).astype(np.uint8), cv2.DIST_L2, 5) * 2.0
+    baseline = max(1.0, float(np.median(stroke_width[skeleton])))
+    width_candidates = (stroke_width >= 2.5 * baseline).astype(np.uint8) * 255
+    grouping = max(3, int(round(6.0 * scale)) | 1)
+    grouped = cv2.dilate(
+        width_candidates,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grouping, grouping)),
+    )
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(grouped, 8)
+    output = clean_binary.copy()
+    max_length, max_box = 24.0 * scale, 30.0 * scale
+    pad = max(1, int(math.ceil(1.5 * scale)))
+    search_radius = int(math.ceil(40.0 * scale))
+    for label in range(1, count):
+        group_x, group_y, group_w, group_h, _ = stats[label]
+        region = width_candidates[group_y:group_y + group_h, group_x:group_x + group_w]
+        cy, cx = np.where(region > 0)
+        cx, cy = cx + group_x, cy + group_y
+        if len(cx) < 2:
+            continue
+        bx, by = int(cx.min()), int(cy.min())
+        bw, bh = int(cx.max() - bx + 1), int(cy.max() - by + 1)
+        if bw > max_box or bh > max_box:
+            continue
+        center_x, center_y = float(np.mean(cx)), float(np.mean(cy))
+        search_x1, search_x2 = max(0, int(center_x) - search_radius), min(width_px, int(center_x) + search_radius + 1)
+        search_y1, search_y2 = max(0, int(center_y) - search_radius), min(height, int(center_y) + search_radius + 1)
+        local_y, local_x = np.where(skeleton[search_y1:search_y2, search_x1:search_x2])
+        path_x, path_y = local_x + search_x1, local_y + search_y1
+        local_width = stroke_width[path_y, path_x]
+        found_path = False
+        for angle in np.linspace(0.0, math.pi, 36, endpoint=False):
+            tx, ty = math.cos(float(angle)), math.sin(float(angle))
+            group_projection = (cx - center_x) * tx + (cy - center_y) * ty
+            low, high = float(group_projection.min()), float(group_projection.max())
+            if high - low > max_length:
+                continue
+            projections = (path_x - center_x) * tx + (path_y - center_y) * ty
+            lateral = np.abs((path_x - center_x) * -ty + (path_y - center_y) * tx)
+            continuation = 8.0 * scale
+            path_pad = max(2, int(round(3.0 * scale)))
+            before = np.any((projections <= low - continuation)
+                            & (projections >= low - continuation - path_pad)
+                            & (lateral <= path_pad))
+            after = np.any((projections >= high + continuation)
+                           & (projections <= high + continuation + path_pad)
+                           & (lateral <= path_pad))
+            if not before or not after:
+                continue
+            side_samples = [[], []]
+            extent = max(abs(low), abs(high))
+            for offset in (8.0, 12.0, 16.0):
+                delta = (extent + offset) * scale
+                for side, sign in enumerate((-1.0, 1.0)):
+                    target_x = center_x + sign * tx * delta
+                    target_y = center_y + sign * ty * delta
+                    near = np.hypot(path_x - target_x, path_y - target_y) <= path_pad
+                    if near.any():
+                        indices = np.flatnonzero(near)
+                        nearest = indices[np.argmin((path_x[near] - target_x) ** 2
+                                                    + (path_y[near] - target_y) ** 2)]
+                        side_samples[side].append(float(local_width[nearest]))
+            if not side_samples[0] or not side_samples[1]:
+                continue
+            body_width = float(np.max(stroke_width[cy, cx]))
+            if body_width < 2.5 * max(float(np.median(side_samples[0])), 1.0) or \
+                    body_width < 2.5 * max(float(np.median(side_samples[1])), 1.0):
+                continue
+            found_path = True
+            break
+        if not found_path:
+            continue
+        x1 = max(0, int(bx) - pad)
+        y1 = max(0, int(by) - pad)
+        x2 = min(width_px, int(bx + bw) + pad + 1)
+        y2 = min(height, int(by + bh) + pad + 1)
+        if x2 - x1 > max_box or y2 - y1 > max_box:
+            continue
+        output[y1:y2, x1:x2] = 0
+    return output
+
+
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
@@ -600,35 +695,48 @@ class SkeletonLineTracer(BaseLineTracer):
                     interpolation=cv2.INTER_NEAREST,
                 )
             hough_dpi = dpi * hough_scale
-            hough = cv2.HoughLinesP(
-                hough_image,
-                rho=1,
-                theta=np.pi / 180,
+            hough_candidates = cv2.HoughLinesP(
+                hough_image, rho=1, theta=np.pi / 180,
                 threshold=max(8, int(2.0 * hough_dpi / 72.0)),
                 minLineLength=max(6, int(4.0 * hough_dpi / 72.0)),
                 maxLineGap=max(2, int(1.0 * hough_dpi / 72.0)),
             )
-            if hough is not None:
-                from .vector_tracer import _inline_symbol_regions
+            hough_lines = cv2.morphologyEx(
+                hough_image, cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (max(6, int(6.0 * hough_dpi / 72.0)), 1)),
+            )
+            hough_residual = cv2.subtract(hough_image, hough_lines)
+            hough_symbols = cv2.HoughLinesP(
+                hough_residual, rho=1, theta=np.pi / 180,
+                threshold=max(3, int(1.5 * hough_dpi / 72.0)),
+                minLineLength=max(3, int(2.0 * hough_dpi / 72.0)),
+                maxLineGap=max(2, int(1.0 * hough_dpi / 72.0)),
+            )
+            if hough_candidates is not None:
+                hough = list(hough_candidates) + ([] if hough_symbols is None else list(hough_symbols))
+            else:
+                hough = [] if hough_symbols is None else list(hough_symbols)
+            if hough:
+                from .vector_tracer import _inline_symbol_regions, _transverse_symbol_regions
 
                 scale_to_pt = 72.0 / hough_dpi
-                scale_to_original_px = 72.0 / dpi
+                scale_to_original_px = dpi / 72.0
                 hough_segments = []
                 for line in hough:
                     coords = np.asarray(line).reshape(-1)
                     if coords.size < 4:
                         continue
-                    hough_segments.append(
-                        (
-                            (float(coords[0]) * scale_to_pt, float(coords[1]) * scale_to_pt),
-                            (float(coords[2]) * scale_to_pt, float(coords[3]) * scale_to_pt),
-                        )
-                    )
-                for _orientation, sx1, sy1, sx2, sy2 in _inline_symbol_regions(hough_segments):
-                    x1 = max(0, int(math.floor(sx1 / scale_to_original_px)))
-                    y1 = max(0, int(math.floor(sy1 / scale_to_original_px)))
-                    x2 = min(W, int(math.ceil(sx2 / scale_to_original_px)))
-                    y2 = min(H, int(math.ceil(sy2 / scale_to_original_px)))
+                    hough_segments.append((
+                        (float(coords[0]) * scale_to_pt, float(coords[1]) * scale_to_pt),
+                        (float(coords[2]) * scale_to_pt, float(coords[3]) * scale_to_pt),
+                    ))
+                regions = _inline_symbol_regions(hough_segments, tol_pt=3.0)
+                regions.extend(_transverse_symbol_regions(hough_segments))
+                for _orientation, sx1, sy1, sx2, sy2 in regions:
+                    x1 = max(0, int(math.floor(sx1 * scale_to_original_px)))
+                    y1 = max(0, int(math.floor(sy1 * scale_to_original_px)))
+                    x2 = min(W, int(math.ceil(sx2 * scale_to_original_px)) + 2)
+                    y2 = min(H, int(math.ceil(sy2 * scale_to_original_px)) + 2)
                     if x2 > x1 and y2 > y1:
                         clean_binary[y1:y2, x1:x2] = 0
         except (cv2.error, ImportError, ValueError):
@@ -717,6 +825,7 @@ class SkeletonLineTracer(BaseLineTracer):
             )
 
         # 4. Skeletonize
+        clean_binary = _mask_compact_thickenings(clean_binary, dpi)
         skel = _morphological_skeleton(clean_binary)
 
         # 5. Extract graph segments and resolve junctions (crossovers vs T-junctions)

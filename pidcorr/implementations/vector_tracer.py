@@ -127,23 +127,19 @@ def _xy(v: Any) -> Point:
 
 
 def drawing_segments(drawing: Dict[str, Any],
-                     rotation_matrix: Any = None) -> List[Segment]:
-    """Ruas lurus dari satu drawing PyMuPDF (`items`: l/c/re/qu).
+                     rotation_matrix: Any = None,
+                     include_curves: bool = True) -> List[Segment]:
+    """Straight candidate segments from a PyMuPDF drawing.
 
-    Mendukung dua varian API: `get_drawings()` (Point/Rect) dan
-    `get_cdrawings()` (tuple mentah) — keduanya dipakai modul ini.
-
-    PENTING: `page.get_cdrawings()` mengembalikan koordinat dalam ruang
-    UN-ROTATED (mediabox), sedangkan pipeline merender halaman dengan /Rotate
-    diterapkan. `rotation_matrix` halaman dikenakan ke setiap titik agar hasil
-    vektor berada di ruang tampilan yang sama dengan citra raster.
+    Cubics remain flattened by default for compatibility. Extraction can omit
+    them and consume :func:`drawing_curve_paths` without losing path identity.
     """
     out: List[Segment] = []
     for it in (drawing.get("items") or []):
         kind = it[0]
         if kind == "l":
             out.append((_xy(it[1]), _xy(it[2])))
-        elif kind == "c":
+        elif kind == "c" and include_curves:
             out.extend(_straight_segments(_cubic_points(
                 _xy(it[1]), _xy(it[2]), _xy(it[3]), _xy(it[4]),
             )))
@@ -159,9 +155,9 @@ def drawing_segments(drawing: Dict[str, Any],
             ])
         elif kind == "qu":
             q = it[1]
-            if hasattr(q, "ul"):                    # Quad object (get_drawings)
+            if hasattr(q, "ul"):
                 quad = [q.ul, q.ur, q.lr, q.ll, q.ul]
-            else:                                   # tuple 4 titik (get_cdrawings)
+            else:
                 quad = [q[0], q[1], q[2], q[3], q[0]]
             out.extend(_straight_segments([_xy(p) for p in quad]))
 
@@ -169,6 +165,27 @@ def drawing_segments(drawing: Dict[str, Any],
         out = [(_apply_matrix(a, rotation_matrix), _apply_matrix(b, rotation_matrix))
                for a, b in out]
     return out
+
+
+def drawing_curve_paths(drawing: Dict[str, Any], rotation_matrix: Any = None) -> List[List[Point]]:
+    """Return open cubic subpaths as ordered samples, preserving path identity."""
+    if not _is_stroked(drawing) or _is_closed_path(drawing):
+        return []
+    paths: List[List[Point]] = []
+    current = None
+    for item in drawing.get("items") or []:
+        if item[0] != "c":
+            current = None
+            continue
+        points = _cubic_points(_xy(item[1]), _xy(item[2]), _xy(item[3]), _xy(item[4]))
+        if current is not None and _dist(current[-1], points[0]) <= CLOSE_TOL_PT:
+            current.extend(points[1:])
+        else:
+            current = points
+            paths.append(current)
+    if rotation_matrix is not None:
+        paths = [[_apply_matrix(point, rotation_matrix) for point in path] for path in paths]
+    return paths
 
 
 def _apply_matrix(p: Point, m: Any) -> Point:
@@ -279,24 +296,30 @@ def tier_of_pdf(pdf_path: str, page_index: int = 0) -> str:
 def page_segments(page, straight_tol_deg: float = STRAIGHT_TOL_DEG,
                   drawings: Optional[Sequence[Dict[str, Any]]] = None,
                   rotation_matrix: Any = None,
-                  include_closed: bool = False) -> List[Segment]:
-    """Seluruh ruas lurus kandidat pipa dari halaman: path bergaris TERBUKA.
-
-    `rotation_matrix` = `page.rotation_matrix`; `get_cdrawings()` memberi
-    koordinat un-rotated sehingga matriks ini wajib agar sejajar citra render.
-    Path tertutup (bubble instrumen, outline valve, kotak equipment) dilewati
-    kecuali `include_closed=True`.
-    """
+                  include_closed: bool = False,
+                  include_curves: bool = True) -> List[Segment]:
+    """Candidate segments from open stroked paths on a PyMuPDF page."""
     if drawings is None:
         drawings = page.get_cdrawings() or []
     out: List[Segment] = []
-    for d in drawings:
-        if not _is_stroked(d):
+    for drawing in drawings:
+        if not _is_stroked(drawing):
             continue
-        if not include_closed and _is_closed_path(d):
+        if not include_closed and _is_closed_path(drawing):
             continue
-        out.extend(drawing_segments(d, rotation_matrix=rotation_matrix))
+        out.extend(drawing_segments(
+            drawing, rotation_matrix=rotation_matrix, include_curves=include_curves,
+        ))
     return out
+
+
+def page_curve_paths(page, drawings: Optional[Sequence[Dict[str, Any]]] = None,
+                     rotation_matrix: Any = None) -> List[List[Point]]:
+    """Sample each open cubic path separately, preserving page drawing order."""
+    if drawings is None:
+        drawings = page.get_cdrawings() or []
+    return [path for drawing in drawings
+            for path in drawing_curve_paths(drawing, rotation_matrix=rotation_matrix)]
 
 
 def _merge_intervals(items: Iterable[Tuple[float, float, float]],
@@ -482,69 +505,206 @@ def _inline_symbol_regions(segs: Sequence[Segment], tol_pt: float = 1.5):
     return unique
 
 
+def _transverse_symbol_regions(segs: Sequence[Segment]):
+    """Find compact transverse bars crossing the interior of a longer pipe."""
+    short = []
+    for a, b in segs:
+        length = _dist(a, b)
+        if 4.0 <= length <= 24.0:
+            short.append((a, b))
+    candidates = list(short)
+
+    # Merge Hough fragments at nearby, collinear endpoints; spatial hashing
+    # avoids pairing every short drawing stroke with every other stroke.
+    from collections import defaultdict
+    cells = defaultdict(list)
+    merged_pairs = set()
+    cell_size = 8.0
+    for index, (a, b) in enumerate(short):
+        vx, vy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(vx, vy)
+        for point, tip in ((a, b), (b, a)):
+            cx, cy = int(math.floor(point[0] / cell_size)), int(math.floor(point[1] / cell_size))
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    for other, other_point, other_tip in cells[(cx + ox, cy + oy)]:
+                        if other == index or _dist(point, other_point) > cell_size:
+                            continue
+                        ovx, ovy = other_tip[0] - other_point[0], other_tip[1] - other_point[1]
+                        other_length = math.hypot(ovx, ovy)
+                        if other_length <= 1e-9 or abs(vx * ovx + vy * ovy) / (length * other_length) < math.cos(math.radians(3.0)):
+                            continue
+                        offset = abs(vx * (other_point[1] - a[1]) - vy * (other_point[0] - a[0])) / length
+                        if offset > 1.5:
+                            continue
+                        key = tuple(sorted((index, other)))
+                        if key in merged_pairs:
+                            continue
+                        merged_pairs.add(key)
+                        endpoints = (a, b, other_point, other_tip)
+                        candidates.append(max(((p, q) for i, p in enumerate(endpoints)
+                                               for q in endpoints[i + 1:]),
+                                              key=lambda pair: _dist(*pair)))
+            cells[(cx, cy)].append((index, point, tip))
+
+    # Group possible crossing pipes by 10-degree heading bins; each compact bar
+    # then checks only near-perpendicular long segments.
+    pipe_bins = [[] for _ in range(18)]
+    for p0, p1 in segs:
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        length = math.hypot(dx, dy)
+        if length < 8.0:
+            continue
+        heading = math.degrees(math.atan2(dy, dx)) % 180.0
+        pipe_bins[int(heading // 10.0) % 18].append((p0, p1, dx, dy, length))
+
+    regions = []
+    for a, b in candidates:
+        bx, by = b[0] - a[0], b[1] - a[1]
+        bar_length = math.hypot(bx, by)
+        if not 4.0 <= bar_length <= 24.0:
+            continue
+        target = (math.degrees(math.atan2(by, bx)) + 90.0) % 180.0
+        center_bin = int(target // 10.0)
+        checked_bins = {(center_bin + offset) % 18 for offset in (-2, -1, 0, 1, 2)}
+        for bin_id in checked_bins:
+            for p0, p1, dx, dy, pipe_length in pipe_bins[bin_id]:
+                if pipe_length < 2.0 * bar_length:
+                    continue
+                dot = (bx * dx + by * dy) / (bar_length * pipe_length)
+                if abs(dot) > math.sin(math.radians(15.0)):
+                    continue
+                side0 = (dx * (a[1] - p0[1]) - dy * (a[0] - p0[0])) / pipe_length
+                side1 = (dx * (b[1] - p0[1]) - dy * (b[0] - p0[0])) / pipe_length
+                if side0 * side1 >= 0.0 or min(abs(side0), abs(side1)) < 3.0:
+                    continue
+                projection = ((a[0] + b[0]) / 2 - p0[0]) * dx + ((a[1] + b[1]) / 2 - p0[1]) * dy
+                if 0.0 < projection < pipe_length * pipe_length:
+                    regions.append(("both", min(a[0], b[0]) - 1.5, min(a[1], b[1]) - 1.5,
+                                    max(a[0], b[0]) + 1.5, max(a[1], b[1]) + 1.5))
+                    break
+    unique = {}
+    for region in regions:
+        center_x = (region[1] + region[3]) / 2.0
+        center_y = (region[2] + region[4]) / 2.0
+        unique.setdefault((round(center_x / 3.0), round(center_y / 3.0)), region)
+    return list(unique.values())
+
+
+def _curve_is_gradual(points: Sequence[Point]) -> bool:
+    if len(points) < 4 or sum(_dist(a, b) for a, b in zip(points, points[1:])) < 26.0:
+        return False
+    headings = [math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+                for a, b in zip(points, points[1:]) if _dist(a, b) > 1e-9]
+    turns = []
+    for first, second in zip(headings, headings[1:]):
+        turn = (second - first + 180.0) % 360.0 - 180.0
+        if abs(turn) > 25.0:
+            return False
+        turns.append(turn)
+    return sum(abs(turn) for turn in turns) >= 8.0
+
+
+def _clip_segment_to_rect(a: Point, b: Point, rect) -> Optional[Tuple[float, float]]:
+    """Return the parameter interval where a segment lies inside a rectangle."""
+    _, x1, y1, x2, y2 = rect
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    low, high = 0.0, 1.0
+    for p, q in ((-dx, a[0] - x1), (dx, x2 - a[0]),
+                 (-dy, a[1] - y1), (dy, y2 - a[1])):
+        if abs(p) <= 1e-12:
+            if q < 0:
+                return None
+            continue
+        t = q / p
+        if p < 0:
+            low = max(low, t)
+        else:
+            high = min(high, t)
+        if low > high:
+            return None
+    return low, high
+
+
+def _split_curve_at_regions(points: Sequence[Point], regions) -> List[List[Point]]:
+    """Clip an ordered polyline at stop boxes, retaining only exterior pieces."""
+    if len(points) < 2:
+        return []
+    pieces: List[List[Point]] = []
+    current: List[Point] = []
+    for a, b in zip(points, points[1:]):
+        cuts = []
+        for region in regions:
+            clipped = _clip_segment_to_rect(a, b, region)
+            if clipped is not None and clipped[1] > clipped[0] + 1e-9:
+                cuts.append(clipped)
+        cuts.sort()
+        merged = []
+        for low, high in cuts:
+            if merged and low <= merged[-1][1] + 1e-9:
+                merged[-1] = (merged[-1][0], max(high, merged[-1][1]))
+            else:
+                merged.append((low, high))
+        intervals = []
+        cursor = 0.0
+        for low, high in merged:
+            if low > cursor + 1e-9:
+                intervals.append((cursor, low))
+            cursor = max(cursor, high)
+        if cursor < 1.0 - 1e-9:
+            intervals.append((cursor, 1.0))
+        if not merged:
+            intervals = [(0.0, 1.0)]
+        if not intervals:
+            if len(current) >= 2:
+                pieces.append(current)
+            current = []
+            continue
+        for idx, (low, high) in enumerate(intervals):
+            start = (a[0] + (b[0] - a[0]) * low, a[1] + (b[1] - a[1]) * low)
+            end = (a[0] + (b[0] - a[0]) * high, a[1] + (b[1] - a[1]) * high)
+            segment_length = max(_dist(a, b), 1e-9)
+            nudge = 0.75 / segment_length
+            if low > 1e-9:
+                start = (start[0] + (b[0] - a[0]) * nudge,
+                         start[1] + (b[1] - a[1]) * nudge)
+            if high < 1.0 - 1e-9:
+                end = (end[0] - (b[0] - a[0]) * nudge,
+                       end[1] - (b[1] - a[1]) * nudge)
+            if current and _dist(current[-1], start) <= 1e-7:
+                if _dist(current[-1], end) > 1e-9:
+                    current.append(end)
+            else:
+                if len(current) >= 2:
+                    pieces.append(current)
+                current = [start, end]
+            if idx < len(intervals) - 1 or (merged and high < 1.0 - 1e-9):
+                if len(current) >= 2:
+                    pieces.append(current)
+                current = []
+        if merged and (not intervals or intervals[-1][1] < 1.0 - 1e-9):
+            if len(current) >= 2:
+                pieces.append(current)
+            current = []
+    if len(current) >= 2:
+        pieces.append(current)
+    return pieces
+
+
 def _split_runs_at_symbol_regions(runs: Sequence[Segment], axes: Sequence[str], regions):
-    """Keep pipe geometry on both sides of a compact inline valve, leaving a gap."""
+    """Split straight candidates at every intersecting stop rectangle."""
     if not regions:
         return list(runs), list(axes)
     out_runs, out_axes = [], []
     for (a, b), axis in zip(runs, axes):
-        if axis not in ("h", "v"):
-            if any(region[0] in ("h", "v", "both") and min(a[0], b[0]) >= region[1] and max(a[0], b[0]) <= region[3]
-                   and min(a[1], b[1]) >= region[2] and max(a[1], b[1]) <= region[4]
-                   for region in regions):
+        for piece in _split_curve_at_regions((a, b), regions):
+            if sum(_dist(p0, p1) for p0, p1 in zip(piece, piece[1:])) < MIN_RUN_PT:
                 continue
-            out_runs.append((a, b))
-            out_axes.append(axis)
-            continue
-
-        lo, hi = (sorted((a[0], b[0])) if axis == "h" else sorted((a[1], b[1])))
-        cross = (a[1] + b[1]) / 2 if axis == "h" else (a[0] + b[0]) / 2
-        cuts = []
-        for orient, x1, y1, x2, y2 in regions:
-            if orient not in (axis, "both"):
-                continue
-            region_lo, region_hi = (x1, x2) if axis == "h" else (y1, y2)
-            region_cross_lo, region_cross_hi = (y1, y2) if axis == "h" else (x1, x2)
-            if region_cross_lo <= cross <= region_cross_hi and lo < region_hi and hi > region_lo:
-                cuts.append((max(lo, region_lo), min(hi, region_hi)))
-        pieces = []
-        cursor = lo
-        for cut_lo, cut_hi in sorted(cuts):
-            if cut_lo > cursor:
-                pieces.append((cursor, cut_lo))
-            cursor = max(cursor, cut_hi)
-        if cursor < hi:
-            pieces.append((cursor, hi))
-        for p0, p1 in pieces:
-            if p1 - p0 < MIN_RUN_PT:
-                continue
-            if axis == "h":
-                out_runs.append(((p0, cross), (p1, cross)))
-            else:
-                out_runs.append(((cross, p0), (cross, p1)))
+            out_runs.append((piece[0], piece[-1]))
             out_axes.append(axis)
     return out_runs, out_axes
 
 
-def _rotate_symbol_regions(regions, rot: int, W_pt: float, H_pt: float, dpi: int):
-    """Rotate PDF-space symbol boxes with the same transform as traced runs."""
-    rot = int(rot) % 360
-    if not rot or not regions:
-        return list(regions or [])
-    scale = dpi / 72.0
-    W_px, H_px = W_pt * scale, H_pt * scale
-    rotated = []
-    for orientation, x1, y1, x2, y2 in regions:
-        corners = [_rotate_point(x * scale, y * scale, rot, W_px, H_px)
-                   for x, y in ((x1, y1), (x1, y2), (x2, y1), (x2, y2))]
-        rx1 = min(p[0] for p in corners) / scale
-        ry1 = min(p[1] for p in corners) / scale
-        rx2 = max(p[0] for p in corners) / scale
-        ry2 = max(p[1] for p in corners) / scale
-        if orientation != "both" and rot in (90, 270):
-            orientation = "v" if orientation == "h" else "h"
-        rotated.append((orientation, rx1, ry1, rx2, ry2))
-    return rotated
 
 
 def _drop_glyph_noise(runs: Sequence[Segment], axes: Sequence[str],
@@ -730,47 +890,53 @@ def _drop_inside_regions(runs: Sequence[Segment], axes: Sequence[str],
     return keep_runs, keep_axes
 
 
+def _pdfplumber_curve_paths(objects) -> List[List[Point]]:
+    """Return ordered points for open, stroked pdfplumber curves."""
+    paths = []
+    for obj in objects:
+        if obj.get("stroke") is False or obj.get("fill"):
+            continue
+        points = [(float(p[0]), float(p[1])) for p in (obj.get("pts") or [])]
+        if len(points) >= 4 and _dist(points[0], points[-1]) > CLOSE_TOL_PT:
+            paths.append(points)
+    return paths
+
+
 def page_segments_pdfplumber(pdf_path: str, page_index: int = 0,
-                             include_closed: bool = False):
-    """Ruas lurus via pdfplumber (koordinat SUDAH display-space).
-
-    Keunggulan pdfplumber: `/Rotate` halaman diterapkan otomatis, jadi tidak ada
-    risiko lupa `rotation_matrix` seperti pada `page.get_cdrawings()` PyMuPDF.
-    Konsekuensinya lebih lambat (5.8–27 s vs 0.26 s pada lembar referensi) dan
-    waktu parsing-nya tidak stabil antar-run.
-
-    Titik ujung diambil dari `pts` (bukan `x0/y0/x1/y1`) supaya polyline dan
-    kurva terurai benar — memakai sudut bbox untuk path ber-`pts` hanya benar
-    untuk garis lurus tunggal.
-
-    Returns:
-        (segments, (page_width_pt, page_height_pt)) dalam ruang tampilan.
-    """
+                             include_closed: bool = False,
+                             include_curves: bool = True,
+                             return_curve_paths: bool = False):
+    """Extract pdfplumber path segments; optionally preserve curve point lists."""
     import pdfplumber
 
     with pdfplumber.open(pdf_path) as pdf:
         page = pdf.pages[page_index]
         W_pt, H_pt = float(page.width), float(page.height)
-        objects = list(page.lines) + list(page.curves)
+        lines, curves = list(page.lines), list(page.curves)
 
+    curve_paths = _pdfplumber_curve_paths(curves)
     out: List[Segment] = []
-    for obj in objects:
+    for obj in lines:
         if obj.get("stroke") is False:
             continue
         pts = obj.get("pts") or []
         if not pts:
-            x0, y0 = obj.get("x0"), obj.get("y0")
-            x1, y1 = obj.get("x1"), obj.get("y1")
-            if None in (x0, y0, x1, y1):
-                continue
-            pts = [(x0, y0), (x1, y1)]
-        if not include_closed:
-            if obj.get("fill"):
-                continue
-            if len(pts) >= 3 and _dist((float(pts[0][0]), float(pts[0][1])),
-                                       (float(pts[-1][0]), float(pts[-1][1]))) <= CLOSE_TOL_PT:
-                continue
+            pts = [(obj.get("x0"), obj.get("y0")), (obj.get("x1"), obj.get("y1"))]
+        if None in pts[0] or None in pts[-1]:
+            continue
         out.extend(_straight_segments([(float(p[0]), float(p[1])) for p in pts]))
+    for obj in curves:
+        if obj.get("stroke") is False:
+            continue
+        pts = obj.get("pts") or []
+        if not pts or (not include_closed and (obj.get("fill") or (
+                len(pts) >= 3 and _dist(tuple(pts[0]), tuple(pts[-1])) <= CLOSE_TOL_PT))):
+            continue
+        points = [(float(p[0]), float(p[1])) for p in pts]
+        if include_curves or not _curve_is_gradual(points):
+            out.extend(_straight_segments(points))
+    if return_curve_paths:
+        return out, (W_pt, H_pt), curve_paths
     return out, (W_pt, H_pt)
 
 
@@ -817,12 +983,13 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
 
     if engine == "pdfplumber":
         try:
-            segs, (W_pt, H_pt) = page_segments_pdfplumber(pdf_path, page_index)
+            segs, (W_pt, H_pt), curve_paths = page_segments_pdfplumber(
+                pdf_path, page_index, include_curves=False, return_curve_paths=True,
+            )
             if progress:
                 progress(f"vektor: {len(segs)} ruas garis (pdfplumber, display-space)")
-            # pdfplumber sudah display-space; rotasi manual tetap diterapkan bila ada.
             return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress,
-                                 keep_furniture=keep_furniture)
+                                 keep_furniture=keep_furniture, curve_paths=curve_paths)
         except ImportError:
             # Engine opsional: jangan gagalkan tracing hanya karena paketnya tidak
             # terpasang — jatuh ke PyMuPDF, bukan ke jalur raster.
@@ -854,11 +1021,13 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
         # halaman wajib diterapkan agar sejajar citra render (tanpa ini, ink
         # coverage jatuh 0.99 -> 0.07 pada lembar ber-/Rotate).
         segs = page_segments(page, drawings=drawings,
-                             rotation_matrix=page.rotation_matrix)
+                             rotation_matrix=page.rotation_matrix, include_curves=False)
+        curve_paths = page_curve_paths(page, drawings=drawings,
+                                       rotation_matrix=page.rotation_matrix)
         if progress:
             progress(f"vektor: {len(segs)} ruas garis dari PDF")
         return _segs_to_runs(segs, W_pt, H_pt, dpi=dpi, rot=rot, progress=progress,
-                             keep_furniture=keep_furniture)
+                             keep_furniture=keep_furniture, curve_paths=curve_paths)
     finally:
         if own_doc is not None:
             try:
@@ -870,49 +1039,69 @@ def extract_vector_runs(pdf_path: str, dpi: int = 350, page_index: int = 0,
 def _segs_to_runs(segs: Sequence[Segment], W_pt: float, H_pt: float, *,
                   dpi: int = 350, rot: int = 0,
                   progress: Optional[Callable[[str], None]] = None,
-                  keep_furniture: bool = False) -> List[PipeRun]:
-    """Ruas lurus (pt, display-space) -> PipeRun (px) — merge, filter, konversi."""
-    runs_pt, axes = _to_runs(segs, min_seg_pt=GLYPH_MAX_SEG_PT)
-    symbol_regions = _rotate_symbol_regions(_inline_symbol_regions(segs), rot, W_pt, H_pt, dpi)
+                  keep_furniture: bool = False,
+                  curve_paths: Optional[Sequence[Sequence[Point]]] = None) -> List[PipeRun]:
+    """Convert straight segments and preserved gradual curves from PDF points."""
+    straight_segs = list(segs)
+    accepted_curves = []
+    for path in curve_paths or ():
+        points = [(float(p[0]), float(p[1])) for p in path]
+        if _curve_is_gradual(points):
+            accepted_curves.append(points)
+        else:
+            straight_segs.extend(_straight_segments(points))
+    runs_pt, axes = _to_runs(straight_segs, min_seg_pt=GLYPH_MAX_SEG_PT)
+    symbol_regions = _inline_symbol_regions(straight_segs)
+    symbol_regions.extend(_transverse_symbol_regions(straight_segs))
     runs_pt, axes = _split_runs_at_symbol_regions(runs_pt, axes, symbol_regions)
-    # Buang sisa glyph/dash yang tidak tersambung ke jaringan mana pun.
+    curve_runs = []
+    for curve in accepted_curves:
+        for piece in _split_curve_at_regions(curve, symbol_regions):
+            if sum(_dist(a, b) for a, b in zip(piece, piece[1:])) >= MIN_RUN_PT:
+                curve_runs.append(piece)
     runs_pt, axes = _drop_glyph_noise(runs_pt, axes)
-    # Buang baris/kolom TABEL (title block, TAG list, NOTES) berdasarkan
-    # struktur geometrisnya — jalur raster sudah mem-blackout area ini lebih
-    # dulu, sedangkan jalur vektor harus mengenalinya dari pola garis.
     table_regions = [] if keep_furniture else _table_regions(runs_pt, axes)
     if table_regions:
         runs_pt, axes = _drop_inside_regions(runs_pt, axes, table_regions)
+        curve_runs = [curve for curve in curve_runs if not any(
+            min(p[0] for p in curve) >= x1 and max(p[0] for p in curve) <= x2
+            and min(p[1] for p in curve) >= y1 and max(p[1] for p in curve) <= y2
+            for x1, y1, x2, y2 in table_regions)]
     if progress:
-        progress(f"vektor: {len(runs_pt)} run setelah merge, filter glyph "
+        progress(f"vektor: {len(runs_pt) + len(curve_runs)} run setelah merge, filter glyph "
                  f"& {len(table_regions)} region tabel")
 
     scale = dpi / 72.0
     out: List[PipeRun] = []
     for (a, b), axis in zip(runs_pt, axes):
-        (x0, y0), (x1, y1) = a, b
+        x0, y0 = a
+        x1, y1 = b
         length_pt = _dist(a, b)
-        # Filter Fase 1 (rasio, jadi sah dalam satuan pt): buang border frame,
-        # title block, tabel NOTES, dan tick koordinat.
         if not keep_furniture and is_furniture_geometry(x0, y0, x1, y1, length_pt, W_pt, H_pt):
             continue
         px0, py0 = _rotate_point(x0 * scale, y0 * scale, rot, W_pt * scale, H_pt * scale)
         px1, py1 = _rotate_point(x1 * scale, y1 * scale, rot, W_pt * scale, H_pt * scale)
         pts = [(int(round(px0)), int(round(py0))), (int(round(px1)), int(round(py1)))]
-        if pts[0] == pts[1]:
+        if pts[0] != pts[1]:
+            out.append(PipeRun(points=pts, axis=axis, color="#2563EB", manual=False))
+    for curve in curve_runs:
+        length_pt = sum(_dist(a, b) for a, b in zip(curve, curve[1:]))
+        x0, y0 = curve[0]
+        x1, y1 = curve[-1]
+        if not keep_furniture and is_furniture_geometry(x0, y0, x1, y1, length_pt, W_pt, H_pt):
             continue
-        out.append(PipeRun(points=pts, axis=axis, color="#2563EB", manual=False))
-
-    # Post-filter Fase 1 (band 15.1% simetris + guard header/label/deteksi):
-    # di ruang PDF belum ada deteksi YOLO maupun bbox OCR, jadi guard-nya tidak
-    # aktif — yang bekerja adalah band simetris, aturan tepi, dan aturan span.
-    # Ini yang membuang tabel TAG/NOTES di puncak lembar dan title block bawah.
+        points = []
+        for x, y in curve:
+            px, py = _rotate_point(x * scale, y * scale, rot, W_pt * scale, H_pt * scale)
+            point = (int(round(px)), int(round(py)))
+            if not points or points[-1] != point:
+                points.append(point)
+        if len(points) >= 2:
+            out.append(PipeRun(points=points, axis="poly", color="#2563EB", manual=False))
     if not keep_furniture:
         out = suppress_furniture_geometry(out, page_wh=(W_pt * scale, H_pt * scale), dpi=dpi)
     return split_runs_at_t_junctions(
-        out,
-        tol_px=max(2.0, 1.5 * scale),
-        min_piece_px=max(6.0, 3.0 * scale),
+        out, tol_px=max(2.0, 1.5 * scale), min_piece_px=max(6.0, 3.0 * scale),
     )
 
 

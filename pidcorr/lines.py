@@ -1228,6 +1228,31 @@ def suppress_furniture_geometry(segs, page_wh, detections=None, furniture=None,
     return out
 
 
+def _is_smooth_curve(points):
+    """True for an open, gradual polyline rather than a loop or scallop."""
+    if len(points) < 4:
+        return False
+    chord = ((points[-1][0] - points[0][0]) ** 2 + (points[-1][1] - points[0][1]) ** 2) ** 0.5
+    if chord <= 1e-9:
+        return False
+    lengths = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+               for a, b in zip(points, points[1:])]
+    total = sum(lengths)
+    if total / chord > 2.8:
+        return False
+    headings = [math.atan2(b[1] - a[1], b[0] - a[0])
+                for a, b in zip(points, points[1:]) if ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) > 1e-12]
+    turns = []
+    for first, second in zip(headings, headings[1:]):
+        turn = (second - first + math.pi) % (2.0 * math.pi) - math.pi
+        degrees = math.degrees(turn)
+        if abs(degrees) > 35.0:
+            return False
+        if abs(degrees) >= 3.0:
+            turns.append(1 if degrees > 0 else -1)
+    return sum(a != b for a, b in zip(turns, turns[1:])) <= 1
+
+
 def suppress_revision_clouds(segs):
     """Buang polyline yang membentuk awan revisi (scalloped revision clouds) atau loop tertutup.
     Pipa proses adalah garis ortogonal (lurus / siku), sedangkan awan revisi berbentuk lengkungan bergelombang."""
@@ -1258,7 +1283,8 @@ def suppress_revision_clouds(segs):
             dx, dy = abs(xb - xa), abs(yb - ya)
             if dx > 3 and dy > 3 and min(dx, dy) / max(dx, dy) > 0.35:
                 non_ortho += 1
-        if len(pts) >= 7 and (non_ortho / (len(pts) - 1)) > 0.50:
+        smooth_curve = _is_smooth_curve(pts)
+        if len(pts) >= 7 and (non_ortho / (len(pts) - 1)) > 0.50 and not smooth_curve:
             continue
 
         out.append(s)
@@ -1292,12 +1318,26 @@ def suppress_diagonal_artifacts(segs, page_wh, max_diag_len=300):
         pts = s.points
         if len(pts) < 2:
             continue
+        smooth_curve = _is_smooth_curve(pts)
+        if smooth_curve:
+            violates_rule = any(
+                abs(p1[0] - p0[0]) > 50 and abs(p1[1] - p0[1]) > 50
+                and min(abs(p1[0] - p0[0]), abs(p1[1] - p0[1]))
+                / max(abs(p1[0] - p0[0]), abs(p1[1] - p0[1])) > 0.3
+                and (((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2) ** 0.5 > max_len
+                     or abs(p1[0] - p0[0]) > 0.08 * W or abs(p1[1] - p0[1]) > 0.08 * H
+                     or min(p0[1], p1[1]) >= 0.85 * H
+                     or (min(p0[0], p1[0]) <= 0.05 * W and max(p0[0], p1[0]) >= 0.20 * W))
+                for p0, p1 in zip(pts, pts[1:]))
+            if not violates_rule:
+                out.append(s)
+                continue
         keep_run = True
         for p0, p1 in zip(pts, pts[1:]):
             dx = abs(p1[0] - p0[0])
             dy = abs(p1[1] - p0[1])
             if not (dx > 50 and dy > 50 and min(dx, dy) / max(dx, dy) > 0.3):
-                continue                                # segmen ini ortogonal -> aman
+                continue
             seg_len = ((p1[0] - p0[0]) ** 2 + (p1[1] - p0[1]) ** 2) ** 0.5
             if seg_len > max_len or dx > 0.08 * W or dy > 0.08 * H:
                 keep_run = False
