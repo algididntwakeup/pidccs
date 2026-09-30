@@ -36,6 +36,7 @@ import {
   Square,
   Zap,
   Sparkles,
+  Plus,
 } from 'lucide-react';
 import InteractivePipeCanvas, { QUICK_COLORS } from '@/components/InteractivePipeCanvas';
 import {
@@ -205,6 +206,7 @@ export default function ProjectWorkspace() {
   const [splitMode, setSplitMode] = useState<boolean>(false);
   const [traceTool, setTraceTool] = useState<'pan' | 'rescan' | 'pen' | 'multiselect' | 'wand'>('pan');
   const [newGroupName, setNewGroupName] = useState('');
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
   const [traceOpacity, setTraceOpacity] = useState<number>(1);
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
@@ -1404,6 +1406,103 @@ export default function ProjectWorkspace() {
     [projectId, activeSheet, showToast]
   );
 
+  const handleAddNewGroup = useCallback(async () => {
+    if (!result || !activeSheet) return;
+    const existing = result.manual_groups || [];
+    let num = existing.length + 1;
+    let name = `Group ${num}`;
+    while (existing.some((g) => g.name.trim().toLowerCase() === name.toLowerCase())) {
+      num += 1;
+      name = `Group ${num}`;
+    }
+    const color = nextGroupColor(existing);
+    const newGroup: ManualGroup = {
+      id: `grp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      name,
+      color,
+      kind: 'circuit',
+    };
+    const nextGroups = [...existing, newGroup];
+    const updated = {
+      ...result,
+      manual_groups: nextGroups,
+    };
+    setResult(updated);
+    setActiveGroupId(newGroup.id);
+    await persistGroups(updated);
+    showToast(`Grup "${name}" berhasil dibuat & aktif (Mode Kuas)`, 2500);
+  }, [result, activeSheet, persistGroups, showToast]);
+
+  const handleRenameGroup = useCallback(
+    async (group: ManualGroup, newName: string) => {
+      if (!result || !activeSheet) return;
+      const nextGroups = (result.manual_groups || []).map((g) =>
+        g.id === group.id ? { ...g, name: newName } : g
+      );
+      const updated = { ...result, manual_groups: nextGroups };
+      setResult(updated);
+      await persistGroups(updated);
+    },
+    [result, activeSheet, persistGroups]
+  );
+
+  const handleAssignRunToActiveGroup = useCallback(
+    async (runIdx: number) => {
+      if (!result || !activeSheet || !activeGroupId) return;
+      const group = (result.manual_groups || []).find((g) => g.id === activeGroupId);
+      if (!group) return;
+
+      const targetRun = result.runs[runIdx];
+      if (!targetRun) return;
+
+      const kind = group.kind || 'circuit';
+      const updatedRun: PipeRun = {
+        ...targetRun,
+        marked: true,
+        color: group.color,
+        group_id: group.id,
+        circuit_group_id: kind === 'circuit' ? group.id : targetRun.circuit_group_id,
+        system_group_id: kind === 'system' ? group.id : targetRun.system_group_id,
+      };
+
+      const nextRuns = result.runs.map((r, i) => (i === runIdx ? updatedRun : r));
+
+      // Calculate initial stamp position if not yet set
+      const groupRuns = nextRuns.filter(
+        (run) =>
+          run.marked !== false &&
+          (kind === 'system'
+            ? run.system_group_id === group.id || (!run.system_group_id && run.group_id === group.id)
+            : run.circuit_group_id === group.id || (!run.circuit_group_id && run.group_id === group.id))
+      );
+      const stampPosition =
+        group.stampPosition ||
+        initialStampPosition(
+          groupRuns,
+          group.name,
+          result.w || activeSheet.width || 3000,
+          result.h || activeSheet.height || 2000
+        );
+      const nextGroups = (result.manual_groups || []).map((item) =>
+        item.id === group.id && !item.stampPosition && stampPosition
+          ? { ...item, stampPosition }
+          : item
+      );
+
+      pushHistory(
+        `Assign pipa ke ${group.name}`,
+        result.runs,
+        nextRuns,
+        result.piping_ids,
+        result.piping_ids
+      );
+      const updatedResult = { ...result, runs: nextRuns, manual_groups: nextGroups };
+      setResult(updatedResult);
+      await persistGroups(updatedResult);
+    },
+    [result, activeSheet, activeGroupId, persistGroups, pushHistory]
+  );
+
   const handleAddGroup = useCallback(async (kind: 'system' | 'circuit') => {
     if (!result || !activeSheet) return;
     const name = newGroupName.trim();
@@ -1508,6 +1607,9 @@ export default function ProjectWorkspace() {
     async (group: ManualGroup) => {
       if (!result || !activeSheet) return;
       if (!window.confirm(`Hapus grup "${group.name}"? Pipa anggotanya tetap ada.`)) return;
+      if (activeGroupId === group.id) {
+        setActiveGroupId(null);
+      }
       const nextGroups = (result.manual_groups || []).filter((g) => g.id !== group.id);
       // JSON.stringify drops `undefined` keys, so the run simply loses its group_id.
       const kind = group.kind || 'circuit';
@@ -1521,7 +1623,7 @@ export default function ProjectWorkspace() {
       await persistGroups({ ...result, runs: nextRuns, manual_groups: nextGroups });
       showToast(`Grup "${group.name}" dihapus`, 2500);
     },
-    [result, activeSheet, persistGroups, showToast]
+    [result, activeSheet, activeGroupId, persistGroups, showToast]
   );
 
   const handleFocusFlag = (f: Record<string, any>) => {
@@ -1800,7 +1902,7 @@ export default function ProjectWorkspace() {
             }`}
             title="Isi nama pipa yang sudah di-marking dengan bantuan OCR dan YOLO"
           >
-            <Sparkles className="w-3.5 h-3.5 fill-current text-amber-300" />
+            
             <span className="hidden sm:inline">Sync with AI / Auto-Fill</span>
             <span className="sm:hidden">Sync AI</span>
           </button>
@@ -1933,6 +2035,9 @@ export default function ProjectWorkspace() {
               height={result.h || activeSheet.height || 2000}
               runs={result.runs || []}
               manualGroups={result.manual_groups || []}
+              activeGroupId={activeGroupId}
+              onAssignRunToActiveGroup={handleAssignRunToActiveGroup}
+              onSelectGroup={(id) => setActiveGroupId((prev) => (prev === id ? null : id))}
               onUpdateGroupStamp={handleUpdateGroupStamp}
               pipingIds={result.piping_ids || []}
               showOverlay={showOverlay}
@@ -2164,6 +2269,135 @@ export default function ProjectWorkspace() {
               </span>
             ) : null}
           </div>
+
+          {/* EXPLICIT CORROSION GROUPS SECTION (FORCE RENDERED) */}
+          {result && (
+            <div className="border-b border-amber-200/90 bg-gradient-to-b from-amber-50/90 via-amber-50/50 to-white p-3 space-y-2 shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-1.5">
+                  <Layers className="w-4 h-4 text-amber-700" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-900">
+                    Corrosion Groups
+                  </span>
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-200/90 text-amber-800">
+                    {(result.manual_groups || []).length}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddNewGroup}
+                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white rounded-md text-xs font-bold flex items-center space-x-1 shadow-sm transition"
+                  title="Tambah grup korosi baru"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add New Group</span>
+                </button>
+              </div>
+
+              {/* Active Group Indicator / Helper */}
+              {activeGroupId ? (
+                <div className="flex items-center justify-between bg-indigo-50 border border-indigo-200 px-2.5 py-1.5 rounded-lg text-xs shadow-xs">
+                  <div className="flex items-center space-x-2 min-w-0">
+                    <span
+                      className="w-3 h-3 rounded-full shrink-0 ring-2 ring-indigo-400/50 shadow-sm"
+                      style={{
+                        backgroundColor:
+                          result.manual_groups?.find((g) => g.id === activeGroupId)?.color || '#2563EB',
+                      }}
+                    />
+                    <span className="text-indigo-900 truncate font-semibold">
+                      Kuas Aktif: <b>{result.manual_groups?.find((g) => g.id === activeGroupId)?.name || 'Grup'}</b>
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveGroupId(null)}
+                    className="text-[10px] font-bold text-indigo-700 hover:text-indigo-950 px-1.5 py-0.5 rounded bg-indigo-100/80 hover:bg-indigo-200 transition shrink-0 ml-1"
+                  >
+                    Nonaktifkan
+                  </button>
+                </div>
+              ) : (
+                <p className="text-[11px] text-amber-800/80 italic">
+                  Klik grup di bawah untuk aktifkan <b>Mode Kuas</b>, lalu klik garis di kanvas.
+                </p>
+              )}
+
+              {/* Groups List */}
+              <div className="space-y-1.5 max-h-44 overflow-y-auto pr-0.5">
+                {(result.manual_groups || []).length === 0 ? (
+                  <div className="text-center py-2.5 px-2 bg-white/80 rounded border border-dashed border-amber-300 text-xs text-slate-500">
+                    Belum ada grup. Klik tombol <b>&quot;Add New Group&quot;</b> di atas untuk membuat grup baru.
+                  </div>
+                ) : (
+                  (result.manual_groups || []).map((g) => {
+                    const isActive = activeGroupId === g.id;
+                    const memberRuns = (result.runs || []).filter(
+                      (r) =>
+                        r.marked !== false &&
+                        (r.group_id === g.id || r.circuit_group_id === g.id || r.system_group_id === g.id)
+                    );
+                    const memberCount = memberRuns.length;
+
+                    return (
+                      <div
+                        key={g.id}
+                        onClick={() => setActiveGroupId((prev) => (prev === g.id ? null : g.id))}
+                        className={`p-2 rounded-lg border transition cursor-pointer select-none ${
+                          isActive
+                            ? 'bg-white border-indigo-600 shadow ring-2 ring-indigo-400'
+                            : 'bg-white border-slate-200 hover:border-amber-400 hover:bg-amber-50/30'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="flex items-center space-x-1.5 min-w-0 flex-1">
+                            <input
+                              type="color"
+                              value={g.color || '#2563EB'}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => void handleUpdateGroupColor(g, e.target.value)}
+                              className="w-5 h-5 rounded border border-slate-300 cursor-pointer shrink-0"
+                              title={`Ubah warna ${g.name}`}
+                            />
+                            <input
+                              type="text"
+                              value={g.name}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => void handleRenameGroup(g, e.target.value)}
+                              className="font-bold text-xs text-slate-900 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-indigo-500 focus:bg-white px-1 py-0.5 rounded outline-none w-28 truncate"
+                              title="Klik untuk ubah nama grup"
+                            />
+                          </div>
+
+                          <div className="flex items-center space-x-1 shrink-0">
+                            <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded">
+                              {memberCount} pipa
+                            </span>
+                            {isActive && (
+                              <span className="text-[9px] font-extrabold uppercase bg-indigo-600 text-white px-1.5 py-0.5 rounded shadow-sm">
+                                Kuas Aktif
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleDeleteGroup(g);
+                              }}
+                              className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition"
+                              title={`Hapus grup ${g.name}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Search bar for tables & Sub-tabs */}
           {mode === 'digitize' && (
@@ -2854,88 +3088,11 @@ export default function ProjectWorkspace() {
               </div>
             ) : mode === 'circuit' ? (
               <div className="p-4 space-y-3 overflow-y-auto h-full">
-                {/* Engineer-defined system and circuit groups. */}
-                <div className="border border-amber-200 bg-amber-50/60 rounded-xl p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800">
-                      Corrosion Groups
-                    </span>
-                    <span className="text-[11px] font-semibold text-amber-700">
-                      {(result?.manual_groups || []).length} grup
-                    </span>
-                  </div>
-
-                  {(result?.manual_groups || []).map((g) => {
-                    const kind = g.kind || 'circuit';
-                    const n = (result?.runs || []).filter((r) => r.marked === true && (kind === 'system'
-                      ? (r.system_group_id === g.id || (!r.system_group_id && r.group_id === g.id))
-                      : (r.circuit_group_id === g.id || (!r.circuit_group_id && r.group_id === g.id)))).length;
-                    const selectedMarkedCount = [...selectedRunIndices].filter((idx) => result?.runs?.[idx]?.marked === true).length;
-                    const canAssign = selectedMarkedCount > 0;
-                    return (
-                      <div key={g.id} className="bg-white border border-slate-200 rounded-lg p-2 space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center space-x-2 min-w-0">
-                            <input
-                              type="color"
-                              value={g.color || '#2563EB'}
-                              onChange={(e) => void handleUpdateGroupColor(g, e.target.value)}
-                              className="w-5 h-5 rounded border border-slate-300 cursor-pointer shrink-0"
-                              title={`Edit warna grup ${g.name}`}
-                            />
-                            <span className="font-bold text-slate-900 text-sm truncate">{g.name}</span>
-                          </div>
-                          <span className="text-[10px] uppercase font-semibold text-slate-400 shrink-0">
-                            {kind === 'system' ? 'System' : 'Circuit'}
-                          </span>
-                          <button
-                            onClick={() => handleDeleteGroup(g)}
-                            className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition shrink-0"
-                            title={`Hapus grup ${g.name}`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[11px] text-slate-600">{n} pipa</span>
-                          <button
-                            onClick={() => handleAssignToGroup(g)}
-                            disabled={!canAssign}
-                            className={`px-2 py-1 rounded text-[11px] font-semibold transition ${
-                              canAssign
-                                ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
-                                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                            }`}
-                          >
-                            Assign to Group {g.name} ({selectedMarkedCount})
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-
-                  <div className="flex items-center gap-2 pt-1">
-                    <input
-                      value={newGroupName}
-                      onChange={(e) => setNewGroupName(e.target.value)}
-                      placeholder="Nama system/circuit, mis. CC-01"
-                      className="flex-1 min-w-0 px-2 py-1 border border-slate-300 rounded text-xs text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-amber-500"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => handleAddGroup('system')}
-                      className="px-2 py-1.5 rounded text-[11px] font-semibold bg-amber-600 hover:bg-amber-700 text-white transition"
-                    >
-                      Create New System
-                    </button>
-                    <button
-                      onClick={() => handleAddGroup('circuit')}
-                      className="px-2 py-1.5 rounded text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-700 text-white transition"
-                    >
-                      Create New Circuit
-                    </button>
-                  </div>
+                <div className="flex items-center justify-between pb-1 border-b border-slate-200">
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                    Automated Circuits ({systems.reduce((acc, s) => acc + s.circuits.length, 0)})
+                  </h4>
+                  <span className="text-[10px] text-slate-500 italic">Dari Line List</span>
                 </div>
 
                 {systems.flatMap((s) =>

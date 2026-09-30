@@ -99,6 +99,9 @@ interface InteractivePipeCanvasProps {
   height: number;
   runs: PipeRun[];
   manualGroups: ManualGroup[];
+  activeGroupId?: string | null;
+  onAssignRunToActiveGroup?: (runIdx: number) => Promise<void>;
+  onSelectGroup?: (groupId: string | null) => void;
   onUpdateGroupStamp: (groupId: string, position: { x: number; y: number }) => Promise<void>;
   pipingIds: PipingID[];
   showOverlay: boolean;
@@ -133,6 +136,9 @@ export default function InteractivePipeCanvas({
   height,
   runs,
   manualGroups,
+  activeGroupId,
+  onAssignRunToActiveGroup,
+  onSelectGroup,
   onUpdateGroupStamp,
   pipingIds,
   showOverlay,
@@ -412,6 +418,14 @@ export default function InteractivePipeCanvas({
   const handleLineClick = (idx: number, e: React.MouseEvent | React.PointerEvent) => {
     e.stopPropagation();
 
+    // Active Group (Color Brush Mode):
+    // When activeGroupId is active, clicking ANY line assigns it to that group,
+    // sets marked=true, updates its color, and does NOT open any popover.
+    if (activeGroupId && onAssignRunToActiveGroup) {
+      void onAssignRunToActiveGroup(idx);
+      return;
+    }
+
     const clickedRun = runs[idx];
     if (clickedRun?.marked === false) {
       const markKey = clickedRun.id || idx;
@@ -468,6 +482,7 @@ export default function InteractivePipeCanvas({
 
   const handleLineDoubleClick = (idx: number, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (activeGroupId) return;
     const clickedRun = runs[idx];
     if (!clickedRun || (clickedRun.marked === false && !markingRunIdsRef.current.has(clickedRun.id || idx))) return;
     if (splitMode || (traceTool !== 'pan' && traceTool !== 'wand')) return;
@@ -992,7 +1007,7 @@ export default function InteractivePipeCanvas({
           strokeLinejoin="round"
           style={{
             pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
-            cursor: splitMode ? 'crosshair' : 'pointer',
+            cursor: activeGroupId ? 'crosshair' : splitMode ? 'crosshair' : 'pointer',
           }}
           onPointerDown={(e) => {
             e.stopPropagation();
@@ -1049,105 +1064,164 @@ export default function InteractivePipeCanvas({
     );
   };
 
+  const handleStartStampDrag = (
+    group: ManualGroup,
+    currentPosition: { x: number; y: number },
+    boxWidth: number,
+    e: React.PointerEvent
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!viewer) return;
+
+    const pointer = getImageCoordinates(e);
+    if (!pointer) return;
+
+    applyMouseNav(viewer, false);
+
+    const startX = currentPosition.x;
+    const startY = currentPosition.y;
+    const pointerOffsetX = pointer.x - startX;
+    const pointerOffsetY = pointer.y - startY;
+    let moved = false;
+    let lastX = startX;
+    let lastY = startY;
+
+    setStampDrag({
+      groupId: group.id,
+      startX,
+      startY,
+      pointerOffsetX,
+      pointerOffsetY,
+      x: startX,
+      y: startY,
+      moved: false,
+    });
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const p = getImageCoordinates(moveEvent);
+      if (!p) return;
+      const x = Math.max(0, Math.min(width - boxWidth, p.x - pointerOffsetX));
+      const y = Math.max(0, Math.min(height - 34, p.y - pointerOffsetY));
+      if (Math.hypot(x - startX, y - startY) > 3) {
+        moved = true;
+      }
+      lastX = x;
+      lastY = y;
+      setStampDrag((prev) => (prev ? { ...prev, x, y, moved } : null));
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+
+      if (viewer && traceTool === 'pan') {
+        applyMouseNav(viewer, true);
+      }
+
+      if (moved) {
+        void onUpdateGroupStamp(group.id, { x: Math.round(lastX), y: Math.round(lastY) });
+      } else {
+        if (onSelectGroup) {
+          onSelectGroup(group.id);
+        }
+      }
+      setStampDrag(null);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+  };
+
   const renderGroupStamp = (group: ManualGroup) => {
     const kind = group.kind || 'circuit';
-    const members = runs.filter((run) => run.marked === true && run.points?.length >= 2 && (
-      kind === 'system'
-        ? run.system_group_id === group.id || (!run.system_group_id && run.group_id === group.id)
-        : run.circuit_group_id === group.id || (!run.circuit_group_id && run.group_id === group.id)
-    ));
+    const members = runs.filter(
+      (run) =>
+        run.marked !== false &&
+        (run.points?.length ?? 0) >= 2 &&
+        (kind === 'system'
+          ? run.system_group_id === group.id || (!run.system_group_id && run.group_id === group.id)
+          : run.circuit_group_id === group.id || (!run.circuit_group_id && run.group_id === group.id))
+    );
     if (members.length === 0) return null;
 
     const longest = members.reduce((best, run) => {
-      const length = run.points.slice(1).reduce((sum, point, idx) =>
-        sum + Math.hypot(point[0] - run.points[idx][0], point[1] - run.points[idx][1]), 0);
-      const bestLength = best.points.slice(1).reduce((sum, point, idx) =>
-        sum + Math.hypot(point[0] - best.points[idx][0], point[1] - best.points[idx][1]), 0);
+      const length = run.points.slice(1).reduce(
+        (sum, point, idx) =>
+          sum + Math.hypot(point[0] - run.points[idx][0], point[1] - run.points[idx][1]),
+        0
+      );
+      const bestLength = best.points.slice(1).reduce(
+        (sum, point, idx) =>
+          sum + Math.hypot(point[0] - best.points[idx][0], point[1] - best.points[idx][1]),
+        0
+      );
       return length > bestLength ? run : best;
     });
     const midpoint = runMidpoint(longest.points);
-    const boxWidth = Math.max(82, (group.name || '').length * 10 + 14);
+    const boxWidth = Math.max(90, (group.name || '').length * 10 + 24);
     const defaultPosition = {
       x: Math.max(0, Math.min(width - boxWidth, midpoint[0] - boxWidth / 2)),
-      y: Math.max(0, Math.min(height - 30, midpoint[1] - 50)),
+      y: Math.max(0, Math.min(height - 34, midpoint[1] - 45)),
     };
-    const position = stampDrag?.groupId === group.id
-      ? { x: stampDrag.x, y: stampDrag.y }
-      : group.stampPosition || defaultPosition;
+    const position =
+      stampDrag?.groupId === group.id
+        ? { x: stampDrag.x, y: stampDrag.y }
+        : group.stampPosition || defaultPosition;
     const isDragging = stampDrag?.groupId === group.id;
+    const isGroupActive = activeGroupId === group.id;
 
     return (
       <g
         key={`stamp-${group.id}`}
         data-group-stamp={group.id}
-        style={{ pointerEvents: 'all', cursor: isDragging ? 'grabbing' : 'grab', touchAction: 'none' }}
-        onPointerDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const pointer = getImageCoordinates(e);
-          if (!pointer) return;
-          e.currentTarget.setPointerCapture(e.pointerId);
-          setStampDrag({
-            groupId: group.id,
-            startX: position.x,
-            startY: position.y,
-            pointerOffsetX: pointer.x - position.x,
-            pointerOffsetY: pointer.y - position.y,
-            x: position.x,
-            y: position.y,
-            moved: false,
-          });
+        style={{
+          pointerEvents: 'all',
+          cursor: isDragging ? 'grabbing' : 'grab',
+          touchAction: 'none',
         }}
-        onPointerMove={(e) => {
-          if (stampDrag?.groupId !== group.id) return;
-          e.preventDefault();
-          e.stopPropagation();
-          const pointer = getImageCoordinates(e);
-          if (!pointer) return;
-          const x = Math.max(0, Math.min(width - boxWidth, pointer.x - stampDrag.pointerOffsetX));
-          const y = Math.max(0, Math.min(height - 30, pointer.y - stampDrag.pointerOffsetY));
-          setStampDrag({
-            ...stampDrag,
-            x,
-            y,
-            moved: stampDrag.moved || Math.hypot(x - stampDrag.startX, y - stampDrag.startY) > 2,
-          });
-        }}
-        onPointerUp={(e) => {
-          if (stampDrag?.groupId !== group.id) return;
-          e.preventDefault();
-          e.stopPropagation();
-          const pointer = getImageCoordinates(e);
-          const x = pointer
-            ? Math.max(0, Math.min(width - boxWidth, pointer.x - stampDrag.pointerOffsetX))
-            : stampDrag.x;
-          const y = pointer
-            ? Math.max(0, Math.min(height - 30, pointer.y - stampDrag.pointerOffsetY))
-            : stampDrag.y;
-          if (stampDrag.moved) {
-            void onUpdateGroupStamp(group.id, { x: Math.round(x), y: Math.round(y) });
-          }
-          setStampDrag(null);
-        }}
-        onPointerCancel={() => setStampDrag(null)}
+        onPointerDown={(e) => handleStartStampDrag(group, position, boxWidth, e)}
       >
+        {/* Soft shadow */}
+        <rect
+          x={position.x + 2}
+          y={position.y + 2}
+          width={boxWidth}
+          height={32}
+          rx={4}
+          fill="rgba(0,0,0,0.12)"
+        />
+        {/* Main box with group border */}
         <rect
           x={position.x}
           y={position.y}
           width={boxWidth}
-          height={30}
-          rx={2}
+          height={32}
+          rx={4}
           fill="#FFFFFF"
-          fillOpacity={0.88}
+          fillOpacity={0.92}
           stroke={group.color || '#2563EB'}
-          strokeWidth={2}
+          strokeWidth={isGroupActive ? 3.5 : 2.5}
         />
-        <text
-          x={position.x + 7}
-          y={position.y + 21}
+        {/* Left accent strip */}
+        <rect
+          x={position.x}
+          y={position.y}
+          width={6}
+          height={32}
+          rx={3}
           fill={group.color || '#2563EB'}
-          fontSize={17}
-          fontWeight="600"
+        />
+        {/* Group Name Text */}
+        <text
+          x={position.x + 12}
+          y={position.y + 22}
+          fill={group.color || '#2563EB'}
+          fontSize={15}
+          fontWeight="bold"
+          fontFamily="system-ui, -apple-system, sans-serif"
           style={{ pointerEvents: 'none', userSelect: 'none' }}
         >
           {group.name}

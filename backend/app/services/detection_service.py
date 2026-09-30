@@ -312,18 +312,19 @@ def dispatch_enrichment_job(
     background_tasks: BackgroundTasks,
 ) -> None:
     """Send the enrichment job to Celery; fall back to an in-process task if the broker is down."""
-    try:
-        from worker.tasks import enrich_sheet_task
-        enrich_sheet_task.delay(
-            job_id=job.id,
-            sheet_id=sheet.id,
-            file_rel_path=sheet.file_path,
-            dpi=dpi,
-            rot=rot,
-        )
-        return
-    except Exception:
-        pass
+    if not settings.CELERY_TASK_ALWAYS_EAGER:
+        try:
+            from worker.tasks import enrich_sheet_task
+            enrich_sheet_task.delay(
+                job_id=job.id,
+                sheet_id=sheet.id,
+                file_rel_path=sheet.file_path,
+                dpi=dpi,
+                rot=rot,
+            )
+            return
+        except Exception:
+            pass
     background_tasks.add_task(
         run_enrichment_in_background,
         job_id=job.id,
@@ -335,105 +336,117 @@ def dispatch_enrichment_job(
 
 async def run_detection_in_background(job_id: str, sheet_id: str, file_path: str, dpi: int, rot: int, mode: str = "full"):
     """Fallback runner when Celery is not active or for lightweight dev testing."""
-    async with AsyncSessionLocal() as session:
-        job = await session.get(Job, job_id)
-        sheet = await session.get(Sheet, sheet_id)
-        if not job or not sheet:
-            return
+    try:
+        async with AsyncSessionLocal() as session:
+            job = await session.get(Job, job_id)
+            sheet = await session.get(Sheet, sheet_id)
+            if not job or not sheet:
+                return
 
-        try:
-            job.status = "processing"
-            job.step = "starting"
-            job.message = f"Running detection pipeline (mode: {mode})..."
-            sheet.status = "processing"
-            await session.commit()
+            try:
+                job.status = "processing"
+                job.step = "starting"
+                job.message = f"Running detection pipeline (mode: {mode})..."
+                sheet.status = "processing"
+                await session.commit()
 
-            # Execute pipeline synchronously in thread pool
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                execute_sheet_detection,
-                file_path,
-                dpi,
-                rot,
-                None,
-                mode,
-            )
+                # Execute pipeline synchronously in thread pool
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    execute_sheet_detection,
+                    file_path,
+                    dpi,
+                    rot,
+                    None,
+                    mode,
+                )
 
-            # Compute circuits
-            circuits = GroupingService.compute_circuits(result)
+                # Compute circuits
+                circuits = GroupingService.compute_circuits(result)
 
-            sheet.result_json = result
-            sheet.systems_json = circuits
-            sheet.status = "completed"
-            sheet.width = result.get("w")
-            sheet.height = result.get("h")
+                sheet.result_json = result
+                sheet.systems_json = circuits
+                sheet.status = "completed"
+                sheet.width = result.get("w")
+                sheet.height = result.get("h")
 
-            job.status = "completed"
-            job.progress_pct = 100
-            job.step = "completed"
-            job.message = "Detection completed successfully"
-            job.completed_at = datetime.utcnow()
-            await session.commit()
+                job.status = "completed"
+                job.progress_pct = 100
+                job.step = "completed"
+                job.message = "Detection completed successfully"
+                job.completed_at = datetime.utcnow()
+                await session.commit()
 
-        except Exception as e:
-            job.status = "failed"
-            job.error = str(e)
-            job.message = f"Error: {str(e)}"
-            sheet.status = "error"
-            await session.commit()
+            except Exception as e:
+                try:
+                    job.status = "failed"
+                    job.error = str(e)
+                    job.message = f"Error: {str(e)}"
+                    sheet.status = "error"
+                    await session.commit()
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f"[DetectionService] Background detection error: {exc}")
 
 async def run_enrichment_in_background(job_id: str, sheet_id: str, file_path: str, dpi: int, rot: int):
     """Fallback runner for sheet enrichment when Celery is not active."""
-    async with AsyncSessionLocal() as session:
-        job = await session.get(Job, job_id)
-        sheet = await session.get(Sheet, sheet_id)
-        if not job or not sheet:
-            return
+    try:
+        async with AsyncSessionLocal() as session:
+            job = await session.get(Job, job_id)
+            sheet = await session.get(Sheet, sheet_id)
+            if not job or not sheet:
+                return
 
-        try:
-            job.status = "processing"
-            job.step = "starting"
-            job.message = "Running sheet enrichment (OCR & YOLO)..."
-            sheet.status = "detecting"
-            await session.commit()
+            try:
+                job.status = "processing"
+                job.step = "starting"
+                job.message = "Running sheet enrichment (OCR & YOLO)..."
+                sheet.status = "detecting"
+                await session.commit()
 
-            existing_runs = sheet.result_json.get("runs", []) if sheet.result_json else []
-            existing_pids = sheet.result_json.get("piping_ids", []) if sheet.result_json else []
-            existing_symbols = sheet.result_json.get("symbols", []) if sheet.result_json else []
+                existing_runs = sheet.result_json.get("runs", []) if sheet.result_json else []
+                existing_pids = sheet.result_json.get("piping_ids", []) if sheet.result_json else []
+                existing_symbols = sheet.result_json.get("symbols", []) if sheet.result_json else []
 
-            loop = asyncio.get_event_loop()
-            enrichment_result = await loop.run_in_executor(
-                None,
-                execute_sheet_enrichment,
-                file_path,
-                existing_runs,
-                existing_pids,
-                existing_symbols,
-                dpi,
-                rot,
-            )
+                loop = asyncio.get_event_loop()
+                enrichment_result = await loop.run_in_executor(
+                    None,
+                    execute_sheet_enrichment,
+                    file_path,
+                    existing_runs,
+                    existing_pids,
+                    existing_symbols,
+                    dpi,
+                    rot,
+                )
 
-            # A user may continue editing while OCR/YOLO runs. Read the latest JSON
-            # before the conservative merge so geometry and labels do not go stale.
-            await session.refresh(sheet, attribute_names=["result_json"])
-            res = merge_enrichment_into_result(sheet.result_json, enrichment_result)
+                # A user may continue editing while OCR/YOLO runs. Read the latest JSON
+                # before the conservative merge so geometry and labels do not go stale.
+                await session.refresh(sheet, attribute_names=["result_json"])
+                res = merge_enrichment_into_result(sheet.result_json, enrichment_result)
 
-            circuits = GroupingService.compute_circuits(res)
-            sheet.result_json = res
-            sheet.systems_json = circuits
-            sheet.status = "completed"
+                circuits = GroupingService.compute_circuits(res)
+                sheet.result_json = res
+                sheet.systems_json = circuits
+                sheet.status = "completed"
 
-            job.status = "completed"
-            job.progress_pct = 100
-            job.step = "completed"
-            job.message = "Enrichment completed successfully"
-            job.completed_at = datetime.utcnow()
-            await session.commit()
+                job.status = "completed"
+                job.progress_pct = 100
+                job.step = "completed"
+                job.message = "Enrichment completed successfully"
+                job.completed_at = datetime.utcnow()
+                await session.commit()
 
-        except Exception as e:
-            job.status = "failed"
-            job.error = str(e)
-            job.message = f"Error: {str(e)}"
-            sheet.status = "error"
-            await session.commit()
+            except Exception as e:
+                try:
+                    job.status = "failed"
+                    job.error = str(e)
+                    job.message = f"Error: {str(e)}"
+                    sheet.status = "error"
+                    await session.commit()
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f"[DetectionService] Background enrichment error: {exc}")

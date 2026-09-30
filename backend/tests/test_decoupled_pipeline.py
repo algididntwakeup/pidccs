@@ -2,7 +2,7 @@ import os
 import sys
 import pytest
 import numpy as np
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 _BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _ROOT_DIR = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
@@ -16,6 +16,7 @@ from pidcorr.lines import PipeRun
 from app.db.base import Base
 from app.models.project import Project
 from app.models.sheet import Sheet
+from app.models.job import Job
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from httpx import AsyncClient, ASGITransport
 from app.main import app
@@ -402,22 +403,27 @@ async def test_api_detect_mode_and_enrich_endpoints():
         session.add(sheet)
         await session.commit()
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 1. Test /detect with mode="lines_only"
-        detect_resp = await client.post(
-            "/api/v1/projects/proj-enrich-test/sheets/sheet-enrich-test/detect?mode=lines_only"
-        )
-        assert detect_resp.status_code == 202
-        data = detect_resp.json()
-        assert "job_id" in data
-        assert data["sheet_id"] == "sheet-enrich-test"
+    with patch("app.routers.detection.dispatch_detection_job") as mock_dispatch_detect, \
+         patch("app.routers.detection.dispatch_enrichment_job") as mock_dispatch_enrich:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # 1. Test /detect with mode="lines_only"
+            detect_resp = await client.post(
+                "/api/v1/projects/proj-enrich-test/sheets/sheet-enrich-test/detect?mode=lines_only"
+            )
+            assert detect_resp.status_code == 202
+            data = detect_resp.json()
+            assert "job_id" in data
+            assert data["sheet_id"] == "sheet-enrich-test"
+            assert mock_dispatch_detect.called
+            assert mock_dispatch_detect.call_args.kwargs.get("mode") == "lines_only"
 
-        # 2. Test /enrich endpoint
-        enrich_resp = await client.post(
-            "/api/v1/projects/proj-enrich-test/sheets/sheet-enrich-test/enrich"
-        )
-        assert enrich_resp.status_code == 202
-        enrich_data = enrich_resp.json()
-        assert "job_id" in enrich_data
-        assert enrich_data["sheet_id"] == "sheet-enrich-test"
+            # 2. Test /enrich endpoint
+            enrich_resp = await client.post(
+                "/api/v1/projects/proj-enrich-test/sheets/sheet-enrich-test/enrich"
+            )
+            assert enrich_resp.status_code == 202
+            enrich_data = enrich_resp.json()
+            assert "job_id" in enrich_data
+            assert enrich_data["sheet_id"] == "sheet-enrich-test"
+            assert mock_dispatch_enrich.called
