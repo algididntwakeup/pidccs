@@ -9,7 +9,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from pidcorr.lines import PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts, suppress_floating_stubs, suppress_low_ink_diagonals
-from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer
+from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer, _graph_segments, _morphological_skeleton
 
 
 def test_pipe_run_schema_fields():
@@ -55,6 +55,29 @@ def test_skeleton_tracer_leaves_detected_symbol_gap(coarse):
 
     assert len(runs) >= 2
     assert all(not (min(p[0] for p in run.points) < 165 and max(p[0] for p in run.points) > 185) for run in runs)
+
+
+def test_skeleton_graph_preserves_thin_t_branch():
+    binary = np.zeros((100, 140), dtype=np.uint8)
+    cv2.line(binary, (15, 60), (125, 60), 255, 1)
+    cv2.line(binary, (70, 60), (70, 15), 255, 1)
+
+    runs = _graph_segments(_morphological_skeleton(binary), min_length=10)
+
+    assert any(min(p[0] for p in run.points) <= 20 and max(p[0] for p in run.points) >= 120 for run in runs)
+    assert any(min(p[1] for p in run.points) <= 20 and max(p[1] for p in run.points) >= 55 for run in runs)
+
+
+def test_skeleton_tracer_does_not_bridge_raster_valve_gap():
+    image = np.full((180, 320, 3), 255, dtype=np.uint8)
+    cv2.line(image, (20, 90), (145, 90), (0, 0, 0), 2)
+    cv2.line(image, (175, 90), (300, 90), (0, 0, 0), 2)
+
+    runs = SkeletonLineTracer(min_length_px=10).trace(image, dpi=350)
+
+    assert any(max(p[0] for p in run.points) <= 150 for run in runs)
+    assert any(min(p[0] for p in run.points) >= 170 for run in runs)
+    assert all(not (min(p[0] for p in run.points) < 145 and max(p[0] for p in run.points) > 175) for run in runs)
 
 
 def test_low_ink_diagonal_keeps_connected_elbow_only():

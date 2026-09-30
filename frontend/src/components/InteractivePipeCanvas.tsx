@@ -224,7 +224,6 @@ export default function InteractivePipeCanvas({
   const nudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const pointerDownRecordRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const markingRunIdsRef = useRef<Set<string | number>>(new Set());
   const { container, tempPan } = useCanvasOverlay(viewer, osdModule, width, height, traceTool);
 
@@ -413,10 +412,11 @@ export default function InteractivePipeCanvas({
     };
   }, [popoverDragging, viewer]);
 
-  // A single click marks an unmarked trace or selects a marked run. Editing is
-  // deliberately reserved for the explicit double-click handler below.
-  const handleLineClick = (idx: number, e: React.MouseEvent | React.PointerEvent) => {
+  // Handle the press on the SVG hit stroke before OpenSeadragon consumes a click.
+  const handleLinePointerDown = (idx: number, e: React.PointerEvent<SVGPolylineElement>) => {
+    if (e.button !== 0) return;
     e.stopPropagation();
+    e.preventDefault();
 
     // Active Group (Color Brush Mode):
     // When activeGroupId is active, clicking ANY line assigns it to that group,
@@ -1009,22 +1009,7 @@ export default function InteractivePipeCanvas({
             pointerEvents: traceTool === 'multiselect' ? 'none' : 'stroke',
             cursor: activeGroupId ? 'crosshair' : splitMode ? 'crosshair' : 'pointer',
           }}
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            pointerDownRecordRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
-          }}
-          onPointerUp={(e) => {
-            e.stopPropagation();
-            if (pointerDownRecordRef.current) {
-              const dist = Math.hypot(
-                e.clientX - pointerDownRecordRef.current.x,
-                e.clientY - pointerDownRecordRef.current.y
-              );
-              if (dist < 6) {
-                handleLineClick(idx, e);
-              }
-            }
-          }}
+          onPointerDown={(e) => handleLinePointerDown(idx, e)}
           onMouseEnter={() => setHoveredRunIdx(idx)}
           onMouseLeave={() => setHoveredRunIdx(null)}
           onDoubleClick={(e) => handleLineDoubleClick(idx, e)}

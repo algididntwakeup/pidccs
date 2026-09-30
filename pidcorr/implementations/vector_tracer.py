@@ -238,13 +238,13 @@ def _is_stroked(drawing: Dict[str, Any]) -> bool:
 
 # ------------------------------------------------------------ tier halaman -----
 def tier_of(page, drawings: Optional[Sequence[Dict[str, Any]]] = None) -> str:
-    """Klasifikasi halaman: 'A1' | 'A2' (vektor) atau 'raster' (scan/gambar).
+    """Classify a page for routing: 'A1'/'A2' vector heuristics or 'raster'.
 
-    Ambang mengikuti instruksi Phase 2: `len(page.lines) + len(page.curves) >= 50`
-    pada pdfplumber, yang setara dengan jumlah path `get_cdrawings()` pada
-    PyMuPDF. 'A1' = didominasi GARIS lurus (jalur vektor utama); 'A2' = geometri
-    vektor ada tetapi banyak kurva. Keduanya diekstrak vektor; 'raster' ->
-    skeleton tracer (fallback otomatis).
+    Fewer than 50 PyMuPDF drawing paths is classified as raster. At or above
+    that threshold, A1 requires at least 50 drawing paths with a straight-line
+    item; otherwise the page is A2. These labels are not page sizes or quality
+    grades. Both vector tiers use identical extraction, with raster fallback
+    when vector extraction yields no runs.
 
     `drawings` boleh diberikan agar `get_cdrawings()` tidak dipanggil ulang.
     """

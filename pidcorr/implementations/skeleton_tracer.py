@@ -20,9 +20,6 @@ from ..lines import (
     suppress_low_ink_diagonals,
     suppress_text_artifacts,
     suppress_floating_stubs,
-    bridge_collinear_headers,
-    bridge_inline_valve_gaps,
-    bridge_polyline_elbows,
     split_runs_at_t_junctions,
 )
 
@@ -78,32 +75,7 @@ def _zhang_suen_luts():
     return luts
 
 def _morphological_skeleton(binary_img: np.ndarray) -> np.ndarray:
-    """Skeletonisasi Zhang-Suen -- menghasilkan rantai 1px yang bersih.
-
-    LATAR BELAKANG (bug yang diperbaiki 2026-09-24):
-    Implementasi lama memakai morphological opening dengan elemen 3x3::
-
-        while True:
-            cv2.morphologyEx(img, MORPH_OPEN, element_3x3, temp)
-            skel |= img - temp
-            img = erode(img, element_3x3)
-
-    Cara itu HANYA benar untuk objek yang lebih tebal dari elemen structuring-nya.
-    Garis setebal 2px TIDAK BISA di-open oleh elemen 3x3, sehingga ``img - open(img)``
-    selalu kosong dan ``skel`` berhenti bertambah; sisa garis 2px lalu ditelan erode
-    dan hilang tanpa pernah masuk skeleton. Terukur pada lembar referensi: 90% piksel
-    skeleton hasil cara lama BUKAN rantai-2 (degenerat), dan ``_graph_segments`` yang
-    mengharapkan degree-2 chain menganggap hampir semua piksel sebagai NODE -> nol edge
-    -> nol run. Akibatnya garis pipa yang jelas-jelas ada di gambar tidak pernah
-    muncul sebagai run (terukur: garis 209-896px dengan coverage 0.00).
-
-    Zhang-Suen thinning bekerja dari tepi ke dalam dan menjamin rantai 1px untuk
-    SEMUA ketebalan (1px..Npx), sehingga ``_graph_segments`` menerima graf yang benar.
-    Terukur: piksel degenerat turun 90% -> 2.1%, dan garis target 0.00 -> 1.00.
-
-    Biaya: ~10s untuk lembar 3309x2339 (vs 0.3s cara lama). Diterima karena akurasi
-    jauh lebih penting bagi user; loop berhenti lebih awal saat tidak ada perubahan.
-    """
+    """Thin binary ink to one-pixel paths with the Zhang-Suen algorithm."""
     img = (binary_img > 0).astype(np.uint8)
     if not img.any():
         return (img * 255).astype(np.uint8)
@@ -127,46 +99,6 @@ def _morphological_skeleton(binary_img: np.ndarray) -> np.ndarray:
             break
 
     return (center * 255).astype(np.uint8)
-
-def _morphological_skeleton_legacy(binary_img: np.ndarray) -> np.ndarray:
-    """Skeletonisasi morphological lama (elemen 3x3) -- DISIMPAN untuk referensi/benchmark.
-
-    JANGAN dipakai di pipeline: hanya benar untuk objek > 2px dan menghasilkan
-    skeleton degenerat (lihat penjelasan di ``_morphological_skeleton``).
-    """
-    skel = np.zeros(binary_img.shape, dtype=np.uint8)
-    element = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    temp = np.empty(binary_img.shape, dtype=np.uint8)
-    img = binary_img.copy()
-
-    while True:
-        cv2.morphologyEx(img, cv2.MORPH_OPEN, element, temp)
-        cv2.bitwise_not(temp, temp)
-        cv2.bitwise_and(img, temp, temp)
-        cv2.bitwise_or(skel, temp, skel)
-        cv2.erode(img, element, img)
-        if cv2.countNonZero(img) == 0:
-            break
-
-    return skel
-
-def _find_junctions_and_endpoints(skel: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Classify skeleton pixels by 8-connected degree."""
-    kernel = np.array([
-        [1, 1, 1],
-        [1, 0, 1],
-        [1, 1, 1]
-    ], dtype=np.uint8)
-
-    skel_binary = (skel > 0).astype(np.uint8)
-    neighbor_count = cv2.filter2D(skel_binary, -1, kernel) * skel_binary
-
-    endpoints = (neighbor_count == 1).astype(np.uint8)
-    t_junctions = (neighbor_count == 3).astype(np.uint8)
-    crossovers = (neighbor_count >= 4).astype(np.uint8)
-
-    return endpoints, t_junctions, crossovers
-
 
 def _classify_junction_geometry(
     node_id: int,
@@ -356,15 +288,20 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
         padded[2:, 2:], padded[2:, 1:-1], padded[2:, :-2],
         padded[1:-1, :-2], padded[:-2, :-2],
     ]
+    # A diagonal staircase can have three adjacent pixels but only two distinct
+    # arms. Count neighbour groups to keep those pixels inside a graph edge.
+    degree = sum(neighbours)
     transitions = sum(
         (neighbours[i] != neighbours[(i + 1) % 8]).astype(np.uint8)
         for i in range(8)
     ) // 2
-    node_pixels = ((ink > 0) & ((transitions == 1) | (transitions >= 3))).astype(np.uint8)
+    cardinal_degree = neighbours[0] + neighbours[2] + neighbours[4] + neighbours[6]
+    junctions = (degree > 2) & ((transitions >= 3) | (cardinal_degree >= 3))
+    node_pixels = ((ink > 0) & ((transitions == 1) | junctions)).astype(np.uint8)
 
     # Merge adjacent node pixels into node clusters
     node_pixels = cv2.dilate(node_pixels, np.ones((3, 3), np.uint8), iterations=1) & ink
-    node_count, node_labels, node_stats, node_centroids = cv2.connectedComponentsWithStats(
+    node_count, node_labels, _, node_centroids = cv2.connectedComponentsWithStats(
         node_pixels, 8
     )
     if node_count <= 1:
@@ -452,7 +389,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
             if dlen > 0:
                 incident_info.append((e_id, (dx / dlen, dy / dlen)))
 
-        jtype, through_pairs, _ = _classify_junction_geometry(node_id, (cx, cy), incident_info)
+        _, through_pairs, _ = _classify_junction_geometry(node_id, (cx, cy), incident_info)
         for ea, eb in through_pairs:
             through_map[(node_id, ea)] = eb
             through_map[(node_id, eb)] = ea
@@ -606,10 +543,8 @@ class SkeletonLineTracer(BaseLineTracer):
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 6
         )
 
-        # Remove very small noise dots
-        clean_binary = cv2.morphologyEx(
-            binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        )
+        # Preserve one-pixel branches; opening erases them before graph tracing.
+        clean_binary = binary.copy()
 
         # 1. Dilated Text Masking: Scaled with DPI (5px at 350 DPI)
         # to blackout notes/underlines while avoiding false gap creation in dense areas.
@@ -639,9 +574,7 @@ class SkeletonLineTracer(BaseLineTracer):
                 clean_binary[dil_y1:dil_y2, dil_x1:dil_x2] = 0
 
         # Keep an actual break at detected inline valves and instrument bubbles.
-        # These symbol boxes are also passed to every gap-bridging pass below so
-        # collinear pipe fragments cannot be rejoined through the symbol body.
-        symbol_gap_boxes = []
+        # Physical gaps remain separate runs for manual correction.
         symbol_pad = max(1, int(round(dpi / 350.0)))
         for detection in detections or []:
             if detection.get("coarse") not in ("valve", "instrument"):
@@ -652,7 +585,6 @@ class SkeletonLineTracer(BaseLineTracer):
             y2 = min(H, int(detection.get("y2", 0)) + symbol_pad)
             if x2 > x1 and y2 > y1:
                 clean_binary[y1:y2, x1:x2] = 0
-                symbol_gap_boxes.append((x1, y1, x2, y2))
 
         # Fast Trace intentionally skips YOLO, so use a conservative geometric
         # valve cue for raster pages: paired short diagonal strokes around a
@@ -699,7 +631,6 @@ class SkeletonLineTracer(BaseLineTracer):
                     y2 = min(H, int(math.ceil(sy2 / scale_to_original_px)))
                     if x2 > x1 and y2 > y1:
                         clean_binary[y1:y2, x1:x2] = 0
-                        symbol_gap_boxes.append((x1, y1, x2, y2))
         except (cv2.error, ImportError, ValueError):
             # Geometric masking is a conservative enhancement; a Hough failure
             # must not prevent the ordinary skeleton trace from running.
@@ -825,16 +756,8 @@ class SkeletonLineTracer(BaseLineTracer):
         # (mayoritas titik sampelnya tidak menyentuh tinta). Terukur: satu run
         # 1017 px di lembar referensi hanya 20% tinta — bukan pipa, bukan gambar.
         filtered = suppress_low_ink_diagonals(filtered, img_bgr=gray)
-        filtered = bridge_collinear_headers(filtered, max_gap_px=55, block_boxes=symbol_gap_boxes)
-
-        # 7. Bridge ordinary gaps but preserve every detected symbol-body gap.
-        filtered = bridge_inline_valve_gaps(
-            filtered, detections=detections, max_gap_px=90, block_boxes=symbol_gap_boxes
-        )
-
-        # 7b. Rekonstruksi bengkokan: sambung potongan siku 45° kembali ke polyline
-        #     supaya satu pipa bengkok = satu run (klik-ID menyala penuh).
-        filtered = bridge_polyline_elbows(filtered, block_boxes=symbol_gap_boxes)
+        # Keep physical gaps at valves and other symbols. HITL tools can join
+        # fragments explicitly when the drawing calls for it.
 
         # 8. Post-filter: drop isolated short diagonal strokes (surviving text/hand scratches)
         #    that do not attach to any detected symbol. No-op when detections is empty.
@@ -844,8 +767,7 @@ class SkeletonLineTracer(BaseLineTracer):
                 max_len_px=self.floating_stub_max_len_px,
             )
 
-        # Keep T-junction legs as independently markable runs after all bridge
-        # passes have had a chance to restore genuine drafting gaps.
+        # Keep T-junction legs independently markable.
         return split_runs_at_t_junctions(
             filtered,
             tol_px=max(2.0, 2.0 * dpi / 350.0),

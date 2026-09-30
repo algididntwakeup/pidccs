@@ -167,10 +167,8 @@ def test_paddleocr_extractor_single_pass():
 def test_skeleton_tracer_extracts_graph_edges():
     """Verify B.08 extracts graph edges for a line, T-junction, and diagonal.
 
-    Sejak `bridge_polyline_elbows` aktif, cabang yang MENEMPEL pada ujung run lain
-    digabung menjadi satu polyline (pipa bercabang = satu jaringan, supaya klik-ID
-    menyala sepanjang pipa). Karena itu jumlah run tidak lagi sama dengan jumlah
-    goresan di gambar; yang diperiksa adalah ARAH yang terwakili.
+    T-junction dan garis diagonal harus tetap terlihat sebagai run terpisah.
+    Yang diperiksa di sini adalah semua arah pipa terwakili.
     """
     import cv2
 

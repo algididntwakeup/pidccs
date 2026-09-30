@@ -688,9 +688,11 @@ utama pulih (ink coverage 0.00 → 1.00).
 
 - New `pidcorr/implementations/vector_tracer.py::VectorLineTracer(BaseLineTracer)` — extracts pipe
   geometry straight from vector PDFs (AutoCAD/SmartPlant) instead of binarizing a raster.
-- `tier_of(page)` classifies a page as `A1` (vector, line-dominated), `A2` (vector, curve-heavy) or
-  `raster` (scan/image) using the ≥50 path threshold from the Phase 2 spec. `tier_of_pdf(path)` is the
-  file-level helper used by the orchestrator.
+- `tier_of(page)` applies a routing heuristic: fewer than 50 PyMuPDF drawing paths is `raster`; at
+  least 50 paths is `A1` when at least 50 paths contain a straight-line item, otherwise `A2`.
+  `A1`/`A2` are not paper sizes or quality grades; both use the same vector extraction, and an empty
+  vector result falls back to raster. The threshold has not been benchmarked on mixed scan/vector PDFs.
+  `tier_of_pdf(path)` is the file-level helper used by the orchestrator.
 - `extract_vector_runs(pdf_path, dpi, rot)` returns `PipeRun`s with a schema identical to the skeleton
   tracer (`points: list[tuple[int,int]]`, `axis ∈ {h,v,d,poly}`, `color="#2563EB"`, `manual=False`).
 - **Engine decision (final)**: `pdfplumber` is the **default** engine, chosen for *output quality and
@@ -732,7 +734,7 @@ utama pulih (ink coverage 0.00 → 1.00).
 - **Hybrid dispatch in `orchestrator.py`**: `.pdf` input → `tier_of_pdf`; tier `A1`/`A2` → vector
   extraction and the binarization/skeletonization stage is bypassed entirely; `raster` tier or any
   non-PDF input (PNG/JPG) → existing `SkeletonLineTracer`. Empty vector results also fall back. The
-  result dict now records `"tracer": "vector:A1" | "raster"` for provenance.
+  result dict records `"tracer": "vector:A1" | "vector:A2" | "raster"` for provenance.
 - `factory.py` accepts `TRACER_IMPL=hybrid|vector|auto` (defaults to the skeleton tracer instance; the
   orchestrator decides the per-file path); `skeleton`/`morphology` still force the raster path.
 - **Verification**: reference sheet `BCD3-605-42-PID-1-014-01 Rev.6-CCD2.pdf` → **74 runs in 0.52 s**

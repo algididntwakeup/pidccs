@@ -12,7 +12,7 @@ from .implementations.yolo_classifier import YOLOValveClassifier
 def get_configured_orchestrator() -> PipelineOrchestrator:
     """Build a PipelineOrchestrator instance based on runtime environment configuration."""
     detector_type = os.environ.get("DETECTOR_IMPL", "yolo_tiled").lower()
-    tracer_type = os.environ.get("TRACER_IMPL", "morphology").lower()
+    tracer_type = os.environ.get("TRACER_IMPL", "skeleton").lower()
     ocr_type = os.environ.get("OCR_IMPL", "rapid_ocr").lower()
 
     # 1. Symbol Detector selection

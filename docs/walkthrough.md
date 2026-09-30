@@ -315,7 +315,7 @@ piksel) yang tidak pernah 100% lurus. Padahal koordinat garis pipa sudah tersimp
 
 ### Implementation
 - **`pidcorr/implementations/vector_tracer.py`** (baru) — `VectorLineTracer(BaseLineTracer)`:
-  `tier_of` / `tier_of_pdf` (A1 vektor-dominan-garis, A2 vektor-banyak-kurva, raster),
+  `tier_of` / `tier_of_pdf` (heuristik routing A1/A2 vektor, raster),
   `extract_vector_runs(pdf_path, dpi, rot)` -> `list[PipeRun]` dengan skema identik skeleton tracer
   (`points: [(int,int), ...]`, `axis ∈ {h,v,d,poly}`, `color="#2563EB"`, `manual=False`).
 - **Interval bucket merge** segmen H/V: `AXIS_TOL_PT=1.2`, `MERGE_GAP_PT=42.0`, `MIN_RUN_PT=10.0`,
@@ -325,7 +325,7 @@ piksel) yang tidak pernah 100% lurus. Padahal koordinat garis pipa sudah tersimp
 - **Hybrid dispatch di `pidcorr/orchestrator.py`**: input `.pdf` -> cek tier; A1/A2 -> ekstraksi
   vektor dan tahap binarisasi/skeletonisasi **di-bypass**; raster atau non-PDF (PNG/JPG) -> otomatis
   `SkeletonLineTracer`. Hasil kosong dari jalur vektor juga jatuh ke raster. Provenance dicatat di
-  `result["tracer"] = "vector:A1" | "raster"`.
+  `result["tracer"] = "vector:A1" | "vector:A2" | "raster"`.
 - `pidcorr/factory.py` menerima `TRACER_IMPL=hybrid|vector|auto`; `skeleton`/`morphology` tetap
   memaksa jalur raster (dipakai benchmark A/B).
 - `pdfplumber>=0.11.0` ditambahkan ke `backend/requirements.txt` dan dipasang di `api` + `worker`.
@@ -379,6 +379,9 @@ piksel) yang tidak pernah 100% lurus. Padahal koordinat garis pipa sudah tersimp
   **identik** `(559, 421) → (5615, 3857)` px. Selisih 2 run berasal dari penguraian kurva, bukan
   pergeseran koordinat.
 - Input PNG raster: `tier_of_pdf` -> `raster`, orchestrator memakai skeleton tracer tanpa error.
+- Catatan tier: ambang 50 drawing path adalah heuristik routing, bukan skor kualitas; A1 berarti
+  minimal 50 path memiliki item garis, A2 berarti halaman melewati ambang path tetapi tidak ambang
+  garis. Keduanya menjalankan ekstraksi vektor yang sama, dengan fallback raster jika hasil kosong.
 - `pytest backend/tests/test_vector_tracer.py` — unit + integrasi (skema PipeRun, <1 s, kelurusan,
   closed-path, dispatch hybrid, footgun rotasi PyMuPDF, kesetaraan engine, pemilihan `VECTOR_ENGINE`).
 
