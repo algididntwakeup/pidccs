@@ -16,6 +16,8 @@
 
 > **For future contributors and agents:** Read [`AGENTS.md`](../AGENTS.md) for the current product constraints and verification checklist before changing this pipeline. Treat diagrams below as architecture context; the active sheet page, detection service, and orchestrator are the source of truth for runtime behavior.
 
+> **Silent HITL tracking:** The sheet editor best-effort posts marking, group assignment, and Piping ID rename actions to `POST /api/v1/tracking/log`. The backend records `user_id`, `project_id`, optional `sheet_id`, `action_type`, `payload_json`, and server timestamp in `GroundTruthLog`. This is an interaction trail for later curation and model evaluation, not an automatic training feed or proof that every logged action is a final, correct label. See [`ML_GROUND_TRUTH_TRACKING.md`](ML_GROUND_TRUTH_TRACKING.md) for the event contract and data preparation guidance.
+
 ---
 
 ## 1. Architecture Philosophy

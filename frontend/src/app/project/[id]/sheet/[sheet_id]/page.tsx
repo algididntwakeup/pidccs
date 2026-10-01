@@ -74,6 +74,7 @@ import {
   downloadProtectedFile,
   getAuthorizationHeaders,
   getLocalAccessToken,
+  logGroundTruth,
 } from '@/lib/api';
 import { parsePipingIdTag } from '@/lib/tagParser';
 import { useHistory } from '@/hooks/useHistory';
@@ -547,6 +548,22 @@ export default function ProjectWorkspace() {
     if (!result || !projectId || !activeSheet) return;
     const run = result.runs[runIdx];
     if (!run || run.marked !== false) return;
+    const xs = run.points.map(([x]) => x);
+    const ys = run.points.map(([, y]) => y);
+    void logGroundTruth(projectId, activeSheet.id, 'mark_pipe', {
+      run_id: run.id ?? null,
+      run_idx: runIdx,
+      bbox: {
+        x1: Math.min(...xs),
+        y1: Math.min(...ys),
+        x2: Math.max(...xs),
+        y2: Math.max(...ys),
+      },
+      points: run.points,
+      color: run.color || '#2563EB',
+      group_id: run.group_id ?? null,
+      piping_id: run.pid || run.label || null,
+    });
     const nextRuns = result.runs.map((item, idx) => idx === runIdx
       ? { ...item, marked: true, color: item.color || '#2563EB' }
       : item);
@@ -762,6 +779,15 @@ export default function ProjectWorkspace() {
         runs: nextRuns,
         piping_ids: nextPids,
       });
+      if (targetRun.pid !== trimmed || targetRun.label !== trimmed) {
+        void logGroundTruth(projectId, activeSheet.id, 'rename_pipe', {
+          run_id: targetRun.id ?? null,
+          run_idx: runIdx,
+          previous_piping_id: targetRun.pid || targetRun.label || null,
+          piping_id: trimmed || null,
+          affected_run_ids: [targetRun.id ?? runIdx],
+        });
+      }
       pushHistory(
         `Ubah tag pipa #${runIdx} (${trimmed || 'kosong'})`,
         prevRuns,
@@ -1443,11 +1469,18 @@ export default function ProjectWorkspace() {
       ...result,
       manual_groups: nextGroups,
     };
+    void logGroundTruth(projectId, activeSheet.id, 'assign_group', {
+      group_id: newGroup.id,
+      group_name: newGroup.name,
+      color: newGroup.color,
+      kind: newGroup.kind,
+      affected_run_ids: [],
+    });
     setResult(updated);
     setActiveGroupId(newGroup.id);
     await persistGroups(updated);
     showToast(`Grup "${name}" berhasil dibuat & aktif (Mode Kuas)`, 2500);
-  }, [result, activeSheet, persistGroups, showToast]);
+  }, [result, activeSheet, projectId, persistGroups, showToast]);
 
   const handleRenameGroup = useCallback(
     async (group: ManualGroup, newName: string) => {
@@ -1470,6 +1503,36 @@ export default function ProjectWorkspace() {
 
       const targetRun = result.runs[runIdx];
       if (!targetRun) return;
+
+      const isNewlyMarked = targetRun.marked === false;
+      const runXs = targetRun.points.map(([x]) => x);
+      const runYs = targetRun.points.map(([, y]) => y);
+      const affectedRunId = targetRun.id ?? runIdx;
+      if (isNewlyMarked) {
+        void logGroundTruth(projectId, activeSheet.id, 'mark_pipe', {
+          run_id: targetRun.id ?? null,
+          run_idx: runIdx,
+          bbox: {
+            x1: Math.min(...runXs),
+            y1: Math.min(...runYs),
+            x2: Math.max(...runXs),
+            y2: Math.max(...runYs),
+          },
+          points: targetRun.points,
+          color: group.color,
+          group_id: group.id,
+          group_name: group.name,
+          piping_id: targetRun.pid || targetRun.label || null,
+        });
+      }
+      void logGroundTruth(projectId, activeSheet.id, 'assign_group', {
+        group_id: group.id,
+        group_name: group.name,
+        color: group.color,
+        kind: group.kind,
+        piping_id: targetRun.pid || targetRun.label || null,
+        affected_run_ids: [affectedRunId],
+      });
 
       const kind = group.kind || 'circuit';
       const updatedRun: PipeRun = {
@@ -1517,7 +1580,7 @@ export default function ProjectWorkspace() {
       setResult(updatedResult);
       await persistGroups(updatedResult);
     },
-    [result, activeSheet, activeGroupId, persistGroups, pushHistory]
+    [result, activeSheet, activeGroupId, projectId, persistGroups, pushHistory]
   );
 
   const handleAddGroup = useCallback(async (kind: 'system' | 'circuit') => {
@@ -1533,13 +1596,20 @@ export default function ProjectWorkspace() {
       color: nextGroupColor(result.manual_groups || []),
       kind,
     };
+    void logGroundTruth(projectId, activeSheet.id, 'assign_group', {
+      group_id: group.id,
+      group_name: group.name,
+      color: group.color,
+      kind: group.kind,
+      affected_run_ids: [],
+    });
     await persistGroups({
       ...result,
       manual_groups: [...(result.manual_groups || []), group],
     });
     setNewGroupName('');
     showToast(`${kind === 'system' ? 'Corrosion System' : 'Corrosion Circuit'} "${name}" dibuat`, 2500);
-  }, [result, activeSheet, newGroupName, persistGroups, showToast]);
+  }, [result, activeSheet, projectId, newGroupName, persistGroups, showToast]);
 
   const handleAssignToGroup = useCallback(
     async (group: ManualGroup) => {
@@ -1575,6 +1645,14 @@ export default function ProjectWorkspace() {
           ? { ...item, stampPosition }
           : item
       );
+      void logGroundTruth(projectId, activeSheet.id, 'assign_group', {
+        group_id: group.id,
+        group_name: group.name,
+        color: group.color,
+        kind,
+        affected_run_ids: [...selectedMarked].map((idx) => result.runs[idx].id ?? idx),
+        run_indices: [...selectedMarked],
+      });
       pushHistory(
         `Assign pipa ke ${kind === 'system' ? 'system' : 'circuit'} ${group.name}`,
         result.runs,
@@ -1585,7 +1663,7 @@ export default function ProjectWorkspace() {
       await persistGroups({ ...result, runs: nextRuns, manual_groups: nextGroups });
       showToast(`${selectedMarked.size} pipa ditandai ke ${group.name}`, 2500);
     },
-    [result, activeSheet, selectedRunIndices, persistGroups, pushHistory, showToast]
+    [result, activeSheet, projectId, selectedRunIndices, persistGroups, pushHistory, showToast]
   );
 
   const handleUpdateGroupStamp = useCallback(

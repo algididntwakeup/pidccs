@@ -26,6 +26,29 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promi
   return globalThis.fetch(input, { ...init, headers });
 }
 
+/** Best-effort user action logging. Tracking must never interrupt the editor UX. */
+export async function logGroundTruth(
+  projectId: string,
+  sheetId: string,
+  actionType: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await apiFetch(`${API_BASE}/api/v1/tracking/log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_id: projectId,
+        sheet_id: sheetId,
+        action_type: actionType,
+        payload_json: payload,
+      }),
+    });
+  } catch {
+    // Silent tracking is intentionally best effort; logging failures are not UI errors.
+  }
+}
+
 export async function fetchProtectedAsset(url: string): Promise<string> {
   const response = await apiFetch(url);
   if (!response.ok) throw new Error('Failed to load protected asset');

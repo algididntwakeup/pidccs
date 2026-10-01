@@ -26,6 +26,10 @@ Tier `A1` dan `A2` adalah label heuristik untuk memilih jalur tracing, bukan uku
 
 Aturan ini cukup untuk routing umum dengan fallback, tetapi belum menjadi klasifikasi kualitas yang terukur: ambang 50 belum divalidasi pada kumpulan PDF representatif, dan halaman campuran (gambar scan dengan overlay vektor) dapat masuk tier vektor. Karena itu jangan menafsirkan `A1` sebagai mutu lebih tinggi dari `A2`; optimasi threshold memerlukan benchmark pada PDF vektor, raster, dan campuran.
 
+### Silent Tracking untuk kurasi data HITL
+
+Editor mengirim aksi marking, assignment grup, dan koreksi Piping ID ke `GroundTruthLog` secara best-effort melalui `POST /api/v1/tracking/log`. Ini membangun jejak umpan balik engineer untuk kurasi dan evaluasi ML di masa depan; log belum menjadi pipeline training otomatis dan aksi mentah tidak boleh langsung dianggap label ground truth. Rincian tipe event, payload, batas interpretasi, dan alur kurasinya ada di [dokumentasi Silent Tracking & ML](docs/ML_GROUND_TRUTH_TRACKING.md).
+
 ---
 
 ## Ringkasan Eksekutif / Executive Summary
