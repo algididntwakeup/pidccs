@@ -598,10 +598,105 @@ def _mask_compact_thickenings(clean_binary: np.ndarray, dpi: int) -> np.ndarray:
     return output
 
 
+def _compact_ink_contours(binary: np.ndarray, dpi: int):
+    """Find compact, locally dense ink bodies without symbol detections.
+
+    A local box-filter separates dense symbol bodies from thin pipe strokes.
+    Returned snap targets are observed source-ink pixels inside each compact
+    density cluster, so snapping does not land on an inflated morphology edge.
+    """
+    scale = max(1.0, dpi / 72.0)
+    ink = (binary > 0).astype(np.uint8) * 255
+    window = max(3, int(round(3.0 * scale)) | 1)
+    density = cv2.boxFilter((ink > 0).astype(np.float32), -1, (window, window))
+    dense = (density >= 0.30).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(dense, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    max_side = 20.0 * scale
+    candidates = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if min(w, h) < max(2, int(round(2.0 * scale))) or max(w, h) > max_side:
+            continue
+        ys, xs = np.where(ink[y:y + h, x:x + w] > 0)
+        if len(xs):
+            candidates.append(np.column_stack((xs + x, ys + y)).astype(float))
+    return candidates
+
+
+def _snap_and_keep_short_runs(runs, binary: np.ndarray, dpi: int,
+                              min_length_px: float):
+    """Snap to compact ink contours and keep short runs only when attached.
+
+    A short run survives when an endpoint meets a compact dense contour or a
+    different run (the geometric signature of a T-junction). Isolated glyph
+    strokes remain filtered. Snapping projects the endpoint onto the nearest
+    contour pixel, preserving the run's final direction. Runs above the minimum
+    threshold keep their existing symbol gaps; endpoint snapping is limited to
+    the short segments this pass is meant to recover.
+    """
+    if not runs:
+        return runs
+    contours = _compact_ink_contours(binary, dpi)
+    link_radius = max(2.0, 8.0 * dpi / 72.0)
+    junction_radius = max(2.0, 2.0 * dpi / 350.0)
+    points = [list(run.points) for run in runs]
+    lengths = [sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                   for a, b in zip(pts, pts[1:])) for pts in points]
+    out = []
+    for idx, run in enumerate(runs):
+        pts = points[idx]
+        if len(pts) < 2:
+            continue
+        if lengths[idx] >= min_length_px:
+            out.append(run)
+            continue
+        attached = False
+        for end_idx, prev_idx in ((0, 1), (-1, -2)):
+            ex, ey = map(float, pts[end_idx])
+            vx, vy = ex - pts[prev_idx][0], ey - pts[prev_idx][1]
+            vlen = math.hypot(vx, vy)
+            best = None
+            best_dist = link_radius + 1.0
+            for contour in contours:
+                delta = contour - np.array([ex, ey])
+                dists = np.hypot(delta[:, 0], delta[:, 1])
+                nearest_idx = int(np.argmin(dists))
+                dist = float(dists[nearest_idx])
+                if dist > link_radius or (vlen and (delta[nearest_idx, 0] * vx
+                                                     + delta[nearest_idx, 1] * vy) < -dist * vlen * 0.25):
+                    continue
+                if dist < best_dist:
+                    best_dist, best = dist, contour[nearest_idx]
+            if best is not None:
+                pts[end_idx] = [float(best[0]), float(best[1])]
+                attached = True
+            # A short branch terminating on another run is a T-junction leg.
+            for other_idx, other in enumerate(points):
+                if other_idx == idx:
+                    continue
+                for a, b in zip(other, other[1:]):
+                    dx, dy = b[0] - a[0], b[1] - a[1]
+                    denom = dx * dx + dy * dy
+                    if denom <= 0:
+                        continue
+                    t = max(0.0, min(1.0, ((ex - a[0]) * dx + (ey - a[1]) * dy) / denom))
+                    if math.hypot(ex - (a[0] + t * dx), ey - (a[1] + t * dy)) <= junction_radius:
+                        attached = True
+                        break
+                if attached:
+                    break
+        if lengths[idx] < min_length_px and not attached:
+            continue
+        if isinstance(run, PipeRun):
+            run.points = pts
+        out.append(run)
+    return out
+
+
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
-    def __init__(self, min_length_px: int = 12, suppress_text_artifacts: bool = True,
+    def __init__(self, min_length_px: int = 8, suppress_text_artifacts: bool = True,
                  text_artifact_max_side_pt: float = 10.0,
                  text_artifact_max_area_pt2: float = 40.0,
                  text_artifact_max_aspect: float = 4.0,
@@ -639,6 +734,7 @@ class SkeletonLineTracer(BaseLineTracer):
         )
 
         # Preserve one-pixel branches; opening erases them before graph tracing.
+        source_binary = binary.copy()
         clean_binary = binary.copy()
 
         # 1. Dilated Text Masking: Scaled with DPI (5px at 350 DPI)
@@ -829,8 +925,11 @@ class SkeletonLineTracer(BaseLineTracer):
         skel = _morphological_skeleton(clean_binary)
 
         # 5. Extract graph segments and resolve junctions (crossovers vs T-junctions)
-        min_len = int(self.min_length_px * (dpi / 350.0))
-        raw_runs = _graph_segments(skel, min_len)
+        min_len = max(5, int(self.min_length_px * (dpi / 350.0)))
+        # Extract down to the noise floor; attached short candidates are
+        # classified geometrically after the standard suppressions below.
+        extraction_floor = max(5, int(5.0 * dpi / 350.0))
+        raw_runs = _graph_segments(skel, extraction_floor)
 
         # 6. Apply standard suppressions (symbol edges, equipment interiors, furniture)
         filtered = suppress_box_edges(raw_runs, detections or [])
@@ -875,6 +974,14 @@ class SkeletonLineTracer(BaseLineTracer):
                 filtered, detections=detections, page_wh=(W, H), dpi=dpi,
                 max_len_px=self.floating_stub_max_len_px,
             )
+
+        # Keep sub-threshold raster segments only when their geometry connects
+        # to a compact dense ink body or a T-junction, and snap those endpoints
+        # to the body's actual contour. This path is entirely OpenCV based.
+        filtered = _snap_and_keep_short_runs(
+            filtered, source_binary, dpi=dpi,
+            min_length_px=min_len,
+        )
 
         # Keep T-junction legs independently markable.
         return split_runs_at_t_junctions(

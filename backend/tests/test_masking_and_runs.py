@@ -11,7 +11,10 @@ if _ROOT not in sys.path:
 from pidcorr.lines import (PipeRun, bridge_inline_valve_gaps, suppress_text_artifacts,
                            suppress_floating_stubs, suppress_low_ink_diagonals,
                            suppress_revision_clouds, suppress_diagonal_artifacts)
-from pidcorr.implementations.skeleton_tracer import SkeletonLineTracer, _graph_segments, _morphological_skeleton
+from pidcorr.implementations.skeleton_tracer import (
+    SkeletonLineTracer, _graph_segments, _morphological_skeleton,
+    _snap_and_keep_short_runs,
+)
 
 
 def test_pipe_run_schema_fields():
@@ -31,6 +34,26 @@ def test_pipe_run_schema_fields():
     assert run["label"] == '605-6"-GR-BDA-029-H50'
     assert run["manual"] is True
     assert run["color"] == "#2563EB"
+
+
+def test_short_runs_survive_only_when_connected_to_dense_contour_or_t_junction():
+    binary = np.zeros((100, 120), dtype=np.uint8)
+    cv2.ellipse(binary, (55, 50), (8, 7), 0, 0, 360, 255, -1)
+    long_pipe = PipeRun(points=[(5, 50), (30, 50)], axis="h")
+    valve_stub = PipeRun(points=[(37, 50), (43, 50)], axis="h")
+    t_main = PipeRun(points=[(10, 15), (90, 15)], axis="h")
+    t_branch = PipeRun(points=[(50, 23), (50, 16)], axis="v")
+    isolated_noise = PipeRun(points=[(5, 85), (11, 85)], axis="h")
+
+    kept = _snap_and_keep_short_runs(
+        [long_pipe, valve_stub, t_main, t_branch, isolated_noise],
+        binary, dpi=72, min_length_px=8,
+    )
+
+    assert isolated_noise not in kept
+    assert valve_stub in kept
+    assert valve_stub.points[-1][0] == pytest.approx(47, abs=2)
+    assert t_branch in kept
 
 
 def test_bridge_inline_valve_gaps():

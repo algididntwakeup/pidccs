@@ -253,7 +253,8 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
             continue
         name = g.get("name") or f"Group {gi + 1}"
         groups.append((_hex_to_rgb(g.get("color") or "#F59E0B"), name, idxs, name, name,
-                       g.get("stampPosition") or g.get("stamp_position")))
+                       g.get("stampPosition") or g.get("stamp_position"),
+                       float(g.get("stampScale") or g.get("stamp_scale") or 1.0)))
 
     # --- halaman dasar: PDF asli (vektor, tetap tajam) atau gambar dibungkus PDF ---
     from .pipeline import rotate_bgr, unrotate_matrix
@@ -288,7 +289,7 @@ def export_marked_pdf(result, out_path, mode="engineer", include_legend=False):
     opacity = 0.8
 
     n_annot = 0
-    for rgb, subj, run_idxs, _txt, _stamp, _position in groups:
+    for rgb, subj, run_idxs, _txt, _stamp, _position, *rest in groups:
         col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
         for ri in run_idxs:
             run = runs[ri]
@@ -410,7 +411,9 @@ def _stamp_groups(page, groups, runs, to_pdf, dpi):
     """
     import fitz
 
-    for rgb, _subj, run_idxs, _txt, stamp, stamp_position in groups:
+    for item in groups:
+        rgb, _subj, run_idxs, _txt, stamp, stamp_position = item[:6]
+        stamp_scale = float(item[6]) if len(item) > 6 and item[6] else 1.0
         if not stamp or not run_idxs:
             continue
         col = (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
@@ -419,15 +422,16 @@ def _stamp_groups(page, groups, runs, to_pdf, dpi):
             # box's top-left. Bake a bordered text box into PDF content so export
             # matches the engineer's canvas placement exactly.
             anchor = fitz.Point(float(stamp_position["x"]), float(stamp_position["y"])) * to_pdf
-            width = max(68.0, 6.2 * len(stamp) + 12.0)
-            height = 24.0
+            width = max(68.0, 6.2 * len(stamp) + 12.0) * stamp_scale
+            height = 24.0 * stamp_scale
+            fontsize = 9.5 * stamp_scale
             rect = fitz.Rect(anchor.x, anchor.y, anchor.x + width, anchor.y + height)
             page.draw_rect(rect, color=col, fill=(1, 1, 1), fill_opacity=0.88,
-                           width=1.0, overlay=True)
-            text_rect = fitz.Rect(rect.x0 + 4.0, rect.y0 + 2.0,
-                                  rect.x1 - 4.0, rect.y1 - 2.0)
-            page.insert_textbox(text_rect, stamp, fontsize=9.5, fontname="helv",
-                                color=col, align=fitz.TEXT_ALIGN_LEFT, overlay=True)
+                           width=1.0 * stamp_scale, overlay=True)
+            text_rect = fitz.Rect(rect.x0 + 4.0 * stamp_scale, rect.y0 + 2.0 * stamp_scale,
+                                  rect.x1 - 4.0 * stamp_scale, rect.y1 - 2.0 * stamp_scale)
+            page.insert_textbox(text_rect, stamp, fontsize=fontsize, fontname="helv",
+                                color=col, align=fitz.TEXT_ALIGN_CENTER, overlay=True)
             continue
         longest = max((runs[ri] for ri in run_idxs if 0 <= ri < len(runs)),
                       key=_run_len, default=None)

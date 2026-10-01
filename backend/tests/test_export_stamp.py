@@ -190,3 +190,42 @@ def test_saved_stamp_position_exports_bordered_text_at_position(tmp_path):
     assert stamp_rect.width >= 68 and stamp_rect.height == 24
     assert stamp_rect in page.rect
     exported.close()
+
+
+def test_saved_stamp_scale_exports_scaled_bordered_box(tmp_path):
+    source = tmp_path / "scale-source.pdf"
+    document = pymupdf.open()
+    document.new_page(width=500, height=500)
+    document.save(source)
+    document.close()
+
+    output = tmp_path / "scale-stamp.pdf"
+    result = {
+        "image_path": str(source),
+        "dpi": 72,
+        "w": 500,
+        "h": 500,
+        "runs": [{"points": [[50, 50], [350, 50]], "group_id": "g1", "color": "#2563EB"}],
+        "piping_ids": [],
+        "manual_groups": [{
+            "id": "g1",
+            "name": "SCALED-STAMP",
+            "color": "#10B981",
+            "kind": "circuit",
+            "stampPosition": {"x": 100, "y": 120},
+            "stampScale": 1.5,
+        }],
+    }
+
+    assert export_marked_pdf(result, str(output), mode="engineer") == 1
+
+    exported = pymupdf.open(output)
+    page = exported[0]
+    stamp_rect = next(drawing["rect"] for drawing in page.get_drawings()
+                      if drawing["type"] == "fs")
+    assert abs(stamp_rect.x0 - 100) < 0.1
+    assert abs(stamp_rect.y0 - 120) < 0.1
+    assert "SCALED-STAMP" in page.get_text()
+    assert abs(stamp_rect.height - 36.0) < 0.1
+    assert stamp_rect.width >= 68 * 1.5
+    exported.close()

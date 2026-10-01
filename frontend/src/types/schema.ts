@@ -118,6 +118,7 @@ export interface ManualGroup {
   color: string;
   kind: 'system' | 'circuit';
   stampPosition?: { x: number; y: number };
+  stampScale?: number;
 }
 
 export interface CircuitProvenance {

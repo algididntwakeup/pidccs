@@ -64,6 +64,10 @@ class ManualGroup(BaseModel):
         default=None,
         description="Top-left stamp position in source drawing pixels",
     )
+    stampScale: Optional[float] = Field(
+        default=1.0,
+        description="Scale multiplier for stamp size",
+    )
 
 class DigitizationResult(BaseModel):
     image_path: str = Field(default="", description="Path or reference identifier of base drawing")

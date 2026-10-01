@@ -118,8 +118,9 @@ function initialStampPosition(
   stampName: string,
   imageWidth: number,
   imageHeight: number,
+  scale: number = 1.0,
 ): { x: number; y: number } | undefined {
-  const validRuns = runs.filter((run) => run.points?.length >= 2);
+  const validRuns = runs.filter((run) => (run.points?.length ?? 0) >= 2);
   if (validRuns.length === 0) return undefined;
   const lengthOf = (run: PipeRun) => run.points.slice(1).reduce((sum, point, index) =>
     sum + Math.hypot(point[0] - run.points[index][0], point[1] - run.points[index][1]), 0);
@@ -139,10 +140,18 @@ function initialStampPosition(
     remaining -= segmentLength;
     midpoint = to;
   }
-  const width = Math.max(82, stampName.length * 10 + 14);
+  const baseDim = Math.min(imageWidth, imageHeight);
+  const baseFontSize = Math.max(18, Math.round(baseDim * 0.016));
+  const fontSize = Math.max(12, Math.round(baseFontSize * scale));
+  const boxHeight = Math.max(28, Math.round(fontSize * 2.2));
+  const charWidth = fontSize * 0.65;
+  const width = Math.max(
+    Math.round(fontSize * 4.5),
+    Math.round((stampName || '').length * charWidth + fontSize * 1.8)
+  );
   return {
     x: Math.max(0, Math.min(imageWidth - width, midpoint[0] - width / 2)),
-    y: Math.max(0, Math.min(imageHeight - 30, midpoint[1] - 50)),
+    y: Math.max(0, Math.min(imageHeight - boxHeight, midpoint[1] - boxHeight - 15)),
   };
 }
 
@@ -1481,7 +1490,8 @@ export default function ProjectWorkspace() {
           groupRuns,
           group.name,
           result.w || activeSheet.width || 3000,
-          result.h || activeSheet.height || 2000
+          result.h || activeSheet.height || 2000,
+          group.stampScale ?? 1.0
         );
       const nextGroups = (result.manual_groups || []).map((item) =>
         item.id === group.id && !item.stampPosition && stampPosition
@@ -1551,6 +1561,7 @@ export default function ProjectWorkspace() {
         group.name,
         result.w || activeSheet.width || 3000,
         result.h || activeSheet.height || 2000,
+        group.stampScale ?? 1.0,
       );
       const nextGroups = (result.manual_groups || []).map((item) =>
         item.id === group.id && !item.stampPosition && stampPosition
@@ -1571,11 +1582,20 @@ export default function ProjectWorkspace() {
   );
 
   const handleUpdateGroupStamp = useCallback(
-    async (groupId: string, stampPosition: { x: number; y: number }) => {
+    async (
+      groupId: string,
+      stampPosition?: { x: number; y: number },
+      stampScale?: number
+    ) => {
       if (!result || !activeSheet) return;
-      const manualGroups = (result.manual_groups || []).map((group) =>
-        group.id === groupId ? { ...group, stampPosition } : group
-      );
+      const manualGroups = (result.manual_groups || []).map((group) => {
+        if (group.id !== groupId) return group;
+        return {
+          ...group,
+          ...(stampPosition ? { stampPosition } : {}),
+          ...(typeof stampScale === 'number' ? { stampScale } : {}),
+        };
+      });
       const updated = { ...result, manual_groups: manualGroups };
       setResult(updated);
       await persistGroups(updated);
@@ -2388,6 +2408,45 @@ export default function ProjectWorkspace() {
                               title={`Hapus grup ${g.name}`}
                             >
                               <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Stamp Scale / Size Control */}
+                        <div
+                          className="mt-1.5 pt-1.5 border-t border-slate-100 flex items-center justify-between text-[11px]"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <span className="text-slate-500 font-medium text-[10px]">
+                            Ukuran Stempel:
+                          </span>
+                          <div className="flex items-center space-x-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const current = g.stampScale ?? 1.0;
+                                const next = Math.max(0.4, Math.round((current - 0.2) * 10) / 10);
+                                void handleUpdateGroupStamp(g.id, g.stampPosition, next);
+                              }}
+                              className="w-4 h-4 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold flex items-center justify-center transition text-xs leading-none"
+                              title="Perkecil stempel"
+                            >
+                              -
+                            </button>
+                            <span className="font-mono font-bold text-slate-800 text-[11px] w-9 text-center">
+                              {Math.round((g.stampScale ?? 1.0) * 100)}%
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const current = g.stampScale ?? 1.0;
+                                const next = Math.min(3.5, Math.round((current + 0.2) * 10) / 10);
+                                void handleUpdateGroupStamp(g.id, g.stampPosition, next);
+                              }}
+                              className="w-4 h-4 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold flex items-center justify-center transition text-xs leading-none"
+                              title="Perbesar stempel"
+                            >
+                              +
                             </button>
                           </div>
                         </div>

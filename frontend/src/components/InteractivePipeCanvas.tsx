@@ -102,7 +102,7 @@ interface InteractivePipeCanvasProps {
   activeGroupId?: string | null;
   onAssignRunToActiveGroup?: (runIdx: number) => Promise<void>;
   onSelectGroup?: (groupId: string | null) => void;
-  onUpdateGroupStamp: (groupId: string, position: { x: number; y: number }) => Promise<void>;
+  onUpdateGroupStamp: (groupId: string, position: { x: number; y: number }, scale?: number) => Promise<void> | void;
   pipingIds: PipingID[];
   showOverlay: boolean;
   opacity: number;
@@ -174,6 +174,16 @@ export default function InteractivePipeCanvas({
     y: number;
     moved: boolean;
   } | null>(null);
+  const [stampResize, setStampResize] = useState<{
+    groupId: string;
+    startX: number;
+    startY: number;
+    initialScale: number;
+    currentScale: number;
+    boxWidth: number;
+    boxHeight: number;
+  } | null>(null);
+  const [hoveredStampId, setHoveredStampId] = useState<string | null>(null);
   const [splitPreview, setSplitPreview] = useState<{ x: number; y: number } | null>(null);
   const [customColor, setCustomColor] = useState('#2563EB');
   const [splitting, setSplitting] = useState(false);
@@ -1049,10 +1059,44 @@ export default function InteractivePipeCanvas({
     );
   };
 
+  // Dynamic stamp sizing based on canvas resolution and user scale
+  const getStampDimensions = useCallback(
+    (groupName: string, scaleProp?: number) => {
+      const baseDim = Math.min(width, height);
+      // Percentage-based dynamic font size: ~1.6% of min canvas dimension
+      // e.g. on 2339px height -> ~37px font; on 3500px -> ~56px font. Minimum 18px.
+      const baseFontSize = Math.max(18, Math.round(baseDim * 0.016));
+      const scale = typeof scaleProp === 'number' && scaleProp > 0 ? scaleProp : 1.0;
+      const fontSize = Math.max(12, Math.round(baseFontSize * scale));
+      const boxHeight = Math.max(28, Math.round(fontSize * 2.2));
+      const charWidth = fontSize * 0.65;
+      const boxWidth = Math.max(
+        Math.round(fontSize * 4.5),
+        Math.round((groupName || '').length * charWidth + fontSize * 1.8)
+      );
+      const rx = Math.max(4, Math.round(fontSize * 0.18));
+      const strokeWidth = Math.max(2, Math.round(fontSize * 0.1));
+      const accentWidth = Math.max(6, Math.round(fontSize * 0.22));
+
+      return {
+        scale,
+        fontSize,
+        boxWidth,
+        boxHeight,
+        rx,
+        strokeWidth,
+        accentWidth,
+      };
+    },
+    [width, height]
+  );
+
   const handleStartStampDrag = (
     group: ManualGroup,
     currentPosition: { x: number; y: number },
     boxWidth: number,
+    boxHeight: number,
+    currentScale: number,
     e: React.PointerEvent
   ) => {
     e.preventDefault();
@@ -1087,7 +1131,7 @@ export default function InteractivePipeCanvas({
       const p = getImageCoordinates(moveEvent);
       if (!p) return;
       const x = Math.max(0, Math.min(width - boxWidth, p.x - pointerOffsetX));
-      const y = Math.max(0, Math.min(height - 34, p.y - pointerOffsetY));
+      const y = Math.max(0, Math.min(height - boxHeight, p.y - pointerOffsetY));
       if (Math.hypot(x - startX, y - startY) > 3) {
         moved = true;
       }
@@ -1101,12 +1145,16 @@ export default function InteractivePipeCanvas({
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerUp);
 
-      if (viewer && traceTool === 'pan') {
+      if (viewer && traceTool === 'pan' && !stampResize) {
         applyMouseNav(viewer, true);
       }
 
       if (moved) {
-        void onUpdateGroupStamp(group.id, { x: Math.round(lastX), y: Math.round(lastY) });
+        void onUpdateGroupStamp(
+          group.id,
+          { x: Math.round(lastX), y: Math.round(lastY) },
+          currentScale
+        );
       } else {
         if (onSelectGroup) {
           onSelectGroup(group.id);
@@ -1118,6 +1166,87 @@ export default function InteractivePipeCanvas({
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointercancel', onPointerUp);
+  };
+
+  const handleStartStampResize = (
+    group: ManualGroup,
+    position: { x: number; y: number },
+    boxWidth: number,
+    boxHeight: number,
+    currentScale: number,
+    e: React.PointerEvent
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!viewer) return;
+
+    const pointer = getImageCoordinates(e);
+    if (!pointer) return;
+
+    applyMouseNav(viewer, false);
+
+    const startX = pointer.x;
+    const startY = pointer.y;
+    let lastScale = currentScale;
+
+    setStampResize({
+      groupId: group.id,
+      startX,
+      startY,
+      initialScale: currentScale,
+      currentScale,
+      boxWidth,
+      boxHeight,
+    });
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const p = getImageCoordinates(moveEvent);
+      if (!p) return;
+      const dx = p.x - startX;
+      const dy = p.y - startY;
+      const deltaRatio = (dx / boxWidth + dy / boxHeight) * 0.5;
+      const newScale = Math.max(
+        0.3,
+        Math.min(4.0, Math.round(currentScale * (1 + deltaRatio) * 20) / 20)
+      );
+      lastScale = newScale;
+      setStampResize((prev) => (prev ? { ...prev, currentScale: newScale } : null));
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+
+      if (viewer && traceTool === 'pan' && !stampDrag) {
+        applyMouseNav(viewer, true);
+      }
+
+      setStampResize(null);
+      void onUpdateGroupStamp(group.id, position, lastScale);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+  };
+
+  const handleStampWheel = (
+    e: React.WheelEvent,
+    group: ManualGroup,
+    currentPos: { x: number; y: number }
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const delta = e.deltaY < 0 ? 0.1 : -0.1;
+    const currentScale = group.stampScale ?? 1.0;
+    const newScale = Math.max(
+      0.3,
+      Math.min(4.0, Math.round((currentScale + delta) * 10) / 10)
+    );
+    if (newScale !== currentScale) {
+      void onUpdateGroupStamp(group.id, currentPos, newScale);
+    }
   };
 
   const renderGroupStamp = (group: ManualGroup) => {
@@ -1145,18 +1274,39 @@ export default function InteractivePipeCanvas({
       );
       return length > bestLength ? run : best;
     });
+
+    const activeScale =
+      stampResize?.groupId === group.id
+        ? stampResize.currentScale
+        : group.stampScale ?? 1.0;
+
+    const {
+      fontSize,
+      boxWidth,
+      boxHeight,
+      rx,
+      strokeWidth,
+      accentWidth,
+    } = getStampDimensions(group.name, activeScale);
+
     const midpoint = runMidpoint(longest.points);
-    const boxWidth = Math.max(90, (group.name || '').length * 10 + 24);
     const defaultPosition = {
       x: Math.max(0, Math.min(width - boxWidth, midpoint[0] - boxWidth / 2)),
-      y: Math.max(0, Math.min(height - 34, midpoint[1] - 45)),
+      y: Math.max(0, Math.min(height - boxHeight, midpoint[1] - boxHeight - 15)),
     };
     const position =
       stampDrag?.groupId === group.id
         ? { x: stampDrag.x, y: stampDrag.y }
         : group.stampPosition || defaultPosition;
+
     const isDragging = stampDrag?.groupId === group.id;
+    const isResizing = stampResize?.groupId === group.id;
     const isGroupActive = activeGroupId === group.id;
+    const isHovered = hoveredStampId === group.id || isResizing || isDragging;
+
+    // Centered coordinates for text inside the usable stamp area:
+    const textCenterX = position.x + (boxWidth + accentWidth) / 2;
+    const textCenterY = position.y + boxHeight / 2;
 
     return (
       <g
@@ -1167,50 +1317,129 @@ export default function InteractivePipeCanvas({
           cursor: isDragging ? 'grabbing' : 'grab',
           touchAction: 'none',
         }}
-        onPointerDown={(e) => handleStartStampDrag(group, position, boxWidth, e)}
+        onPointerEnter={() => {
+          setHoveredStampId(group.id);
+          if (viewer) applyMouseNav(viewer, false);
+        }}
+        onPointerLeave={() => {
+          setHoveredStampId(null);
+          if (viewer && traceTool === 'pan' && !stampDrag && !stampResize) {
+            applyMouseNav(viewer, true);
+          }
+        }}
+        onWheel={(e) => handleStampWheel(e, group, position)}
+        onPointerDown={(e) =>
+          handleStartStampDrag(group, position, boxWidth, boxHeight, activeScale, e)
+        }
       >
         {/* Soft shadow */}
         <rect
-          x={position.x + 2}
-          y={position.y + 2}
+          x={position.x + Math.max(2, fontSize * 0.08)}
+          y={position.y + Math.max(2, fontSize * 0.08)}
           width={boxWidth}
-          height={32}
-          rx={4}
-          fill="rgba(0,0,0,0.12)"
+          height={boxHeight}
+          rx={rx}
+          fill="rgba(0,0,0,0.16)"
         />
         {/* Main box with group border */}
         <rect
           x={position.x}
           y={position.y}
           width={boxWidth}
-          height={32}
-          rx={4}
+          height={boxHeight}
+          rx={rx}
           fill="#FFFFFF"
-          fillOpacity={0.92}
+          fillOpacity={0.94}
           stroke={group.color || '#2563EB'}
-          strokeWidth={isGroupActive ? 3.5 : 2.5}
+          strokeWidth={isGroupActive ? strokeWidth * 1.6 : strokeWidth}
         />
         {/* Left accent strip */}
         <rect
           x={position.x}
           y={position.y}
-          width={6}
-          height={32}
-          rx={3}
+          width={accentWidth}
+          height={boxHeight}
+          rx={rx}
           fill={group.color || '#2563EB'}
         />
-        {/* Group Name Text */}
+        {/* Group Name / Piping ID Text - Guaranteed Centered */}
         <text
-          x={position.x + 12}
-          y={position.y + 22}
+          x={textCenterX}
+          y={textCenterY}
+          textAnchor="middle"
+          dominantBaseline="central"
           fill={group.color || '#2563EB'}
-          fontSize={15}
+          fontSize={fontSize}
           fontWeight="bold"
-          fontFamily="system-ui, -apple-system, sans-serif"
+          fontFamily="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
           style={{ pointerEvents: 'none', userSelect: 'none' }}
         >
           {group.name}
         </text>
+
+        {/* Hover / Active Scale Badge Indicator */}
+        {isHovered && (
+          <g style={{ pointerEvents: 'none' }}>
+            <rect
+              x={position.x + boxWidth - Math.max(46, fontSize * 1.4)}
+              y={position.y - Math.max(18, fontSize * 0.62)}
+              width={Math.max(46, fontSize * 1.4)}
+              height={Math.max(16, fontSize * 0.52)}
+              rx={3}
+              fill="#0F172A"
+              fillOpacity={0.88}
+            />
+            <text
+              x={position.x + boxWidth - Math.max(23, fontSize * 0.7)}
+              y={position.y - Math.max(9, fontSize * 0.32)}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fill="#FFFFFF"
+              fontSize={Math.max(10, Math.round(fontSize * 0.32))}
+              fontWeight="bold"
+              fontFamily="system-ui, sans-serif"
+            >
+              {Math.round(activeScale * 100)}%
+            </text>
+          </g>
+        )}
+
+        {/* Corner Resize Handle */}
+        <g
+          data-resize-handle={group.id}
+          style={{
+            cursor: 'nwse-resize',
+            pointerEvents: 'all',
+          }}
+          onPointerDown={(e) =>
+            handleStartStampResize(group, position, boxWidth, boxHeight, activeScale, e)
+          }
+        >
+          <title>Drag sudut untuk ubah ukuran (atau gunakan scroll mouse saat hover)</title>
+          {/* Transparent touch area */}
+          <circle
+            cx={position.x + boxWidth}
+            cy={position.y + boxHeight}
+            r={Math.max(12, fontSize * 0.45)}
+            fill="transparent"
+          />
+          {/* Visible outer circle */}
+          <circle
+            cx={position.x + boxWidth}
+            cy={position.y + boxHeight}
+            r={Math.max(5, fontSize * 0.2)}
+            fill="#FFFFFF"
+            stroke={group.color || '#2563EB'}
+            strokeWidth={Math.max(2, strokeWidth * 0.8)}
+          />
+          {/* Center dot */}
+          <circle
+            cx={position.x + boxWidth}
+            cy={position.y + boxHeight}
+            r={Math.max(2.5, fontSize * 0.09)}
+            fill={group.color || '#2563EB'}
+          />
+        </g>
       </g>
     );
   };
