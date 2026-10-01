@@ -6,8 +6,9 @@ from ..db.session import get_db
 from ..schemas.system import CorrosionSystem
 from ..services.project_service import ProjectService
 from ..services.grouping_service import GroupingService
+from ..core.dependencies import require_project_owner
 
-router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}", tags=["grouping"])
+router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}", tags=["grouping"], dependencies=[Depends(require_project_owner)])
 
 
 @router.get("/systems", response_model=List[CorrosionSystem])

@@ -8,9 +8,10 @@ from ..db.session import get_db
 from ..schemas.result import DigitizationResult
 from ..services.project_service import ProjectService
 from ..services.grouping_service import GroupingService
+from ..core.dependencies import require_project_owner
 from pidcorr.lines import split_poly_run
 
-router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}/result", tags=["results"])
+router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}/result", tags=["results"], dependencies=[Depends(require_project_owner)])
 
 
 class SplitRunRequest(BaseModel):

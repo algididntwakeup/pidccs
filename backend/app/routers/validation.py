@@ -4,9 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db.session import get_db
 from ..schemas.validation import ValidationReport
 from ..services.project_service import ProjectService
+from ..core.dependencies import require_project_owner
 from ..services.grouping_service import GroupingService
 
-router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}/validate", tags=["validation"])
+router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}/validate", tags=["validation"], dependencies=[Depends(require_project_owner)])
 
 
 @router.get("", response_model=ValidationReport)

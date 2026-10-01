@@ -17,6 +17,7 @@ from app.db.base import Base
 from app.db.session import get_db
 
 from _fixtures import fixture_path
+from _auth_helpers import authenticate_test_client
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_e2e_full_system.db"
 test_engine = create_async_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -69,6 +70,7 @@ async def test_end_to_end_full_system_lifecycle():
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await authenticate_test_client(ac)
             # =================================================================
             # STEP 1: CREATE MULTI-SHEET P&ID PROJECT
             # =================================================================

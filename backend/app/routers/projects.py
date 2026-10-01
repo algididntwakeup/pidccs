@@ -2,7 +2,7 @@ import os
 import uuid
 from typing import List, Optional
 import cv2
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
+from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,8 +11,14 @@ from ..db.session import get_db
 from ..schemas.project import ProjectCreate, ProjectResponse, SheetResponse
 from ..services.project_service import ProjectService
 from ..services.detection_service import queue_sheet_detection, dispatch_detection_job
+from ..core.dependencies import get_current_user
+from ..core.dependencies import get_bima_project_client
+from ..clients.bima import BimaClient, BimaServiceError, MockBimaProjectClient
+from ..models.user import User
+from ..schemas.bima import BimaProjectSyncRequest, BimaProjectSyncResponse, SyncedProject
+from ..services.bima_sync_service import BimaProjectSyncService
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(get_current_user)])
 
 
 class TraceRegionRequest(BaseModel):
@@ -25,15 +31,17 @@ class TraceRegionRequest(BaseModel):
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new P&ID project or plant unit workspace."""
     project = await ProjectService.create_project(
         db=db,
         name=payload.name,
+        owner_id=current_user.id,
         description=payload.description or "",
         tenant_id=payload.tenant_id,
-        user_id=payload.user_id,
+        user_id=current_user.id,
     )
     return project
 
@@ -41,19 +49,57 @@ async def create_project(
 @router.get("", response_model=List[ProjectResponse])
 async def list_projects(
     tenant_id: str = "default_tenant",
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List all projects for the given tenant."""
-    return await ProjectService.list_projects(db=db, tenant_id=tenant_id)
+    return await ProjectService.list_projects(
+        db=db, tenant_id=tenant_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
+
+
+@router.post("/bima-sync", response_model=BimaProjectSyncResponse)
+async def sync_bima_projects(
+    payload: Optional[BimaProjectSyncRequest] = Body(None),
+    current_user: User = Depends(get_current_user),
+    bima_client: BimaClient | MockBimaProjectClient = Depends(get_bima_project_client),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch this user's assigned projects from BIMA and upsert them locally."""
+    upstream_token = payload.bima_access_token if payload else None
+    if isinstance(bima_client, BimaClient):
+        if not upstream_token:
+            raise HTTPException(status_code=401, detail="A current BIMA SSO token is required")
+        try:
+            identity = await bima_client.verify_sso_token(upstream_token)
+        except BimaServiceError as exc:
+            raise HTTPException(status_code=401, detail="BIMA SSO token could not be verified") from exc
+        if identity.bima_user_id != current_user.bima_user_id:
+            raise HTTPException(status_code=403, detail="BIMA token does not match the signed-in user")
+    remote_projects = await bima_client.fetch_assigned_projects(
+        current_user.bima_user_id,
+        upstream_token,
+    )
+    projects = await BimaProjectSyncService.sync_user_projects(db, current_user, remote_projects)
+    await db.commit()
+    return BimaProjectSyncResponse(
+        synced_count=len(projects),
+        projects=[SyncedProject.model_validate(project) for project in projects],
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(
     project_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get project details including all uploaded P&ID drawing sheets."""
-    project = await ProjectService.get_project(db=db, project_id=project_id)
+    project = await ProjectService.get_project(
+        db=db, project_id=project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
@@ -62,10 +108,14 @@ async def get_project(
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
     project_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Delete project and associated sheets."""
-    deleted = await ProjectService.delete_project(db=db, project_id=project_id)
+    deleted = await ProjectService.delete_project(
+        db=db, project_id=project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
     return None
@@ -80,6 +130,7 @@ async def upload_sheet(
     sheet_number: str = Form(""),
     tenant_id: str = Form("default_tenant"),
     user_id: str = Form("default_user"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Upload a P&ID drawing (PDF, PNG, JPG) to a project.
@@ -92,7 +143,10 @@ async def upload_sheet(
     default. Job masuk antrean Celery; jika Celery eager atau broker tidak tersedia,
     BackgroundTasks menjalankan fallback tanpa menahan respons upload.
     """
-    project = await ProjectService.get_project(db=db, project_id=project_id)
+    project = await ProjectService.get_project(
+        db=db, project_id=project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -103,7 +157,7 @@ async def upload_sheet(
         dpi=dpi,
         sheet_number=sheet_number,
         tenant_id=tenant_id,
-        user_id=user_id,
+        user_id=current_user.id,
     )
 
     if settings.AUTO_TRACE_ON_UPLOAD:
@@ -122,6 +176,7 @@ async def upload_sheet(
 @router.get("/{project_id}/sheets", response_model=List[SheetResponse])
 async def list_sheets(
     project_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List every sheet (page) in a project — dipakai grid thumbnail Folder View.
@@ -129,7 +184,10 @@ async def list_sheets(
     Urut `created_at` (satu batch upload selalu menaik) dengan tiebreak numerik pada
     nomor halaman, supaya `1/12, 2/12, ... 10/12` tidak terurut leksikografis.
     """
-    project = await ProjectService.get_project(db=db, project_id=project_id)
+    project = await ProjectService.get_project(
+        db=db, project_id=project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -144,6 +202,7 @@ async def list_sheets(
 async def trace_region(
     project_id: str,
     payload: TraceRegionRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Re-trace a selected image region with relaxed short-line detection."""
@@ -158,7 +217,10 @@ async def trace_region(
         def stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0):
             return existing_runs, new_runs, []
 
-    project = await ProjectService.get_project(db, project_id)
+    project = await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     sheet = await ProjectService.get_sheet(db, payload.sheet_id) if payload.sheet_id else (project.sheets[0] if project.sheets else None)
@@ -400,11 +462,15 @@ async def trace_region(
 async def get_sheet(
     project_id: str,
     sheet_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get sheet metadata."""
     sheet = await ProjectService.get_sheet(db=db, sheet_id=sheet_id)
-    if not sheet or sheet.project_id != project_id:
+    if not sheet or sheet.project_id != project_id or not await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    ):
         raise HTTPException(status_code=404, detail="Sheet not found in this project")
     return sheet
 
@@ -413,9 +479,15 @@ async def get_sheet(
 async def delete_sheet(
     project_id: str,
     sheet_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Delete an individual P&ID sheet drawing from a project."""
+    if not await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    ):
+        raise HTTPException(status_code=404, detail="Project not found")
     deleted = await ProjectService.delete_sheet(db=db, project_id=project_id, sheet_id=sheet_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Sheet not found in this project")

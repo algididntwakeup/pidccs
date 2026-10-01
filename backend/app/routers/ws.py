@@ -6,6 +6,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..config import settings
 from ..db.session import AsyncSessionLocal
 from ..models.job import Job
+from ..models.project import Project
+from ..models.sheet import Sheet
+from ..models.user import User
+from ..core.security import decode_access_token
+from sqlalchemy import or_, select
+from ..models.project_assignment import ProjectAssignment
 
 router = APIRouter(tags=["websocket"])
 
@@ -34,6 +40,31 @@ async def _terminal_snapshot(job_id: str):
 @router.websocket("/ws/progress/{job_id}")
 async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
     """Real-time WebSocket endpoint streaming detection pipeline progress events."""
+    token = websocket.query_params.get("token", "")
+    try:
+        user_id = decode_access_token(token).get("sub")
+        async with AsyncSessionLocal() as session:
+            user = await session.get(User, user_id) if isinstance(user_id, str) else None
+            job_query = (
+                select(Job.id)
+                .join(Sheet, Sheet.id == Job.sheet_id)
+                .join(Project, Project.id == Sheet.project_id)
+                .where(Job.id == job_id)
+            )
+            if user is None or user.role.strip().upper() != "SUPERADMIN":
+                job_query = job_query.where(
+                    or_(
+                        Project.owner_id == user_id,
+                        Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == user_id)),
+                    )
+                )
+            owns_job = await session.scalar(job_query)
+        if user is None or not user.is_active or owns_job is None:
+            raise ValueError("inactive user or inaccessible job")
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
 
     # Job yang sudah selesai: kirim satu event terminal lalu tutup. Job yang belum ada

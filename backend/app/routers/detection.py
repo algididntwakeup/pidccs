@@ -1,13 +1,16 @@
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from pydantic import BaseModel
 from ..db.session import get_db
 from ..schemas.job import JobResponse
 from ..models.sheet import Sheet
 from ..models.job import Job
+from ..models.project import Project
+from ..models.project_assignment import ProjectAssignment
+from ..models.user import User
 from ..services.project_service import ProjectService
 from ..services.detection_service import (
     dispatch_detection_job,
@@ -15,8 +18,9 @@ from ..services.detection_service import (
     queue_sheet_detection,
     queue_sheet_enrichment,
 )
+from ..core.dependencies import get_current_user, require_project_owner
 
-router = APIRouter(tags=["detection"])
+router = APIRouter(tags=["detection"], dependencies=[Depends(get_current_user)])
 
 
 class DetectRequest(BaseModel):
@@ -29,7 +33,8 @@ class DetectRequest(BaseModel):
 @router.post(
     "/projects/{project_id}/sheets/{sheet_id}/detect",
     response_model=JobResponse,
-    status_code=status.HTTP_202_ACCEPTED
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_project_owner)],
 )
 async def trigger_detection(
     project_id: str,
@@ -71,7 +76,8 @@ async def trigger_detection(
 @router.post(
     "/projects/{project_id}/detect",
     response_model=JobResponse,
-    status_code=status.HTTP_202_ACCEPTED
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_project_owner)],
 )
 async def trigger_project_detection(
     project_id: str,
@@ -80,10 +86,14 @@ async def trigger_project_detection(
     dpi: Optional[int] = None,
     rot: Optional[int] = None,
     mode: Optional[str] = "lines_only",
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger detection for a project using its active or first sheet."""
-    project = await ProjectService.get_project(db, project_id)
+    project = await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project or not project.sheets:
         raise HTTPException(status_code=404, detail="Project or sheets not found")
 
@@ -103,7 +113,8 @@ async def trigger_project_detection(
 @router.post(
     "/projects/{project_id}/sheets/{sheet_id}/enrich",
     response_model=JobResponse,
-    status_code=status.HTTP_202_ACCEPTED
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_project_owner)],
 )
 async def trigger_enrichment(
     project_id: str,
@@ -151,7 +162,8 @@ async def trigger_enrichment(
 @router.post(
     "/projects/{project_id}/enrich",
     response_model=JobResponse,
-    status_code=status.HTTP_202_ACCEPTED
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_project_owner)],
 )
 async def trigger_project_enrichment(
     project_id: str,
@@ -159,10 +171,14 @@ async def trigger_project_enrichment(
     sheet_id: Optional[str] = None,
     dpi: Optional[int] = None,
     rot: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger enrichment on the specified or first sheet of a project."""
-    project = await ProjectService.get_project(db, project_id)
+    project = await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project or not project.sheets:
         raise HTTPException(status_code=404, detail="Project or sheets not found")
 
@@ -181,10 +197,23 @@ async def trigger_project_enrichment(
 @router.get("/jobs/{job_id}", response_model=JobResponse)
 async def get_job_status(
     job_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Get the live status and progress of a detection job."""
-    query = select(Job).where(Job.id == job_id)
+    query = (
+        select(Job)
+        .join(Sheet, Sheet.id == Job.sheet_id)
+        .join(Project, Project.id == Sheet.project_id)
+        .where(Job.id == job_id)
+    )
+    if current_user.role.strip().upper() != "SUPERADMIN":
+        query = query.where(
+            or_(
+                Project.owner_id == current_user.id,
+                Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == current_user.id)),
+            )
+        )
     result = await db.execute(query)
     job = result.scalar_one_or_none()
     if not job:
@@ -207,6 +236,7 @@ async def get_job_status(
 async def list_jobs(
     sheet_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List detection jobs, optionally filtered by sheet (most recent first).
@@ -215,11 +245,20 @@ async def list_jobs(
     navigation/remount, so the loading/progress UI can be resumed without the
     user having kept the page open.
     """
-    query = select(Job)
+    query = (
+        select(Job)
+        .join(Sheet, Sheet.id == Job.sheet_id)
+        .join(Project, Project.id == Sheet.project_id)
+    )
+    if current_user.role.strip().upper() != "SUPERADMIN":
+        query = query.where(or_(
+            Project.owner_id == current_user.id,
+            Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == current_user.id)),
+        ))
     if sheet_id:
         query = query.where(Job.sheet_id == sheet_id)
-    elif project_id:
-        query = query.join(Sheet, Sheet.id == Job.sheet_id).where(Sheet.project_id == project_id)
+    if project_id:
+        query = query.where(Sheet.project_id == project_id)
     query = query.order_by(Job.created_at.desc()).limit(50)
 
     result = await db.execute(query)

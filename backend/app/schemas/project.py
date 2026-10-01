@@ -60,6 +60,8 @@ class SheetResponse(TenantUserBase):
 
 class ProjectResponse(ProjectBase):
     id: str = Field(..., description="Unique project UUID")
+    owner_id: Optional[str] = None
+    bima_project_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     sheets: List[SheetResponse] = Field(default_factory=list)

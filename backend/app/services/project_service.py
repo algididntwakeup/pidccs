@@ -2,13 +2,14 @@ import os
 import math
 import uuid
 from typing import List, Optional
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import UploadFile
 
 from ..config import settings
 from ..models.project import Project
 from ..models.sheet import Sheet
+from ..models.project_assignment import ProjectAssignment
 from ..adapters.storage import LocalStorageAdapter
 from ..adapters.pdf_renderer import load_drawing_image
 
@@ -20,6 +21,7 @@ class ProjectService:
     async def create_project(
         db: AsyncSession,
         name: str,
+        owner_id: str,
         description: str = "",
         tenant_id: str = "default_tenant",
         user_id: str = "default_user",
@@ -30,6 +32,7 @@ class ProjectService:
             description=description,
             tenant_id=tenant_id,
             user_id=user_id,
+            owner_id=owner_id,
         )
         db.add(project)
         await db.flush()
@@ -39,21 +42,46 @@ class ProjectService:
     @staticmethod
     async def list_projects(
         db: AsyncSession,
+        owner_id: str,
         tenant_id: str = "default_tenant",
+        is_superadmin: bool = False,
     ) -> List[Project]:
-        query = select(Project).where(Project.tenant_id == tenant_id).order_by(Project.created_at.desc())
+        query = select(Project)
+        if not is_superadmin:
+            query = query.where(
+                Project.tenant_id == tenant_id,
+                or_(
+                    Project.owner_id == owner_id,
+                    Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == owner_id)),
+                ),
+            )
+        query = query.order_by(Project.created_at.desc())
         result = await db.execute(query)
         return list(result.scalars().all())
 
     @staticmethod
-    async def get_project(db: AsyncSession, project_id: str) -> Optional[Project]:
+    async def get_project(
+        db: AsyncSession, project_id: str, owner_id: str, is_superadmin: bool = False
+    ) -> Optional[Project]:
         query = select(Project).where(Project.id == project_id)
+        if not is_superadmin:
+            query = query.where(
+                or_(
+                    Project.owner_id == owner_id,
+                    Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == owner_id)),
+                )
+            )
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def delete_project(db: AsyncSession, project_id: str) -> bool:
-        project = await ProjectService.get_project(db, project_id)
+    async def delete_project(
+        db: AsyncSession, project_id: str, owner_id: str, is_superadmin: bool = False
+    ) -> bool:
+        query = select(Project).where(Project.id == project_id)
+        if not is_superadmin:
+            query = query.where(Project.owner_id == owner_id)
+        project = await db.scalar(query)
         if not project:
             return False
         # Remove project files from storage

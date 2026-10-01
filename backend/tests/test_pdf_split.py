@@ -32,6 +32,7 @@ from app.db.session import get_db
 from app.main import app
 from app.models.project import Project
 from _fixtures import fixture_path
+from _auth_helpers import authenticate_test_client, seeded_test_user
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_pdf_split.db"
 test_engine = create_async_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -97,8 +98,9 @@ async def _new_project() -> str:
         await conn.run_sync(Base.metadata.create_all)
     pid = str(uuid.uuid4())
     async with TestSessionLocal() as session:
+        session.add(seeded_test_user())
         session.add(Project(id=pid, name="Split Test", tenant_id="default_tenant",
-                            user_id="default_user"))
+                            user_id="fixture-owner", owner_id="fixture-owner"))
         await session.commit()
     return pid
 
@@ -109,6 +111,7 @@ async def test_three_page_pdf_becomes_three_sheets():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await authenticate_test_client(ac, email="fixture-owner@example.test")
         r = await ac.post(f"/api/v1/projects/{pid}/sheets", content=body, headers=headers)
         assert r.status_code == 201, r.text
         sheets = r.json()
@@ -182,6 +185,7 @@ async def test_single_page_pdf_is_not_split(tmp_path):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await authenticate_test_client(ac, email="fixture-owner@example.test")
         r = await ac.post(f"/api/v1/projects/{pid}/sheets", content=body, headers=headers)
         assert r.status_code == 201, r.text
         sheets = r.json()

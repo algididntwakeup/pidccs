@@ -8,8 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db.session import get_db
 from ..services.project_service import ProjectService
 from ..services.export_service import ExportService
+from ..core.dependencies import require_project_owner
 
-router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}/export", tags=["export"])
+router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}/export", tags=["export"], dependencies=[Depends(require_project_owner)])
 
 MIME_TYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

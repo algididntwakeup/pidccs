@@ -179,6 +179,8 @@ async def test_linelist_api_endpoint_lifecycle():
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            from _auth_helpers import authenticate_test_client
+            await authenticate_test_client(ac)
             # 1. Create test project
             res_proj = await ac.post("/api/v1/projects", json={"name": "LineList Test Plant", "description": "Phase C test"})
             assert res_proj.status_code == 201, res_proj.text

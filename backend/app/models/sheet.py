@@ -37,3 +37,4 @@ class Sheet(Base):
     # Relationships
     project = relationship("Project", back_populates="sheets")
     jobs = relationship("Job", back_populates="sheet", cascade="all, delete-orphan", lazy="selectin")
+    ground_truth_logs = relationship("GroundTruthLog", back_populates="sheet")

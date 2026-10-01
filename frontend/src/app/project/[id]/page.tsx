@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { ProjectResponse, SheetResponse } from '@/types/schema';
 import { fetchProject, fetchSheets, uploadSheet, deleteSheet, getThumbnailUrl } from '@/lib/api';
+import AuthenticatedImage from '@/components/AuthenticatedImage';
 
 /**
  * Project Folder View — Google Drive / Windows Explorer style folder workspace.
@@ -245,10 +246,9 @@ export default function ProjectFolderPage() {
                       className="block relative aspect-[4/3] bg-slate-900/5 overflow-hidden border-b border-slate-200 cursor-pointer w-full text-left focus:outline-none"
                       title={`Buka kanvas studio: ${s.filename}`}
                     >
-                      <img
+                      <AuthenticatedImage
                         src={getThumbnailUrl(projectId, s.id, 480)}
                         alt={s.filename}
-                        loading="lazy"
                         className="w-full h-full object-contain p-1.5 group-hover:scale-105 transition-transform duration-300"
                       />
                       <div className="absolute top-2 left-2 z-10">

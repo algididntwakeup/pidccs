@@ -9,6 +9,22 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     DEBUG: bool = True
 
+    # Configure a stable shared secret in deployed environments. The random
+    # fallback keeps local development from using a publicly known signing key.
+    JWT_SECRET_KEY: str = Field(default_factory=lambda: os.urandom(48).hex())
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    # Empty by default: break-glass login stays disabled until IT provisions a
+    # high-entropy value in the deployment environment.
+    SUPERUSER_SECRET_KEY: str = ""
+    BIMA_BASE_URL: str = "https://bima.reksolindo.co.id"
+    BIMA_CLIENT_ID: str = ""
+    # Live BIMA integration is the default. Enable mock behavior explicitly in
+    # local test/development environments so a deployed callback cannot accept
+    # caller-supplied identities as authenticated users.
+    BIMA_PROJECTS_MOCK_MODE: bool = False
+    BIMA_SSO_MOCK_MODE: bool = False
+    BIMA_MOCK_PROJECTS_JSON: str = '[{"bima_project_id":"BIMA-MOCK-001","name":"Mock P&ID Beta Project","description":"Sample project from the mock BIMA API","assigned_bima_user_ids":["bima-demo-user"]}]'
+
     # Multi-tenancy forward-compatibility (Phase A/B hardcoded defaults)
     DEFAULT_TENANT_ID: str = "default_tenant"
     DEFAULT_USER_ID: str = "default_user"

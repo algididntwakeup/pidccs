@@ -43,6 +43,10 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pidstudio
       - DATABASE_SYNC_URL=postgresql://postgres:postgres@postgres:5432/pidstudio
       - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY
+      - SUPERUSER_SECRET_KEY
+      - BIMA_SSO_MOCK_MODE
+      - BIMA_PROJECTS_MOCK_MODE
       - STORAGE_DIR=/app/data/storage
       - WEIGHTS_DIR=/app/runs
       - DETECTOR_IMPL=yolo

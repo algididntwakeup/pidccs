@@ -18,13 +18,16 @@ import {
   FolderOpen,
   Calendar,
   AlertTriangle,
+  LogOut,
 } from 'lucide-react';
 import { ProjectResponse } from '@/types/schema';
 import {
   fetchProjects,
   createProject,
   deleteProject,
+  setLocalAccessToken,
 } from '@/lib/api';
+import RequireAuth from '@/components/RequireAuth';
 
 /**
  * Format timestamp to localized readable date & time (e.g. 28 Sep 2026, 14:30)
@@ -46,6 +49,14 @@ function formatUploadTime(dateStr?: string) {
 }
 
 export default function ProjectsPage() {
+  return (
+    <RequireAuth>
+      <ProjectsDashboard />
+    </RequireAuth>
+  );
+}
+
+function ProjectsDashboard() {
   const router = useRouter();
   const [projects, setProjects] = useState<ProjectResponse[]>([]);
   const [loading, setLoading] = useState(true);
@@ -145,13 +156,26 @@ export default function ProjectsPage() {
           </div>
         </div>
 
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold text-sm flex items-center space-x-2 shadow-xs transition"
-        >
-          <FolderPlus className="w-4 h-4" />
-          <span>New Project Folder</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold text-sm flex items-center space-x-2 shadow-xs transition"
+          >
+            <FolderPlus className="w-4 h-4" />
+            <span>New Project Folder</span>
+          </button>
+          <button
+            onClick={() => {
+              setLocalAccessToken(null);
+              router.replace('/login');
+            }}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+            title="Logout"
+          >
+            <LogOut className="h-4 w-4" />
+            <span>Logout</span>
+          </button>
+        </div>
       </header>
 
       {/* Main Content Area */}

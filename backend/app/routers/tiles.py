@@ -10,8 +10,9 @@ from ..services.project_service import ProjectService
 from ..adapters.storage import LocalStorageAdapter
 from ..adapters.pdf_renderer import load_drawing_image
 from ..config import settings
+from ..core.dependencies import require_project_owner
 
-router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}", tags=["tiles"])
+router = APIRouter(prefix="/projects/{project_id}/sheets/{sheet_id}", tags=["tiles"], dependencies=[Depends(require_project_owner)])
 storage = LocalStorageAdapter(settings.STORAGE_DIR)
 
 

@@ -71,6 +71,9 @@ import {
   splitRun,
   deleteRun,
   batchDeleteRuns,
+  downloadProtectedFile,
+  getAuthorizationHeaders,
+  getLocalAccessToken,
 } from '@/lib/api';
 import { parsePipingIdTag } from '@/lib/tagParser';
 import { useHistory } from '@/hooks/useHistory';
@@ -464,8 +467,10 @@ export default function ProjectWorkspace() {
       }).catch(() => {});
 
       try {
+        const wsToken = getLocalAccessToken();
+        const wsQuery = wsToken ? `?token=${encodeURIComponent(wsToken)}` : '';
         const ws = new WebSocket(
-          (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${jobId}`,
+          (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${jobId}${wsQuery}`,
         );
         detectionWsRef.current = ws;
         ws.onmessage = (event) => { try { onEvent(JSON.parse(event.data)); } catch {} };
@@ -1019,6 +1024,8 @@ export default function ProjectWorkspace() {
           type: 'image',
           url: initialUrl,
         },
+        loadTilesWithAjax: true,
+        ajaxHeaders: getAuthorizationHeaders(),
         showNavigationControl: false,
         animationTime: 0.3,
         blendTime: 0.1,
@@ -3367,32 +3374,38 @@ export default function ProjectWorkspace() {
                   modeAware: false,
                 },
               ].map((opt) => (
-                <a
+                <button
+                  type="button"
                   key={opt.format}
-                  href={getExportUrl(
-                    projectId,
-                    activeSheet!.id,
-                    opt.format,
-                    opt.modeAware ? exportMode : 'engineer'
-                  )}
-                  download
-                  onClick={() => setShowExportModal(false)}
+                  onClick={async () => {
+                    setShowExportModal(false);
+                    try {
+                      await downloadProtectedFile(getExportUrl(
+                        projectId,
+                        activeSheet!.id,
+                        opt.format,
+                        opt.modeAware ? exportMode : 'engineer'
+                      ));
+                    } catch (error) {
+                      window.alert(error instanceof Error ? error.message : 'Export failed');
+                    }
+                  }}
                   className="flex items-start space-x-3 p-3 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition group"
                 >
-                  <div className="mt-0.5 shrink-0">{opt.icon}</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-slate-800 group-hover:text-indigo-700">
+                  <span className="mt-0.5 shrink-0">{opt.icon}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm font-semibold text-slate-800 group-hover:text-indigo-700">
                       {opt.title}
-                    </p>
-                    <p className="text-xs text-slate-500 mt-0.5">{opt.desc}</p>
+                    </span>
+                    <span className="mt-0.5 block text-xs text-slate-500">{opt.desc}</span>
                     {opt.modeAware && (
                       <span className="inline-block mt-1 text-[10px] font-semibold uppercase tracking-wider text-indigo-600 bg-indigo-100 rounded px-1.5 py-0.5">
                         Mengikuti mode aktif
                       </span>
                     )}
-                  </div>
+                  </span>
                   <Download className="w-4 h-4 text-slate-300 group-hover:text-indigo-500 mt-1 shrink-0" />
-                </a>
+                </button>
               ))}
             </div>
           </div>

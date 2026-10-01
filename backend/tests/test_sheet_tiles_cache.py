@@ -25,6 +25,7 @@ from app.config import settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.adapters.storage import LocalStorageAdapter
+from _auth_helpers import authenticate_test_client, seeded_test_user
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_sheet_tiles_cache.db"
@@ -75,7 +76,8 @@ async def test_sheet_raw_and_thumbnail_cache_headers():
     from app.models.sheet import Sheet
 
     async with TestSessionLocal() as session:
-        session.add(Project(id="tiles-proj", name="Tiles", description="", tenant_id="t", user_id="u"))
+        session.add(seeded_test_user(user_id="tiles-owner", email="tiles-owner@example.test"))
+        session.add(Project(id="tiles-proj", name="Tiles", description="", tenant_id="t", user_id="tiles-owner", owner_id="tiles-owner"))
         session.add(Sheet(
             id="tiles-sheet",
             project_id="tiles-proj",
@@ -94,6 +96,7 @@ async def test_sheet_raw_and_thumbnail_cache_headers():
     transport = ASGITransport(app=app)
     try:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await authenticate_test_client(ac, email="tiles-owner@example.test")
             # ---- /raw ----
             res_raw = await ac.get("/api/v1/projects/tiles-proj/sheets/tiles-sheet/raw")
             assert res_raw.status_code == 200, res_raw.text

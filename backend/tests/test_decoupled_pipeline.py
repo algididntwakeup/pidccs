@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.db.session import get_db
+from _auth_helpers import authenticate_test_client, seeded_test_user
 
 TEST_DB_URL = "sqlite+aiosqlite:///./test_decoupled.db"
 test_engine = create_async_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -340,11 +341,13 @@ async def test_enrichment_requires_at_least_one_marked_run():
         await conn.run_sync(Base.metadata.create_all)
 
     async with TestSessionLocal() as session:
+        session.add(seeded_test_user(user_id="decoupled-owner", email="decoupled-owner@example.test"))
         project = Project(
             id="proj-no-mark-test",
             name="No Mark Test",
             tenant_id="default_tenant",
             user_id="default_user",
+            owner_id="decoupled-owner",
         )
         session.add(project)
         session.add(Sheet(
@@ -361,6 +364,7 @@ async def test_enrichment_requires_at_least_one_marked_run():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await authenticate_test_client(client, email="decoupled-owner@example.test")
         response = await client.post(
             "/api/v1/projects/proj-no-mark-test/sheets/sheet-no-mark-test/enrich"
         )
@@ -376,11 +380,13 @@ async def test_api_detect_mode_and_enrich_endpoints():
         await conn.run_sync(Base.metadata.create_all)
 
     async with TestSessionLocal() as session:
+        session.add(seeded_test_user(user_id="decoupled-owner", email="decoupled-owner@example.test"))
         proj = Project(
             id="proj-enrich-test",
             name="Enrich Test Plant",
             tenant_id="default_tenant",
             user_id="default_user",
+            owner_id="decoupled-owner",
         )
         session.add(proj)
 
@@ -416,6 +422,7 @@ async def test_api_detect_mode_and_enrich_endpoints():
          patch("app.routers.detection.dispatch_enrichment_job") as mock_dispatch_enrich:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await authenticate_test_client(client, email="decoupled-owner@example.test")
             # 1. Test /detect with mode="lines_only"
             detect_resp = await client.post(
                 "/api/v1/projects/proj-enrich-test/sheets/sheet-enrich-test/detect?mode=lines_only"

@@ -207,6 +207,8 @@ async def test_topology_api_endpoint_lifecycle():
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            from _auth_helpers import authenticate_test_client
+            await authenticate_test_client(ac)
             # 1. Create project
             res_p = await ac.post("/api/v1/projects", json={"name": "API Topology Project"})
             assert res_p.status_code == 201

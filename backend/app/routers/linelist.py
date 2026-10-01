@@ -10,8 +10,11 @@ from ..schemas.linelist import LineListImportResult, LineListResponse, LineListE
 from ..services.linelist_parser import LineListParser, canonical_line_key
 from ..services.grouping_service import GroupingService
 from ..services.project_service import ProjectService
+from ..core.dependencies import require_project_owner
+from ..core.dependencies import get_current_user
+from ..models.user import User
 
-router = APIRouter(prefix="/projects/{project_id}/linelist", tags=["linelist"])
+router = APIRouter(prefix="/projects/{project_id}/linelist", tags=["linelist"], dependencies=[Depends(require_project_owner)])
 
 
 @router.post("", response_model=LineListImportResult)
@@ -19,10 +22,14 @@ async def import_linelist_endpoint(
     project_id: str,
     file: UploadFile = File(...),
     mapping: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Import Line List Excel or CSV spreadsheet and enrich all P&ID sheets in the project."""
-    project = await ProjectService.get_project(db, project_id)
+    project = await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
 
@@ -160,10 +167,14 @@ async def import_linelist_endpoint(
 @router.get("", response_model=LineListResponse)
 async def get_linelist_endpoint(
     project_id: str,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Retrieve the currently active project Line List and operating parameters."""
-    project = await ProjectService.get_project(db, project_id)
+    project = await ProjectService.get_project(
+        db, project_id, owner_id=current_user.id,
+        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+    )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
 

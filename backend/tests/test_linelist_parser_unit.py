@@ -216,6 +216,8 @@ async def test_linelist_endpoint_combined_dataset_enrichment():
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            from _auth_helpers import authenticate_test_client
+            await authenticate_test_client(ac)
             # 1. Create project
             resp_p = await ac.post("/api/v1/projects", json={"name": "Unit LineList Test Plant", "description": "Unit test"})
             assert resp_p.status_code == 201

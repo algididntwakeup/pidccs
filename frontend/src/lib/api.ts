@@ -1,15 +1,158 @@
 import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse } from '@/types/schema';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const AUTH_TOKEN_KEY = 'pid_access_token';
+
+export function getLocalAccessToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return window.localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+export function setLocalAccessToken(token: string | null): void {
+  if (typeof window === 'undefined') return;
+  if (token) window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+  else window.localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+export function getAuthorizationHeaders(): Record<string, string> {
+  const token = getLocalAccessToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = getLocalAccessToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return globalThis.fetch(input, { ...init, headers });
+}
+
+export async function fetchProtectedAsset(url: string): Promise<string> {
+  const response = await apiFetch(url);
+  if (!response.ok) throw new Error('Failed to load protected asset');
+  return URL.createObjectURL(await response.blob());
+}
+
+export async function downloadProtectedFile(url: string): Promise<void> {
+  const response = await apiFetch(url);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to download file');
+  }
+  const blobUrl = URL.createObjectURL(await response.blob());
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const filename = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+  const downloadName = decodeURIComponent(filename?.[1] || filename?.[2] || 'pidstudio-export');
+  const anchor = document.createElement('a');
+  anchor.href = blobUrl;
+  anchor.download = downloadName;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
+
+export interface AdminSheetSummary {
+  id: string;
+  filename: string;
+  sheet_number: string;
+}
+
+export interface AdminMonitoringSnapshot {
+  projects: Array<{
+    id: string;
+    bima_project_id: string | null;
+    name: string;
+    owner_name: string | null;
+    owner_email: string | null;
+    sheets: AdminSheetSummary[];
+  }>;
+  activities: Array<{
+    id: string;
+    user_id: string;
+    user_name: string;
+    user_email: string;
+    project_id: string;
+    project_name: string;
+    sheet_id: string | null;
+    sheet_name: string | null;
+    action_type: string;
+    payload_json: Record<string, unknown>;
+    timestamp: string;
+  }>;
+  recent_errors: Array<{
+    id: string;
+    project_id: string;
+    project_name: string;
+    sheet_id: string;
+    sheet_name: string;
+    status: string;
+    message: string;
+    error: string;
+    created_at: string;
+  }>;
+}
+
+export async function exchangeBimaSsoToken(token: string) {
+  const res = await apiFetch(`${API_BASE}/api/v1/auth/sso-callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'BIMA SSO token could not be verified');
+  }
+  return res.json() as Promise<{
+    access_token: string;
+    user: { id: string; email: string; full_name: string; role: string };
+  }>;
+}
+
+export async function exchangeMockBimaIdentity(identity: {
+  bima_user_id: string;
+  email: string;
+  full_name: string;
+}): Promise<{ access_token: string; user: { id: string; email: string; full_name: string; role: string } }> {
+  const res = await apiFetch(`${API_BASE}/api/v1/auth/sso-callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...identity, role: 'engineer' }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Mock BIMA sign-in failed');
+  }
+  return res.json();
+}
+
+export async function exchangeSudoSecret(secretKey: string): Promise<{ access_token: string }> {
+  const res = await apiFetch(`${API_BASE}/api/v1/auth/sudo-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ secret_key: secretKey }),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Break-glass login failed');
+  }
+  return res.json();
+}
+
+export async function fetchAdminMonitoring(): Promise<AdminMonitoringSnapshot> {
+  const res = await apiFetch(`${API_BASE}/api/v1/admin/monitoring`);
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to load admin monitoring data');
+  }
+  return res.json();
+}
 
 export async function fetchProjects(): Promise<ProjectResponse[]> {
-  const res = await fetch(`${API_BASE}/api/v1/projects`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects`);
   if (!res.ok) throw new Error('Failed to fetch projects');
   return res.json();
 }
 
 export async function createProject(name: string, description: string = ''): Promise<ProjectResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/projects`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, description }),
@@ -19,27 +162,27 @@ export async function createProject(name: string, description: string = ''): Pro
 }
 
 export async function fetchProject(projectId: string): Promise<ProjectResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}`);
   if (!res.ok) throw new Error('Failed to fetch project');
   return res.json();
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to delete project');
 }
 
 export async function deleteSheet(projectId: string, sheetId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}`, {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error('Failed to delete sheet');
 }
 
 export async function fetchSheets(projectId: string): Promise<SheetResponse[]> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets`);
   if (!res.ok) throw new Error('Failed to fetch sheets');
   return res.json();
 }
@@ -49,7 +192,7 @@ export async function uploadSheet(projectId: string, file: File, dpi: number = 3
   formData.append('file', file);
   formData.append('dpi', dpi.toString());
 
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets`, {
     method: 'POST',
     body: formData,
   });
@@ -71,7 +214,7 @@ export async function triggerDetection(
   if (rot !== undefined) params.append('rot', rot.toString());
   params.append('mode', mode);
 
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/detect?${params}`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/detect?${params}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode, dpi, rot }),
@@ -93,7 +236,7 @@ export async function triggerEnrichment(
   if (dpi) params.append('dpi', dpi.toString());
   if (rot !== undefined) params.append('rot', rot.toString());
 
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/enrich?${params}`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/enrich?${params}`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -105,7 +248,7 @@ export async function triggerEnrichment(
 
 
 export async function fetchJob(jobId: string): Promise<JobResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`);
+  const res = await apiFetch(`${API_BASE}/api/v1/jobs/${jobId}`);
   if (!res.ok) throw new Error('Failed to fetch job status');
   return res.json();
 }
@@ -113,20 +256,20 @@ export async function fetchJob(jobId: string): Promise<JobResponse> {
 /** Most recent detection job for a sheet, or null if none. Used to resume
  *  observing an in-flight detection after navigation/remount. */
 export async function fetchLatestJobForSheet(sheetId: string): Promise<JobResponse | null> {
-  const res = await fetch(`${API_BASE}/api/v1/jobs?sheet_id=${encodeURIComponent(sheetId)}`);
+  const res = await apiFetch(`${API_BASE}/api/v1/jobs?sheet_id=${encodeURIComponent(sheetId)}`);
   if (!res.ok) throw new Error('Failed to fetch jobs for sheet');
   const jobs: JobResponse[] = await res.json();
   return jobs && jobs.length > 0 ? jobs[0] : null;
 }
 
 export async function fetchResult(projectId: string, sheetId: string): Promise<DigitizationResult> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result`);
   if (!res.ok) throw new Error('Failed to fetch sheet result');
   return res.json();
 }
 
 export async function patchResult(projectId: string, sheetId: string, updatedResult: DigitizationResult): Promise<DigitizationResult> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updatedResult),
@@ -136,13 +279,13 @@ export async function patchResult(projectId: string, sheetId: string, updatedRes
 }
 
 export async function fetchSystems(projectId: string, sheetId: string): Promise<CorrosionSystem[]> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/systems`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/systems`);
   if (!res.ok) throw new Error('Failed to fetch corrosion systems');
   return res.json();
 }
 
 export async function fetchValidation(projectId: string, sheetId: string): Promise<ValidationReport> {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/validate`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/validate`);
   if (!res.ok) throw new Error('Failed to fetch validation report');
   return res.json();
 }
@@ -169,7 +312,7 @@ export function getMarkedImageUrl(projectId: string, sheetId: string, mode: 'sys
 }
 
 export async function splitRun(projectId: string, sheetId: string, runIdx: number, x: number, y: number) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/split`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/split`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ x, y }),
@@ -182,7 +325,7 @@ export async function splitRun(projectId: string, sheetId: string, runIdx: numbe
 }
 
 export async function updateRunColor(projectId: string, sheetId: string, runIdx: number, color: string) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/color`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/color`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ color }),
@@ -195,7 +338,7 @@ export async function updateRunColor(projectId: string, sheetId: string, runIdx:
 }
 
 export async function batchUpdateRunColors(projectId: string, sheetId: string, runIdxs: number[], color: string) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/batch-color`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/batch-color`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ run_idxs: runIdxs, color }),
@@ -208,7 +351,7 @@ export async function batchUpdateRunColors(projectId: string, sheetId: string, r
 }
 
 export async function deleteRun(projectId: string, sheetId: string, runIdx: number) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -219,7 +362,7 @@ export async function deleteRun(projectId: string, sheetId: string, runIdx: numb
 }
 
 export async function batchDeleteRuns(projectId: string, sheetId: string, runIdxs: number[]) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/batch-delete`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/batch-delete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ run_idxs: runIdxs }),
@@ -232,7 +375,7 @@ export async function batchDeleteRuns(projectId: string, sheetId: string, runIdx
 }
 
 export async function updateRunLabel(projectId: string, sheetId: string, runIdx: number, label: string) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/label`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/label`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ label }),
@@ -245,7 +388,7 @@ export async function updateRunLabel(projectId: string, sheetId: string, runIdx:
 }
 
 export async function updateRunPoints(projectId: string, sheetId: string, runIdx: number, points: [number, number][]) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/points`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/sheets/${sheetId}/result/runs/${runIdx}/points`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ points }),
@@ -262,7 +405,7 @@ export async function traceRegion(
   sheetId: string,
   bounds: { x1: number; y1: number; x2: number; y2: number }
 ) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/trace-region`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/trace-region`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...bounds, sheet_id: sheetId }),
@@ -281,7 +424,7 @@ export function getDziUrl(projectId: string, sheetId: string): string {
 export async function uploadLineList(projectId: string, file: File) {
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/linelist`, {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/linelist`, {
     method: 'POST',
     body: formData,
   });
@@ -290,19 +433,19 @@ export async function uploadLineList(projectId: string, file: File) {
 }
 
 export async function fetchLineList(projectId: string) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/linelist`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/linelist`);
   if (!res.ok) throw new Error('Failed to fetch project line list');
   return res.json();
 }
 
 export async function fetchProjectTopology(projectId: string) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/topology`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/topology`);
   if (!res.ok) throw new Error('Failed to fetch project topology');
   return res.json();
 }
 
 export async function fetchProjectCircuits(projectId: string) {
-  const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/circuits`);
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/${projectId}/circuits`);
   if (!res.ok) throw new Error('Failed to fetch project circuits');
   return res.json();
 }
