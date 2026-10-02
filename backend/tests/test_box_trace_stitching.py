@@ -175,3 +175,28 @@ def test_pipe_run_objects_are_accepted_as_existing():
     assert remaining == []
     assert consumed == ["rescan-1"]
     assert upd[0]["points"] == [[0, 50], [100, 50], [200, 50]]
+
+# ------------------------------------------- C1: VALVE BODY GAP CLOSURE -----------
+def test_box_trace_endpoints_extend_to_valve_body():
+    """Box-trace: run ends near a valve body extend to the body edge (no whitespace).
+
+    `stitch_region_runs` only joins run ENDS to other run ENDS; a valve body sits
+    BETWEEN two pipe ends, so the visible gap survives. The box-trace flow calls
+    `snap_endpoints_to_symbol_bodies` on the new runs with the valve body boxes.
+    """
+    from pidcorr.lines import snap_endpoints_to_symbol_bodies
+
+    new_runs = [
+        _runs([[80, 500], [452, 500]], id="rescan-a"),
+        _runs([[548, 500], [920, 500]], id="rescan-b"),
+    ]
+    # Valve body box detected in the ROI (global coordinates).
+    valve_boxes = [(455.0, 455.0, 545.0, 505.0)]
+
+    snapped = snap_endpoints_to_symbol_bodies(new_runs, valve_boxes, max_extend_px=20)
+
+    assert snapped[0]["points"][-1] == [455, 500]
+    assert snapped[1]["points"][0] == [545, 500]
+    # Runs must not bridge THROUGH the valve body.
+    assert all(not (min(p[0] for p in r["points"]) < 455 and max(p[0] for p in r["points"]) > 545)
+               for r in snapped)

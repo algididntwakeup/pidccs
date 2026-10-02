@@ -2528,3 +2528,49 @@ Dievaluasi menggunakan `_diag_trace_only.py` pada `Contoh P&ID/BCD3-605-42-PID-1
 
 
 
+
+
+---
+
+## Graph-Based Skeleton Walker + Smart Snapping (2026-10-02)
+
+**Status**: Implemented & verified across the full backend suite (145 passed, 0 failed). All 24 reference sheets in `Contoh P&ID` trace with **0 backtrack runs** (baseline had zig-zag return trails on smooth arcs).
+
+### 1. Scope & Root Cause Resolution
+
+| # | Feature / Bugfix | Files | Resolution Summary |
+|---|------------------|-------|--------------------|
+| 1 | **BFS shortest-path pixel ordering (A1)** | `pidcorr/implementations/skeleton_tracer.py` | `_order_edge_pixels` greedily picked the nearest unvisited neighbor, so braided Zhang-Suen sections produced backtrack trails: measured on a clean arc r=300, the walk jumped `(1349,1397) -> (1343,1359)` then walked BACK along the arc. `approxPolyDP` turned the return trail into a fake 100px diagonal chord across blank paper, and `suppress_low_ink_diagonals` deleted the WHOLE run (the curved elbow vanished). Rewritten as BFS shortest path on the 8-connected pixel graph from the pixel nearest `p0` to the pixel nearest `p1`; a shortest path never revisits a pixel. The old greedy walk is kept as `_greedy_edge_walk` fallback only when BFS covers <60% of the component (branchy/chopped components). Result: arcs r=150..800 trace as exactly ONE run. |
+| 2 | **DPI-scaled simplification epsilon (A2)** | `pidcorr/implementations/skeleton_tracer.py` | `_graph_segments` now takes `simplify_eps`; `trace()` passes `max(1.5, 2.5 * dpi / 350.0)` (2.5px at 350 DPI). Measured: arc r=400 vertices 16 -> 11, r=600 18 -> 13, max deviation 2.56px (test guard <= 4.0). Fewer vertices per run, curve shape preserved. |
+| 3 | **Hough false-positive cue guard (A3)** | `pidcorr/implementations/skeleton_tracer.py` | The Hough valve-cue masking produced false compact V/transverse regions on smooth arcs (measured 2 boxes on a clean r=300 arc: `(1263,1200)-(1332,1238)` and `(1442,1325)-(1479,1365)`), cutting one continuous curve into 3 runs. New `_region_is_smooth_continuing_stroke` skips the mask when ink exits the crop at exactly 2 antipodal boundary points AND gradient-orientation spread (structure tensor, doubled-angle circular std) <= 20 deg. Measured: 11/11 arc regions and 3/3 S-curve regions skipped; 14/14 symbol regions (V, bar, bowtie, gate, thick rect) still masked; 273/273 regions on real sheets still masked (guard never loosens on actual drawings). |
+| 4 | **Smart endpoint snapping to symbol bodies (A4)** | `pidcorr/implementations/skeleton_tracer.py`, `pidcorr/lines.py` | Tracer blacks out valve/instrument bodies BEFORE skeletonization, so pipe strokes stop a few pixels short and the canvas shows a white gap. New `snap_endpoints_to_symbol_bodies(runs, boxes, max_extend_px)` extends an endpoint to the first box-face intersection along the last-segment direction (slab method). Extend-only, never past the box center, never into the interior, idempotent at <= 1px. `trace()` calls it right after `snap_endpoints_to_equipment` with boxes from (a) valve/instrument detections, (b) Hough regions actually used for masking, (c) compact ink bodies via `_compact_ink_contours`. Measured on reference sheets: all moves <= 19px, no anomalies. |
+| 5 | **Box-trace valve gap closure (C1)** | `backend/app/routers/projects.py` | After `stitch_region_runs`, the `/trace-region` flow collects valve/instrument body boxes intersecting the ROI (detected symbols mapped to global coords + compact ink bodies from `binary_crop` mapped to global) and calls `snap_endpoints_to_symbol_bodies` on the new runs with `max_extend_px=20`. Each side of the valve extends to the body edge, leaving zero whitespace, without bridging THROUGH the valve body. `stitch_region_runs` semantics (Scenario A/B/C) are unchanged. |
+
+### 2. Files Modified
+
+- [`pidcorr/implementations/skeleton_tracer.py`](file:///c:/Werk/pidccs/pidcorr/implementations/skeleton_tracer.py):
+  - `_greedy_edge_walk` (new): extracted legacy greedy walk, used only as fallback.
+  - `_order_edge_pixels`: BFS shortest path with <60% coverage fallback.
+  - `_graph_segments`: new `simplify_eps` parameter for `approxPolyDP`.
+  - `_region_is_smooth_continuing_stroke` (new): boundary-exit + antipodal + orientation-spread guard for Hough mask regions.
+  - `trace()`: `simplify_eps = max(1.5, 2.5 * dpi / 350.0)`; Hough mask guard with pre-mask snapshot; `hough_masked_boxes` recording; step 6b body-box snapping.
+- [`pidcorr/lines.py`](file:///c:/Werk/pidccs/pidcorr/lines.py):
+  - `_ray_box_entry` (new): slab-method ray-box entry distance.
+  - `snap_endpoints_to_symbol_bodies` (new): shared smart-snapping helper (PipeRun + dict support).
+- [`backend/app/routers/projects.py`](file:///c:/Werk/pidccs/backend/app/routers/projects.py):
+  - `/trace-region`: C1 endpoint extension after `stitch_region_runs`, with ImportError-safe fallbacks.
+- [`backend/tests/test_masking_and_runs.py`](file:///c:/Werk/pidccs/backend/tests/test_masking_and_runs.py):
+  - `test_skeleton_tracer_keeps_curved_elbow_as_single_run` (arcs r=150/300 -> exactly 1 run with >= 4 points, both ends present).
+  - `test_skeleton_tracer_does_not_false_mask_smooth_arc` (guards A3).
+  - `test_snap_endpoints_to_symbol_bodies_horizontal_and_vertical`, `..._skips_far_and_touching`, `..._never_enters_interior`.
+  - `test_skeleton_tracer_snaps_valve_endpoints_to_symbol_body`.
+  - `test_raster_inline_symbols_leave_two_sides_and_no_symbol_interior`: adjusted for edge-touching semantics (+-2px edge tolerance; interior penetration still forbidden).
+- [`backend/tests/test_box_trace_stitching.py`](file:///c:/Werk/pidccs/backend/tests/test_box_trace_stitching.py):
+  - `test_box_trace_endpoints_extend_to_valve_body` (C1: both sides reach the valve body edge, no bridge-through).
+
+### 3. Verification
+
+- Full backend suite: **145 passed, 0 failed** (with `BIMA_SSO_MOCK_MODE=true` and a repo-local TMP dir; the default-temp PermissionErrors and BIMA-mock failures reproduce on the pre-change baseline and are environmental).
+- Reference battery (all 24 sheets in `Contoh P&ID`): **0 backtrack runs** total. Sheet `BCD3-...-005-01`: runs 313 -> 322, points 1090 -> 1078, fake 3770px diagonal chord eliminated.
+- Synthetic battery: arcs r=150..800 single run each (deviation <= 2.56px); sharp L, fillet L, T, crossover, thin-T graph, and detected-valve-gap semantics unchanged.
+- A4 A/B on 3 sheets: all endpoint moves <= 19px, zero anomalies; T-junction composition remains intact.

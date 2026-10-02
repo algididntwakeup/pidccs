@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import numpy as np
 import cv2
 import pytest
@@ -319,9 +320,14 @@ def _trace_symbol_case(symbol):
 @pytest.mark.parametrize("symbol", ["v", "bar", "thick"])
 def test_raster_inline_symbols_leave_two_sides_and_no_symbol_interior(symbol):
     runs, (x1, y1, x2, y2) = _trace_symbol_case(symbol)
-    assert any(max(p[0] for p in run.points) <= x1 for run in runs)
-    assert any(min(p[0] for p in run.points) >= x2 for run in runs)
-    assert all(not any(x1 <= x <= x2 and y1 <= y <= y2 for x, y in run.points)
+    # A4 smart snapping extends each side to the symbol mask edge: the endpoint
+    # may TOUCH the valve body boundary (mask box edge can differ from the hand
+    # box by ~2px), but must never penetrate the body interior.
+    edge_tol = 2
+    assert any(max(p[0] for p in run.points) <= x1 + edge_tol for run in runs)
+    assert any(min(p[0] for p in run.points) >= x2 - edge_tol for run in runs)
+    assert all(not any(x1 + edge_tol <= x <= x2 - edge_tol and y1 + edge_tol <= y <= y2 - edge_tol
+                       for x, y in run.points)
                for run in runs)
 
 
@@ -351,3 +357,108 @@ def test_smooth_open_curve_survives_both_geometric_post_filters():
     filtered = suppress_diagonal_artifacts([curve, long_diagonal], page_wh=(1200, 1200))
     assert curve in filtered
     assert long_diagonal not in filtered
+
+# ---------------------------------------------------------------------------
+# Graph-based skeleton walker + smart snapping (A1-A4)
+# ---------------------------------------------------------------------------
+from pidcorr.lines import snap_endpoints_to_symbol_bodies
+
+def _trace_arc(radius):
+    """Quarter arc on a realistic 3300x2300 sheet, stroke width 3."""
+    image = np.full((2300, 3300, 3), 255, np.uint8)
+    arc = [(int(1200 + radius * math.cos(t)), int(1500 - radius * math.sin(t)))
+           for t in np.linspace(0, math.pi / 2, max(60, radius))]
+    cv2.polylines(image, [np.asarray(arc, np.int32)], False, (0, 0, 0), 3)
+    runs = SkeletonLineTracer(min_length_px=5, suppress_text_artifacts=False,
+                              suppress_floating_stubs=False).trace(
+                                  image, dpi=350, detections=[], furniture=[])
+    return runs, arc
+
+@pytest.mark.parametrize("radius", [150, 300])
+def test_skeleton_tracer_keeps_curved_elbow_as_single_run(radius):
+    """A smooth arc must survive as ONE run (BFS walk kills the backtrack trail).
+
+    Sebelum A1: walk greedy melompat `(1349,1397) -> (1343,1359)` lalu menyusuri
+    busur MUNDUR; approxPolyDP mengubah jejak balik menjadi chord diagonal 100px
+    melintasi kertas kosong dan `suppress_low_ink_diagonals` membuang SELURUH run.
+    """
+    runs, arc = _trace_arc(radius)
+    assert len(runs) == 1, f"arc r={radius} must stay a single run, got {len(runs)}"
+    run = runs[0]
+    assert len(run.points) >= 4
+    # Both arc ends present (first/last point near each arc endpoint).
+    ends = [(arc[0][0], arc[0][1]), (arc[-1][0], arc[-1][1])]
+    for ex, ey in ends:
+        assert _distance_to_run((ex, ey), run.points) <= 6.0
+
+def test_skeleton_tracer_does_not_false_mask_smooth_arc():
+    """Hough cue false-positive on a clean r=300 arc must NOT chop it (guards A3).
+
+    Terukur sebelum A3: box (1263,1200)-(1332,1238) dan (1442,1325)-(1479,1365)
+    memotong busur kontinu menjadi 3 run.
+    """
+    runs, _arc = _trace_arc(300)
+    assert len(runs) == 1
+    assert not any(min(p[0] for p in run.points) < 1332 and max(p[0] for p in run.points) > 1263
+                   and len(run.points) < 4 for run in runs)
+
+def test_snap_endpoints_to_symbol_bodies_horizontal_and_vertical():
+    box = (100, 85, 140, 115)
+    # Horizontal approach from the left -> extends to the left face.
+    r = PipeRun(points=[(50, 100), (90, 100)], axis="h")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points[-1] == (100, 100)
+    # Horizontal approach from the right -> extends to the right face.
+    r = PipeRun(points=[(200, 100), (145, 100)], axis="h")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points[-1] == (140, 100)
+    # Vertical approach from the top -> extends to the top face.
+    r = PipeRun(points=[(120, 50), (120, 80)], axis="v")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points[-1] == (120, 85)
+    # Vertical approach from the bottom -> extends to the bottom face.
+    r = PipeRun(points=[(120, 180), (120, 135)], axis="v")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points[-1] == (120, 115)
+
+def test_snap_endpoints_to_symbol_bodies_skips_far_and_touching():
+    box = (100, 85, 140, 115)
+    # Too far: beyond max_extend_px -> unchanged.
+    r = PipeRun(points=[(50, 100), (70, 100)], axis="h")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points == [(50, 100), (70, 100)]
+    # Already touching the box edge -> unchanged (idempotent).
+    r = PipeRun(points=[(50, 100), (100, 100)], axis="h")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points == [(50, 100), (100, 100)]
+    # Re-running on an already snapped run must not move anything further.
+    r = PipeRun(points=[(50, 100), (90, 100)], axis="h")
+    once = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    twice = snap_endpoints_to_symbol_bodies(once, [box], max_extend_px=20)
+    assert twice[0].points == once[0].points
+
+def test_snap_endpoints_to_symbol_bodies_never_enters_interior():
+    # A very wide body with a short reach: the ray would travel past the center,
+    # so the endpoint must stay outside the body interior.
+    box = (100, 85, 260, 115)
+    r = PipeRun(points=[(200, 100), (230, 100)], axis="h")
+    out = snap_endpoints_to_symbol_bodies([r], [box], max_extend_px=20)
+    assert out[0].points == [(200, 100), (230, 100)]
+
+def test_skeleton_tracer_snaps_valve_endpoints_to_symbol_body():
+    """A4: box-trace endpoints extend to the valve body without a whitespace gap."""
+    image = np.full((350, 350, 3), 255, dtype=np.uint8)
+    cv2.line(image, (20, 175), (330, 175), (0, 0, 0), 3)
+    symbol = {"coarse": "valve", "x1": 165, "y1": 160, "x2": 185, "y2": 190}
+    runs = SkeletonLineTracer(min_length_px=5).trace(
+        image, dpi=350, detections=[symbol], furniture=[]
+    )
+    # Each side must reach the symbol mask edge (pad = 1px at 350dpi), leaving no gap.
+    left = [run for run in runs if max(p[0] for p in run.points) <= 170]
+    right = [run for run in runs if min(p[0] for p in run.points) >= 180]
+    assert left and right
+    assert max(p[0] for p in left[0].points) >= 163
+    assert min(p[0] for p in right[0].points) <= 187
+    # No run may cross THROUGH the valve body.
+    assert all(not (min(p[0] for p in run.points) < 165 and max(p[0] for p in run.points) > 185)
+               for run in runs)

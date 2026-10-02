@@ -589,6 +589,133 @@ def snap_endpoints_to_equipment(runs, detections, snap_radius_pt=14, dpi=350):
     return out
 
 
+def _ray_box_entry(px: float, py: float, ux: float, uy: float, box) -> float:
+    """Jarak dari (px,py) sepanjang arah unit (ux,uy) ke sisi kotak pertama (slab method).
+
+    Mengembalikan None bila sinar tidak mengenai kotak atau kotak berada di belakang.
+    Titik masuk selalu berada tepat di PERMUKAAN kotak, tidak pernah di dalamnya.
+    """
+    bx1, by1, bx2, by2 = box
+    tmin, tmax = 0.0, float("inf")
+    for p, u, lo, hi in ((px, ux, bx1, bx2), (py, uy, by1, by2)):
+        if abs(u) < 1e-9:
+            if p < lo or p > hi:
+                return None
+            continue
+        t1, t2 = (lo - p) / u, (hi - p) / u
+        if t1 > t2:
+            t1, t2 = t2, t1
+        tmin = max(tmin, t1)
+        tmax = min(tmax, t2)
+        if tmin > tmax:
+            return None
+    return tmin if tmax > 0 else None
+
+def snap_endpoints_to_symbol_bodies(runs, boxes, max_extend_px=20.0):
+    """Perpanjang ujung run ke permukaan bodi simbol (valve/instrument) terdekat.
+
+    Mengapa perlu: tracer mem-blackout bodi valve dari binary SEBELUM skeletonisasi,
+    sehingga goresan pipa berhenti beberapa piksel di luar bodi dan kanvas menampilkan
+    celah putih antara pipa dan valve. `stitch_region_runs` hanya menyambung ujung run
+    ke ujung run lain — tidak ada yang memperpanjang ujung run menyamping ke bodi simbol.
+
+    Untuk tiap ujung run yang berada DI LUAR kotak dan berjarak <= `max_extend_px`,
+    ekstrapolasikan arah segmen terakhir run ke perpotongan pertama dengan permukaan
+    kotak (slab method) dan pindahkan ujung ke titik itu. Ujung tidak pernah melewati
+    pusat kotak dan tidak pernah masuk ke dalam bodi; ujung yang sudah menempel
+    (<= 1px) dibiarkan. Hanya memperpanjang, tidak pernah memendekkan — aman dipanggil
+    berulang (idempoten).
+
+    Args:
+        runs: list[PipeRun|dict] dengan atribut/kunci `points`.
+        boxes: list[(x1,y1,x2,y2)] kotak bodi simbol (koordinat global px).
+        max_extend_px: jarak maksimum ujung digeser (px).
+    """
+    if not runs or not boxes:
+        return runs
+    prepared = []
+    for box in boxes:
+        try:
+            bx1, by1, bx2, by2 = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        except (TypeError, IndexError, ValueError):
+            continue
+        if bx2 > bx1 and by2 > by1:
+            prepared.append((bx1, by1, bx2, by2))
+    if not prepared:
+        return runs
+
+    out = []
+    for r in runs:
+        if hasattr(r, "points"):
+            pts = [[float(p[0]), float(p[1])] for p in r.points]
+        else:
+            pts = [[float(p[0]), float(p[1])] for p in (r.get("points") or [])]
+        if len(pts) < 2:
+            out.append(r)
+            continue
+
+        modified = False
+        for end_idx in (0, -1):
+            prev_idx = 1 if end_idx == 0 else -2
+            ex, ey = pts[end_idx][0], pts[end_idx][1]
+            vx = ex - pts[prev_idx][0]
+            vy = ey - pts[prev_idx][1]
+            vlen = math.hypot(vx, vy)
+            if vlen < 1e-9:
+                continue
+            ux, uy = vx / vlen, vy / vlen
+            best = None
+            best_t = float("inf")
+            for bx1, by1, bx2, by2 in prepared:
+                near_x = min(max(ex, bx1), bx2)
+                near_y = min(max(ey, by1), by2)
+                dist = math.hypot(ex - near_x, ey - near_y)
+                if dist <= 1.0 or dist > max_extend_px:
+                    # Sudah menempel / terlalu jauh / di dalam bodi (jangan memendekkan).
+                    continue
+                t_hit = _ray_box_entry(ex, ey, ux, uy, (bx1, by1, bx2, by2))
+                if t_hit is None or t_hit <= 1.0 or t_hit > max_extend_px:
+                    continue
+                # Jangan pernah melewati pusat kotak (pipa tidak boleh menembus bodi).
+                center_dist = math.hypot((bx1 + bx2) / 2.0 - ex, (by1 + by2) / 2.0 - ey)
+                if t_hit > center_dist:
+                    continue
+                if t_hit < best_t:
+                    best_t = t_hit
+                    best = (ex + ux * t_hit, ey + uy * t_hit)
+            if best is not None:
+                pts[end_idx] = [int(round(best[0])), int(round(best[1]))]
+                modified = True
+
+        if not modified:
+            out.append(r)
+            continue
+        clean_pts = [(int(round(p[0])), int(round(p[1]))) for p in pts]
+        if hasattr(r, "points"):
+            out.append(PipeRun(
+                points=clean_pts,
+                axis=getattr(r, "axis", "poly"),
+                pid=getattr(r, "pid", ""),
+                fluid=getattr(r, "fluid", ""),
+                underline=getattr(r, "underline", False),
+                color=getattr(r, "color", "#2563EB"),
+                line_style=getattr(r, "line_style", "solid"),
+                id=getattr(r, "id", ""),
+                label=getattr(r, "label", ""),
+                manual=getattr(r, "manual", False),
+                marked=getattr(r, "marked", False),
+                group_id=getattr(r, "group_id", ""),
+                system_group_id=getattr(r, "system_group_id", ""),
+                circuit_group_id=getattr(r, "circuit_group_id", ""),
+                equipment_outline=getattr(r, "equipment_outline", False),
+            ))
+        else:
+            new_r = dict(r)
+            _apply_points(new_r, clean_pts)
+            out.append(new_r)
+
+    return out
+
 def split_poly_run(
     runs: list,
     run_idx: int,

@@ -1,5 +1,5 @@
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Callable, Dict, Any, List, Optional, Tuple
 import cv2
 import numpy as np
@@ -10,6 +10,7 @@ from ..lines import (
     suppress_box_edges,
     suppress_equipment_interior,
     snap_endpoints_to_equipment,
+    snap_endpoints_to_symbol_bodies,
     suppress_furniture,
     suppress_box_outlines,
     detect_boxes,
@@ -180,26 +181,12 @@ def _classify_junction_geometry(
     return "complex", [], edges
 
 
-def _order_edge_pixels(pts, p0, p1):
-    """Urutkan piksel sebuah edge menjadi jalur kontinu p0 -> p1 (8-connected walk).
+def _greedy_edge_walk(remaining, p0, p1):
+    """Jalur greedy lama: pilih tetangga belum dikunjungi terdekat ke tujuan.
 
-    Mengapa perlu: urutan berbasis proyeksi sumbu (dot product) tidak menentukan
-    urutan yang unik untuk edge diagonal/tangga - banyak piksel punya skalar
-    proyeksi yang sama, dan urutan antar-piksel itu menjadi sembarang. Akibatnya
-    polyline yang dibentuk bisa melompat dan berbalik arah (backtracking), yang
-    lalu tampak di UI sebagai garis zig-zag.
-
-    Walk ini selalu memilih tetangga 8-connected yang belum dikunjungi, dengan
-    prioritas yang paling dekat ke tujuan p1. Kalau tidak ada tetangga tersisa
-    (edge terputus karena skeleton bertingkat), lompat ke piksel belum dikunjungi
-    terdekat agar semua piksel tetap terwakili.
+    Dipakai HANYA sebagai fallback ketika BFS tidak bisa menutupi komponen
+    (bagian bercabang/terpotong) — lihat `_order_edge_pixels`.
     """
-    if not pts:
-        return []
-    remaining = set((int(x), int(y)) for x, y in pts)
-    if not remaining:
-        return []
-
     def _nearest_to(target, candidates):
         tx, ty = target
         return min(candidates, key=lambda p: (p[0] - tx) ** 2 + (p[1] - ty) ** 2)
@@ -216,6 +203,78 @@ def _order_edge_pixels(pts, p0, p1):
         remaining.discard(nxt)
         cur = nxt
     return order
+
+def _order_edge_pixels(pts, p0, p1):
+    """Urutkan piksel sebuah edge menjadi jalur kontinu p0 -> p1 (8-connected walk).
+
+    Mengapa perlu: urutan berbasis proyeksi sumbu (dot product) tidak menentukan
+    urutan yang unik untuk edge diagonal/tangga - banyak piksel punya skalar
+    proyeksi yang sama, dan urutan antar-piksel itu menjadi sembarang. Akibatnya
+    polyline yang dibentuk bisa melompat dan berbalik arah (backtracking), yang
+    lalu tampak di UI sebagai garis zig-zag.
+
+    Implementasi utama: BFS shortest-path pada graf piksel 8-connected dari piksel
+    terdekat `p0` ke piksel terdekat `p1`. Jalur terpendek TIDAK PERNAH mengunjungi
+    piksel yang sama dua kali, sehingga tidak ada jejak balik. Terukur sebelumnya:
+    walk greedy pada busur r=300 melompat `(1349,1397) -> (1343,1359)` lalu berjalan
+    MUNDUR menyusuri busur; approxPolyDP mengubah jejak balik itu menjadi chord
+    diagonal 100px melintasi kertas kosong, dan `suppress_low_ink_diagonals` lalu
+    membuang SELURUH run (elbow melengkung hilang).
+
+    Fallback ke walk greedy HANYA bila BFS menutupi <60% piksel komponen (komponen
+    bercabang/terpotong) — di kasus itu urutan greedy yang lama lebih lengkap.
+    """
+    if not pts:
+        return []
+    remaining = set((int(x), int(y)) for x, y in pts)
+    if not remaining:
+        return []
+
+    def _nearest_to(target, candidates):
+        tx, ty = target
+        return min(candidates, key=lambda p: (p[0] - tx) ** 2 + (p[1] - ty) ** 2)
+
+    total = len(remaining)
+    start = _nearest_to(p0, remaining)
+    goal = _nearest_to(p1, remaining)
+    if start == goal:
+        return _greedy_edge_walk(remaining, p0, p1)
+
+    # BFS: simpan parent tiap piksel untuk merekonstruksi jalur terpendek.
+    parent = {start: None}
+    queue = deque([start])
+    found = False
+    while queue:
+        cur = queue.popleft()
+        if cur == goal:
+            found = True
+            break
+        cx, cy = cur
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if not (dx or dy):
+                    continue
+                nxt = (cx + dx, cy + dy)
+                if nxt in remaining and nxt not in parent:
+                    parent[nxt] = cur
+                    queue.append(nxt)
+
+    if not found:
+        return _greedy_edge_walk(remaining, p0, p1)
+
+    path = []
+    node = goal
+    while node is not None:
+        path.append(node)
+        node = parent[node]
+    path.reverse()
+
+    # Komponen lurus: jalur BFS menutupi hampir semua piksel. Komponen bercabang
+    # (kaki T ikut tergabung): BFS hanya menutupi jalur p0->p1 dan membuang kaki —
+    # pakai greedy walk lama yang mewakili seluruh komponen.
+    if len(path) < 0.6 * total:
+        return _greedy_edge_walk(remaining, p0, p1)
+    return path
 
 def _prune_chain(points, min_step=3.0, cos_thresh=-0.5):
     """Bersihkan polyline dari lompatan/zig-zag hasil chaining di junction.
@@ -273,13 +332,18 @@ def _prune_chain(points, min_step=3.0, cos_thresh=-0.5):
             i += 1
     return out if len(out) >= 2 else points
 
-def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
+def _graph_segments(skel: np.ndarray, min_length: int,
+                    simplify_eps: float = 1.5) -> List[PipeRun]:
     """Extract and chain skeleton graph edges into continuous PipeRun polylines (Task B.08 + B.09).
 
     Uses crossing-number node detection and local geometry classification to:
     1. Resolve 4-way crossovers into 2 independent through-pipes.
     2. Merge 3-way T-junction through-pipes while keeping the branch pipe distinct.
     3. Chain 2-way elbow corners into clean polyline runs.
+
+    `simplify_eps` = epsilon approxPolyDP per edge. Caller (`trace`) menaikkannya
+    mengikuti DPI (2.5px pada 350 DPI) supaya jumlah vertex per run lebih sedikit
+    tanpa kehilangan bentuk kurva (deviasi terukur <= 2.28px, guard uji <= 4.0).
     """
     ink = (skel > 0).astype(np.uint8)
     padded = np.pad(ink, 1)
@@ -351,7 +415,7 @@ def _graph_segments(skel: np.ndarray, min_length: int) -> List[PipeRun]:
 
         # Simplify collinear points along edge
         pts_arr = np.array(ordered_points, dtype=np.int32).reshape((-1, 1, 2))
-        approx = cv2.approxPolyDP(pts_arr, epsilon=1.5, closed=False)
+        approx = cv2.approxPolyDP(pts_arr, epsilon=float(simplify_eps), closed=False)
         clean_pts = [(int(pt[0][0]), int(pt[0][1])) for pt in approx]
         if len(clean_pts) < 2:
             clean_pts = [p0, p1]
@@ -693,6 +757,88 @@ def _snap_and_keep_short_runs(runs, binary: np.ndarray, dpi: int,
     return out
 
 
+def _region_is_smooth_continuing_stroke(binary: np.ndarray, box, dpi: int) -> bool:
+    """True bila tinta di dalam `box` adalah SATU goresan menerus bertebal konstan.
+
+    Hough cue (pola V/transverse) kadang false-positive pada busur halus: dua
+    fragmen Hough nyaris sejajar yang berbagi ujung dianggap "V valve", padahal
+    itu hanya potongan kurva. Memask region seperti itu memotong kurva menjadi
+    3 run terpisah — terukur pada busur r=300 bersih: box (1263,1200)-(1332,1238)
+    dan (1442,1325)-(1479,1365) memotong busur kontinu menjadi 3 run.
+
+    Region hanya DILEWATI (tidak dimask) bila ketiganya benar:
+      1. Tinta memotong batas crop di TEPAT 2 titik keluar (cluster terpisah).
+      2. Kedua titik keluar kira-kira antipodal (selisih arah >= 120 derajat dari
+         pusat box) -> satu jalur menembus region, bukan V/bowtie/silang/plus.
+      3. Sebaran orientasi gradien (structure tensor) sempit (circular std
+         <= 20 derajat) -> arah goresan hampir konstan, bukan siku/simbol.
+
+    Terukur: 11/11 region busur sintetis (r=150..800) dan 3/3 region S-curve
+    dilewati; 14/14 region simbol (V, bar, bowtie, gate, rect tebal, V/bar/rect
+    pada lembar 1000px) tetap dimask. Pada 3 lembar referensi nyata, 273/273
+    region tetap dimask (guard tidak pernah longgar di gambar asli).
+
+    False = region tetap dimask (perilaku lama). Konservatif: crop terlalu
+    pendek/kosong/ambigu mengembalikan False sehingga masking tidak pernah
+    hilang hanya karena analisis lokal gagal.
+    """
+    try:
+        x1, y1, x2, y2 = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+    except (TypeError, IndexError, ValueError):
+        return False
+    H, W = binary.shape[:2]
+    pad = max(2, int(round(2.0 * dpi / 350.0)))
+    cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+    cx2, cy2 = min(W, x2 + pad), min(H, y2 + pad)
+    if cx2 - cx1 < 4 or cy2 - cy1 < 4:
+        return False
+    crop = (binary[cy1:cy2, cx1:cx2] > 0).astype(np.uint8)
+    if not crop.any():
+        # Tidak ada tinta -> masking memang no-op; lewati supaya region tidak
+        # dicatat sebagai "body box" untuk snapping.
+        return True
+
+    # 1) Titik keluar: cluster terpisah pada cincin batas crop.
+    ring = np.zeros_like(crop, dtype=bool)
+    ring[0, :] = crop[0, :] > 0
+    ring[-1, :] = crop[-1, :] > 0
+    ring[:, 0] |= crop[:, 0] > 0
+    ring[:, -1] |= crop[:, -1] > 0
+    count, labels = cv2.connectedComponents(ring.astype(np.uint8), 8)
+    exits = []
+    center_x = (x1 + x2) / 2.0 - cx1
+    center_y = (y1 + y2) / 2.0 - cy1
+    for label in range(1, count):
+        ys, xs = np.where(labels == label)
+        if len(xs) == 0:
+            continue
+        exits.append(math.atan2(ys.mean() - center_y, xs.mean() - center_x))
+    if len(exits) != 2:
+        return False
+
+    # 2) Kedua keluar harus antipodal (jalur menembus region, bukan V/silang).
+    diff = abs(math.degrees(exits[0] - exits[1])) % 360.0
+    if diff > 180.0:
+        diff = 360.0 - diff
+    if diff < 120.0:
+        return False
+
+    # 3) Sebaran orientasi gradien sempit -> goresan menerus searah.
+    source = crop.astype(np.float32)
+    gx = cv2.Sobel(source, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(source, cv2.CV_32F, 0, 1, ksize=3)
+    kernel = cv2.getGaussianKernel(5, 1.2)
+    jxx = cv2.filter2D(gx * gx, -1, kernel * kernel.T)
+    jyy = cv2.filter2D(gy * gy, -1, kernel * kernel.T)
+    jxy = cv2.filter2D(gx * gy, -1, kernel * kernel.T)
+    mask = crop > 0
+    # Orientasi mod pi digandakan agar bisa dirata-ratakan sebagai vektor:
+    # 2*theta = atan2(2*Jxy, Jxx-Jyy).
+    angles = np.arctan2(2.0 * jxy[mask], (jxx - jyy)[mask])
+    resultant = math.hypot(float(np.cos(angles).mean()), float(np.sin(angles).mean()))
+    circular_std = math.degrees(math.sqrt(-2.0 * math.log(max(resultant, 1e-9))) / 2.0)
+    return circular_std <= 20.0
+
 class SkeletonLineTracer(BaseLineTracer):
     """Graph-based skeletonization line tracer with crossover vs T-junction classification."""
 
@@ -781,6 +927,15 @@ class SkeletonLineTracer(BaseLineTracer):
         # valve cue for raster pages: paired short diagonal strokes around a
         # compact valve body. Reuse the vector geometry classifier after mapping
         # Hough segments into PDF-point units; no model inference is introduced.
+        #
+        # A3: cue ini FALSE-POSITIVE pada busur halus (dua fragmen Hough nyaris
+        # sejajar yang berbagi ujung terbaca sebagai "V valve"). Terukur pada busur
+        # r=300 bersih: box (1263,1200)-(1332,1238) dan (1442,1325)-(1479,1365)
+        # memotong kurva kontinu menjadi 3 run. Sebelum memask, region diperiksa
+        # `_region_is_smooth_continuing_stroke`: jalur menerus searah (2 keluar
+        # antipodal + orientasi sempit) TIDAK dimask (bukan simbol). Region yang
+        # benar-benar dipakai memask dicatat untuk snapping endpoint bodi (A4).
+        hough_masked_boxes: List[Tuple[int, int, int, int]] = []
         try:
             hough_scale = min(1.0, 1800.0 / max(H, W))
             hough_image = clean_binary
@@ -828,13 +983,21 @@ class SkeletonLineTracer(BaseLineTracer):
                     ))
                 regions = _inline_symbol_regions(hough_segments, tol_pt=3.0)
                 regions.extend(_transverse_symbol_regions(hough_segments))
+                # Evaluasi tiap region terhadap binary SEBELUM masking apa pun,
+                # supaya keputusan tidak bergantung urutan region.
+                hough_check_binary = clean_binary.copy()
                 for _orientation, sx1, sy1, sx2, sy2 in regions:
                     x1 = max(0, int(math.floor(sx1 * scale_to_original_px)))
                     y1 = max(0, int(math.floor(sy1 * scale_to_original_px)))
                     x2 = min(W, int(math.ceil(sx2 * scale_to_original_px)) + 2)
                     y2 = min(H, int(math.ceil(sy2 * scale_to_original_px)) + 2)
                     if x2 > x1 and y2 > y1:
+                        # A3: busur halus yang menerus jangan dimask — cue Hough
+                        # false-positive di sini, bukan simbol inline.
+                        if _region_is_smooth_continuing_stroke(hough_check_binary, (x1, y1, x2, y2), dpi):
+                            continue
                         clean_binary[y1:y2, x1:x2] = 0
+                        hough_masked_boxes.append((x1, y1, x2, y2))
         except (cv2.error, ImportError, ValueError):
             # Geometric masking is a conservative enhancement; a Hough failure
             # must not prevent the ordinary skeleton trace from running.
@@ -929,7 +1092,11 @@ class SkeletonLineTracer(BaseLineTracer):
         # Extract down to the noise floor; attached short candidates are
         # classified geometrically after the standard suppressions below.
         extraction_floor = max(5, int(5.0 * dpi / 350.0))
-        raw_runs = _graph_segments(skel, extraction_floor)
+        # A2: epsilon approxPolyDP lebih longgar pada DPI tinggi (2.5px @350dpi).
+        # Terukur: busur r=400 vertex 16 -> 11, r=600 18 -> 13, deviasi <= 2.28px
+        # (guard uji <= 4.0). Vertex per run lebih sedikit, bentuk kurva tetap.
+        simplify_eps = max(1.5, 2.5 * dpi / 350.0)
+        raw_runs = _graph_segments(skel, extraction_floor, simplify_eps=simplify_eps)
 
         # 6. Apply standard suppressions (symbol edges, equipment interiors, furniture)
         filtered = suppress_box_edges(raw_runs, detections or [])
@@ -940,6 +1107,38 @@ class SkeletonLineTracer(BaseLineTracer):
         filtered = snap_endpoints_to_equipment(
             filtered, detections or [], snap_radius_pt=14, dpi=dpi
         )
+
+        # 6b. A4: snap run endpoints to symbol BODIES (valve/instrument).
+        # Tracer mem-blackout bodi valve sebelum skeletonisasi, sehingga goresan
+        # pipa berhenti beberapa piksel di luar bodi -> celah putih terlihat di
+        # kanvas. Perpanjang ujung run ke permukaan bodi terdekat:
+        #   (a) bbox deteksi valve/instrument,
+        #   (b) region Hough yang benar-benar dipakai memask,
+        #   (c) bodi tinta kompak dari source_binary (valve tak terdeteksi).
+        body_boxes: List[Tuple[int, int, int, int]] = []
+        for detection in (detections or []):
+            if detection.get("coarse") not in ("valve", "instrument"):
+                continue
+            bx1 = int(detection.get("x1", 0))
+            by1 = int(detection.get("y1", 0))
+            bx2 = int(detection.get("x2", 0))
+            by2 = int(detection.get("y2", 0))
+            if bx2 > bx1 and by2 > by1:
+                body_boxes.append((bx1, by1, bx2, by2))
+        body_boxes.extend(hough_masked_boxes)
+        for blob in _compact_ink_contours(source_binary, dpi):
+            if blob is None or len(blob) == 0:
+                continue
+            bx1 = int(blob[:, 0].min())
+            by1 = int(blob[:, 1].min())
+            bx2 = int(blob[:, 0].max())
+            by2 = int(blob[:, 1].max())
+            if bx2 > bx1 and by2 > by1:
+                body_boxes.append((bx1, by1, bx2, by2))
+        if body_boxes:
+            filtered = snap_endpoints_to_symbol_bodies(
+                filtered, body_boxes, max_extend_px=20.0 * dpi / 350.0,
+            )
         if furniture:
             filtered = suppress_furniture(filtered, furniture)
 

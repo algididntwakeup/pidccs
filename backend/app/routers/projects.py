@@ -216,6 +216,16 @@ async def trace_region(
     except ImportError:
         def stitch_region_runs(existing_runs, new_runs, bounds_roi, snap_radius=18.0):
             return existing_runs, new_runs, []
+    try:
+        from pidcorr.lines import snap_endpoints_to_symbol_bodies
+    except ImportError:
+        def snap_endpoints_to_symbol_bodies(runs, boxes, max_extend_px=20.0):
+            return runs
+    try:
+        from pidcorr.implementations.skeleton_tracer import _compact_ink_contours
+    except ImportError:
+        def _compact_ink_contours(binary, dpi):
+            return []
 
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
@@ -407,6 +417,38 @@ async def trace_region(
         current_runs, new_runs, bounds_roi=(x1, y1, x2, y2), snap_radius=18.0,
     )
     stitched_runs_count = len(consumed_ids)
+
+    # --- C1: rapatkan ujung run baru ke BODI valve/instrument ------------------------
+    # stitch_region_runs hanya menyambung ujung run ke ujung run LAIN. Celah ke bodi
+    # simbol tetap tersisa karena tracer mem-blackout bodi valve/instrument dari
+    # binary sebelum skeletonisasi -> goresan pipa berhenti beberapa piksel di luar
+    # bodi dan kanvas menampilkan celah putih. Perpanjang ujung run BARU ke permukaan
+    # bodi terdekat (hanya memperpanjang, tidak menembus bodi).
+    if new_runs:
+        symbol_boxes = []
+        for s in existing_symbols:
+            if s.get("coarse") not in ("valve", "instrument"):
+                continue
+            sx1 = float(s.get("x1", 0))
+            sy1 = float(s.get("y1", 0))
+            sx2 = float(s.get("x2", 0))
+            sy2 = float(s.get("y2", 0))
+            if sx2 > sx1 and sy2 > sy1 and sx2 > px1 and sx1 < px2 and sy2 > py1 and sy1 < py2:
+                symbol_boxes.append((sx1, sy1, sx2, sy2))
+        # Valve TAK terdeteksi: bodi tinta kompak di dalam ROI (slice dari full_binary).
+        for blob in _compact_ink_contours(binary_crop, sheet.dpi or 350):
+            if blob is None or len(blob) == 0:
+                continue
+            bx1 = float(blob[:, 0].min()) + px1
+            by1 = float(blob[:, 1].min()) + py1
+            bx2 = float(blob[:, 0].max()) + px1
+            by2 = float(blob[:, 1].max()) + py1
+            if bx2 > bx1 and by2 > by1:
+                symbol_boxes.append((bx1, by1, bx2, by2))
+        if symbol_boxes:
+            new_runs = snap_endpoints_to_symbol_bodies(
+                new_runs, symbol_boxes, max_extend_px=20.0,
+            )
 
     all_runs = current_runs + new_runs
 

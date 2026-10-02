@@ -1511,3 +1511,42 @@ Sebagai acuan untuk sesi berikutnya, berikut adalah backlog prioritas yang belum
    - **Jumlah Run Pipa**: **44 run** bersih, presisi, tanpa garis artefak.
 
 
+
+
+---
+
+## 11. Graph-Based Skeleton Walker + Smart Snapping (2026-10-02)
+
+**Status**: 100% Selesai, Terverifikasi, dan Siap Digunakan.
+
+### 11.1 Akar Masalah (Terukur)
+
+1. **Backtrack walk greedy pada skeleton "braided"**: `_order_edge_pixels` memilih tetangga belum dikunjungi terdekat ke tujuan. Pada busur halus r=300, walk melompat `(1349,1397) -> (1343,1359)` lalu berjalan MUNDUR menyusuri busur. `approxPolyDP` mengubah jejak balik itu menjadi chord diagonal 100px melintasi kertas kosong, dan `suppress_low_ink_diagonals` membuang SELURUH run — elbow melengkung hilang dari kanvas.
+2. **Hough cue false-positive pada busur**: masking valve-cue menghasilkan 2 box palsu pada busur r=300 bersih — `(1263,1200)-(1332,1238)` dan `(1442,1325)-(1479,1365)` — memotong kurva kontinu menjadi 3 run terpisah.
+3. **Celah putih di valve saat Box Trace**: `stitch_region_runs` hanya menyambung ujung run ke ujung run LAIN; tidak ada yang memperpanjang ujung run ke bodi valve, sehingga celah terlihat di kanvas.
+
+### 11.2 Perbaikan
+
+1. **BFS Shortest-Path Pixel Ordering (A1)**:
+   - `_order_edge_pixels` kini menelusuri jalur terpendek BFS pada graf piksel 8-connected dari piksel terdekat `p0` ke piksel terdekat `p1`. Jalur terpendek tidak pernah mengunjungi piksel dua kali -> tidak ada jejak balik.
+   - Walk greedy lama disimpan sebagai `_greedy_edge_walk`, dipakai HANYA bila BFS menutupi <60% komponen (komponen bercabang/terpotong).
+   - Hasil: busur r=150..800 menjadi SATU run utuh (sebelumnya terpotong/menghilang).
+2. **Epsilon Simplifikasi Skala DPI (A2)**:
+   - `_graph_segments` menerima parameter `simplify_eps`; `trace()` mengirim `max(1.5, 2.5 * dpi / 350.0)` (2.5px @350 DPI).
+   - Terukur: busur r=400 vertex 16 -> 11, r=600 18 -> 13, deviasi maksimum 2.56px (guard uji <= 4.0).
+3. **Guard Mask Hough untuk Busur Halus (A3)**:
+   - Sebelum mem-blackout region Hough, `_region_is_smooth_continuing_stroke` memeriksa: (1) tinta keluar crop di TEPAT 2 titik, (2) kedua titik antipodal (>= 120 derajat dari pusat), (3) sebaran orientasi gradien (structure tensor, circular std sudut ganda) <= 20 derajat.
+   - Terukur: 11/11 region busur + 3/3 region S-curve dilewati; 14/14 region simbol (V, bar, bowtie, gate, rect tebal) tetap dimask; 273/273 region pada 3 lembar referensi nyata tetap dimask (guard tidak pernah longgar di gambar asli).
+   - Keputusan dievaluasi terhadap snapshot binary SEBELUM masking agar tidak bergantung urutan region.
+4. **Smart Snapping Endpoint ke Bodi Simbol (A4 + C1)**:
+   - Helper baru `snap_endpoints_to_symbol_bodies(runs, boxes, max_extend_px)` di `pidcorr/lines.py`: ujung run yang berjarak <= `max_extend_px` dari kotak bodi diekstrapolasi sepanjang arah segmen terakhir ke perpotongan pertama permukaan kotak (slab method `_ray_box_entry`). Hanya memperpanjang; tidak pernah melewati pusat kotak; tidak pernah masuk interior; idempoten (ujung yang sudah menempel <= 1px dibiarkan).
+   - `trace()` memanggilnya setelah `snap_endpoints_to_equipment` dengan bodi dari (a) deteksi valve/instrument, (b) region Hough yang benar-benar dipakai memask, (c) bodi tinta kompak `_compact_ink_contours`.
+   - Box Trace (`/trace-region`): setelah `stitch_region_runs`, ujung run BARU diperpanjang ke bodi valve/instrument di sekitar ROI -> celah putih tertutup tanpa menjembatani menembus bodi valve. Semantik Scenario A/B/C `stitch_region_runs` tidak berubah.
+
+### 11.3 Verifikasi
+
+- **Full backend suite**: **145 passed, 0 failed** (dengan `BIMA_SSO_MOCK_MODE=true` dan TMP lokal repo; kegagalan PermissionError/BIMA-mock pada setup default bersifat environmental dan terbukti juga gagal pada baseline sebelum perubahan).
+- **Battery 24 lembar referensi** (`Contoh P&ID`): **0 run dengan backtrack** (sebelumnya ada pada busur halus). Lembar `BCD3-...-005-01`: runs 313 -> 322, points 1090 -> 1078, chord diagonal palsu 3770px hilang.
+- **Battery sintetis**: busur r=150..800 satu run (deviasi <= 2.56px); sharp L, fillet L, T, crossover, thin-T graph, dan detected-valve-gap tidak berubah perilaku.
+- **A4 A/B pada 3 lembar**: semua perpindahan endpoint <= 19px, nol anomali.
+- **Test baru**: 6 di `test_masking_and_runs.py` + 1 di `test_box_trace_stitching.py`; 1 test lama (symbol interior) disesuaikan ke semantik edge-touching (+-2px) sesuai guard rencana.
