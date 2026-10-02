@@ -2,13 +2,17 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { getLocalAccessToken } from '@/lib/api';
+import { getLocalAccessToken, isLocalDevAuthBypass } from '@/lib/api';
 
 export default function RequireAuth({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [authorized, setAuthorized] = useState(false);
 
   useEffect(() => {
+    if (isLocalDevAuthBypass()) {
+      setAuthorized(true);
+      return;
+    }
     if (!getLocalAccessToken()) {
       router.replace('/login');
       return;

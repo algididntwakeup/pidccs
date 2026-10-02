@@ -1,13 +1,15 @@
 import os
-from typing import List
-from pydantic import Field
+from typing import List, Literal
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "P&ID Studio Web Platform"
     API_V1_PREFIX: str = "/api/v1"
-    DEBUG: bool = True
+    APP_ENV: Literal["local", "development", "test", "staging", "production"] = "production"
+    DEBUG: bool = False
+    LOCAL_DEV_AUTH_BYPASS: bool = False
 
     # Configure a stable shared secret in deployed environments. The random
     # fallback keeps local development from using a publicly known signing key.
@@ -16,7 +18,7 @@ class Settings(BaseSettings):
     # Empty by default: break-glass login stays disabled until IT provisions a
     # high-entropy value in the deployment environment.
     SUPERUSER_SECRET_KEY: str = ""
-    BIMA_BASE_URL: str = "https://bima.reksolindo.co.id"
+    BIMA_BASE_URL: str = ""
     BIMA_CLIENT_ID: str = ""
     # Live BIMA integration is the default. Enable mock behavior explicitly in
     # local test/development environments so a deployed callback cannot accept
@@ -63,15 +65,16 @@ class Settings(BaseSettings):
     )
 
     # CORS
-    CORS_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ]
+    CORS_ORIGINS: List[str] = []
+
+    @model_validator(mode="after")
+    def validate_local_dev_auth_bypass(self):
+        if self.LOCAL_DEV_AUTH_BYPASS and (self.APP_ENV != "local" or not self.DEBUG):
+            raise ValueError("LOCAL_DEV_AUTH_BYPASS requires APP_ENV=local and DEBUG=true")
+        return self
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")),
         env_file_encoding="utf-8",
         extra="ignore"
     )

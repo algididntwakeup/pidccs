@@ -16,7 +16,7 @@ Panduan untuk agent yang melanjutkan pekerjaan ada di [AGENTS.md](AGENTS.md).
 Dokumen itu mencatat keputusan produk, batas refactor, dan pemeriksaan sebelum
 menyatakan perubahan selesai.
 
-Workspace sheet mengutamakan **Fast Trace** (`lines_only`): PDF vektor ditelusuri langsung dari geometri PDF tanpa OCR/YOLO atau rasterisasi resolusi penuh. Upload menjadwalkan Fast Trace di background; hasil garis menjadi guideline abu-abu pudar dan bisa disembunyikan melalui **Show Detected Lines**. Pointer-down pertama pada guideline meresmikannya: garis langsung menampilkan warna biru `#2563EB` dan menyimpan statusnya; double-click pada garis bertanda membuka inspector. Garis marking memakai opasitas penuh dan stroke lebih tebal; slider opasitas hanya mengatur guideline auto-trace. Panel **Corrosion Groups** selalu tampil eksplisit di sidebar kanan inspector dengan tombol **Add New Group** untuk membuat grup baru secara instan dengan warna hex unik otomatis. Memilih grup di sidebar mengaktifkan **Mode Kuas Warna (Active Group)**: setiap tekanan pada garis di kanvas langsung menandai (`marked=true`), menerapkan warna grup, dan menetapkannya ke grup aktif tanpa membuka popover. Setiap grup dengan pipa memiliki stempel nama SVG di kanvas yang bisa di-drag & drop ke area kosong dengan isolasi gesture OpenSeadragon; posisi stempel disimpan dalam koordinat piksel gambar dan dipakai ulang oleh ekspor PDF sebagai kotak teks berwarna. Inspector dapat mengubah warna dan gaya garis (solid atau putus-putus). Tombol **Sync with AI / Auto-Fill** menjalankan OCR/YOLO setelah marking; OCR hanya boleh mengisi nama pada run `marked=true`, dan data garis yang belum ditandai tetap dipertahankan. Tracer vektor membuat gap pada valve inline berbentuk V atau bowtie. Skeleton tracer menggunakan geometri valve kompak saat Fast Trace raster, serta memotong area valve/instrumen dari bounding box deteksi bila tersedia. Tracer raster tidak menyambung gap secara otomatis. Run di kedua jalur tracer dipisah pada ujung cabang T agar setiap kaki dapat ditandai sendiri. Magic Wand memakai garis hasil trace yang sama; Box Trace, pen manual, edit titik, dan Undo/Redo tetap tersedia. Untuk PDF raster dan gambar PNG/JPG, tracer raster digunakan sebagai fallback. Full detection masih tersedia untuk kompatibilitas backend, tetapi tidak ditawarkan sebagai aksi awal di editor. Uraian pipeline otomatis di bawah ini adalah kemampuan mode full/legacy, bukan jalur Fast Trace.
+Workspace sheet mengutamakan **Fast Trace** (`lines_only`): PDF vektor ditelusuri langsung dari geometri PDF tanpa OCR/YOLO atau rasterisasi resolusi penuh. Upload menjadwalkan Fast Trace di background; hasil garis menjadi guideline abu-abu pudar dan bisa disembunyikan melalui **Show Detected Lines**. Pointer-down pertama pada guideline meresmikannya: garis langsung menampilkan warna biru `#2563EB` dan menyimpan statusnya; double-click pada garis bertanda membuka inspector. Garis marking memakai opasitas penuh dan stroke lebih tebal; slider opasitas hanya mengatur guideline auto-trace. Slider **Line Thickness** (2–30 px, default 8) dan **Dot/Node Size** (2–20 px, default 6) pada popup inspector dan bottom bar kanvas mengubah ketebalan stroke garis bertanda serta radius titik ujungnya secara real-time; nilai ini hanya pengaturan tampilan sesi (tidak disimpan ke result JSON dan tidak memengaruhi export). Panel **Corrosion Groups** selalu tampil eksplisit di sidebar kanan inspector dengan tombol **Add New Group** untuk membuat grup baru secara instan dengan warna hex unik otomatis. Memilih grup di sidebar mengaktifkan **Mode Kuas Warna (Active Group)**: setiap tekanan pada garis di kanvas langsung menandai (`marked=true`), menerapkan warna grup, dan menetapkannya ke grup aktif tanpa membuka popover. Setiap grup dengan pipa memiliki stempel nama SVG di kanvas yang bisa di-drag & drop ke area kosong dengan isolasi gesture OpenSeadragon; posisi stempel disimpan dalam koordinat piksel gambar dan dipakai ulang oleh ekspor PDF sebagai kotak teks berwarna. Inspector dapat mengubah warna dan gaya garis (solid atau putus-putus). Tombol **Sync with AI / Auto-Fill** menjalankan OCR/YOLO setelah marking; OCR hanya boleh mengisi nama pada run `marked=true`, dan data garis yang belum ditandai tetap dipertahankan. Tracer vektor membuat gap pada valve inline berbentuk V atau bowtie. Skeleton tracer menggunakan geometri valve kompak saat Fast Trace raster, serta memotong area valve/instrumen dari bounding box deteksi bila tersedia. Tracer raster tidak menyambung gap secara otomatis. Run di kedua jalur tracer dipisah pada ujung cabang T agar setiap kaki dapat ditandai sendiri. Magic Wand memakai garis hasil trace yang sama; Box Trace, pen manual, edit titik, dan Undo/Redo tetap tersedia. Untuk PDF raster dan gambar PNG/JPG, tracer raster digunakan sebagai fallback. Full detection masih tersedia untuk kompatibilitas backend, tetapi tidak ditawarkan sebagai aksi awal di editor. Uraian pipeline otomatis di bawah ini adalah kemampuan mode full/legacy, bukan jalur Fast Trace.
 
 CI menjalankan pytest, ESLint, pemeriksaan tipe TypeScript, dan production build. Dataset gambar industri di `Contoh P&ID` bersifat lokal dan tidak tersimpan di Git; pengujian yang memerlukannya dilewati di CI, sedangkan pengujian sintetis tetap dijalankan.
 
@@ -294,11 +294,34 @@ File `.env` di root direktori mengatur seluruh parameter konfigurasi aplikasi:
 | `CACHE_DIR` | `./.pidcache` | Direktori cache intermediate gambar |
 | `JWT_SECRET_KEY` | random per proses jika kosong | Kunci penandatanganan JWT lokal. Tetapkan nilai stabil yang sama pada semua replika backend produksi. |
 | `SUPERUSER_SECRET_KEY` | kosong (break-glass nonaktif) | Secret darurat untuk IT superuser. Simpan di secret manager atau `.env` lokal yang tidak di-commit. |
-| `BIMA_BASE_URL` | `https://bima.reksolindo.co.id` | Base URL verifikasi SSO dan sinkronisasi project BIMA. |
+| `CORS_ORIGINS` | `[]` | Daftar origin website yang diizinkan browser untuk memanggil API; format JSON. |
+| `BIMA_BASE_URL` | kosong | Base URL verifikasi SSO dan sinkronisasi project BIMA di backend. |
+| `BIMA_CLIENT_ID` | kosong | Client ID P&ID Studio yang didaftarkan di portal BIMA; dibutuhkan untuk memulai live SSO. |
+| `NEXT_PUBLIC_BIMA_BASE_URL` | kosong | Base URL portal BIMA yang dipakai frontend untuk memulai SSO. |
+| `NEXT_PUBLIC_BIMA_CLIENT_ID` | kosong | Client ID publik yang didaftarkan untuk aplikasi di BIMA. |
+| `NEXT_PUBLIC_BIMA_REDIRECT_URI` | origin website + `/login` | Callback frontend; bila disetel, nilainya harus sama persis dengan callback terdaftar di BIMA. |
 | `BIMA_SSO_MOCK_MODE` | `false` | Izinkan callback menerima identitas tiruan untuk development/test lokal saja. |
 | `BIMA_PROJECTS_MOCK_MODE` | `false` | Gunakan katalog project tiruan untuk development/test lokal saja. |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | URL endpoint Backend API yang diakses oleh Frontend |
-| `NEXT_PUBLIC_WS_URL` | `ws://localhost:8000` | URL endpoint WebSocket untuk telemetry live progress |
+| `NEXT_PUBLIC_API_URL` | kosong | Origin Backend API tanpa `/api/v1`; kosong berarti API disajikan melalui origin website/reverse proxy yang sama. |
+| `NEXT_PUBLIC_WS_URL` | otomatis | Origin WebSocket; bila kosong, diturunkan dari API URL atau origin website aktif. |
+
+Semua `NEXT_PUBLIC_*` ditanam ke bundle saat Next.js dibangun. Perbarui nilainya
+di `.env` lalu rebuild frontend untuk mengganti host website, API, WebSocket,
+atau portal SSO. `BIMA_BASE_URL` dan `BIMA_CLIENT_ID` tetap dikonfigurasi
+server-side untuk validasi token. Template `.env.example` sengaja tidak mengisi
+host API/CORS dengan `localhost`; setelah menyalinnya, isi URL publik environment
+tujuan sebelum build. Awalan `NEXT_PUBLIC_` tidak otomatis mengganti hostname.
+
+### Local Dev Mode tanpa login
+
+Untuk fokus mengembangkan tracing di mesin lokal, set `APP_ENV=local`,
+`DEBUG=true`, `LOCAL_DEV_AUTH_BYPASS=true`, dan
+`NEXT_PUBLIC_LOCAL_DEV_AUTH_BYPASS=true`. Backend otomatis membuat akun
+`local-dev@pidstudio.invalid` ber-role `SUPERADMIN`; akun ini tidak memakai
+password dan tidak memerlukan layar login/logout. Mode ini menonaktifkan
+pemisahan project hanya untuk database lokal, jadi jangan gunakan pada database
+bersama atau deployment. Untuk mengembalikan auth BIMA, set kedua flag bypass ke
+`false`, lalu restart API dan rebuild frontend.
 
 Panduan akses admin, dashboard monitoring, dan break-glass ada di
 [`docs/ADMIN_ACCESS.md`](docs/ADMIN_ACCESS.md).

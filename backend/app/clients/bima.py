@@ -15,17 +15,24 @@ class BimaClient:
     """HTTP adapter for the BIMA OpenAPI SSO verification and project routes."""
 
     def __init__(self, base_url: str | None = None, transport: httpx.AsyncBaseTransport | None = None):
-        self.base_url = (base_url or settings.BIMA_BASE_URL).rstrip("/")
+        configured_base_url = settings.BIMA_BASE_URL if base_url is None else base_url
+        self.base_url = configured_base_url.strip().rstrip("/")
         self.transport = transport
 
+    def _require_base_url(self) -> str:
+        if not self.base_url:
+            raise BimaServiceError("BIMA_BASE_URL is not configured")
+        return self.base_url
+
     async def verify_sso_token(self, token: str, client_id: str | None = None) -> BimaIdentity:
+        base_url = self._require_base_url()
         body = {"token": token}
         effective_client_id = client_id or settings.BIMA_CLIENT_ID
         if effective_client_id:
             body["client_id"] = effective_client_id
         try:
             async with httpx.AsyncClient(timeout=10.0, transport=self.transport) as client:
-                response = await client.post(f"{self.base_url}/api/sso/verify", json=body)
+                response = await client.post(f"{base_url}/api/sso/verify", json=body)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise BimaServiceError("BIMA rejected or could not verify the SSO token") from exc
@@ -69,12 +76,13 @@ class BimaClient:
         bima_user_id: str,
         access_token: str | None = None,
     ) -> List[BimaProjectRecord]:
+        base_url = self._require_base_url()
         if not access_token:
             raise BimaServiceError("A current BIMA SSO token is required to sync projects")
         try:
             async with httpx.AsyncClient(timeout=15.0, transport=self.transport) as client:
                 response = await client.get(
-                    f"{self.base_url}/api/projects",
+                    f"{base_url}/api/projects",
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
                 response.raise_for_status()

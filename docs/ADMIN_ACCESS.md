@@ -7,21 +7,23 @@ ditautkan **bukan** batas keamanan: seluruh akses data tetap divalidasi backend.
 
 ## Akses rutin melalui BIMA SSO
 
-1. Pastikan akun admin sudah memiliki klaim `is_admin: true` atau role BIMA
+1. Konfigurasikan `BIMA_BASE_URL` dan `BIMA_CLIENT_ID` untuk backend, serta
+   `NEXT_PUBLIC_BIMA_BASE_URL` dan `NEXT_PUBLIC_BIMA_CLIENT_ID` untuk frontend.
+   Daftarkan callback persis seperti `NEXT_PUBLIC_BIMA_REDIRECT_URI`; jika kosong,
+   callback memakai origin website aktif ditambah `/login`. Untuk Docker, rebuild
+   frontend setelah mengubah `NEXT_PUBLIC_*` karena nilainya ditanam saat build.
+2. Pastikan `BIMA_SSO_MOCK_MODE=false` dan `BIMA_PROJECTS_MOCK_MODE=false`, lalu
+   pastikan akun admin sudah memiliki klaim `is_admin: true` atau role BIMA
    `SUPERADMIN`, `IT_ADMIN`, atau `IT-ADMIN`.
-2. Buka `https://<host-aplikasi>/sudo` (lokal: `http://localhost:3000/sudo`).
-3. Pilih **BIMA SSO**, lalu masukkan token SSO BIMA yang masih berlaku.
-4. Backend memverifikasi token ke BIMA, menerbitkan JWT lokal, dan menampilkan
-   monitoring bila role hasil verifikasi adalah `SUPERADMIN`.
+3. Buka `/login` pada website yang dikonfigurasi dan pilih **Login dengan BIMA**.
+4. BIMA mengembalikan `token` dan `state` ke callback. Frontend mencocokkan state,
+   lalu backend memverifikasi token melalui `/api/sso/verify` dan menerbitkan JWT
+   lokal.
+5. Setelah login, buka `https://<host-aplikasi>/sudo` untuk monitoring. Backend
+   menggunakan role yang sudah diverifikasi BIMA untuk menentukan akses.
 
-## Login tiruan untuk tester lokal
-
-Frontend menyediakan `/login` untuk mensimulasikan identitas engineer selama
-development. Masukkan BIMA user ID, email, dan nama, lalu pilih **Simulate Login
-via BIMA**. Mode ini memanggil `/api/v1/auth/sso-callback` dengan identity mock;
-agar berhasil, set `BIMA_SSO_MOCK_MODE=true` hanya pada backend lokal/test, lalu
-recreate API container bila memakai Docker Compose. Backend produksi harus tetap
-menggunakan `BIMA_SSO_MOCK_MODE=false` dan login BIMA SSO normal.
+Mock SSO hanya untuk tester lokal dan tidak boleh diaktifkan di environment
+shared/production.
 
 JWT frontend disimpan di browser `localStorage` dengan key `pid_access_token`.
 Dashboard dan route `/project/...` mengarahkan user tanpa token ke `/login`, dan

@@ -74,11 +74,23 @@ import {
   downloadProtectedFile,
   getAuthorizationHeaders,
   getLocalAccessToken,
+  getWebSocketUrl,
   logGroundTruth,
 } from '@/lib/api';
 import { parsePipingIdTag } from '@/lib/tagParser';
 import { useHistory } from '@/hooks/useHistory';
 import { usePipeTracer } from '@/hooks/usePipeTracer';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import { Slider } from '@/components/ui/slider';
+import {
+  useCanvasStyleStore,
+  LINE_THICKNESS_MIN,
+  LINE_THICKNESS_MAX,
+  DOT_SIZE_MIN,
+  DOT_SIZE_MAX,
+} from '@/lib/canvasStyleStore';
 
 type ViewMode = 'digitize' | 'system' | 'circuit' | 'report' | 'topology';
 
@@ -221,6 +233,10 @@ export default function ProjectWorkspace() {
   const [newGroupName, setNewGroupName] = useState('');
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
   const [traceOpacity, setTraceOpacity] = useState<number>(1);
+  const lineThickness = useCanvasStyleStore((state) => state.lineThickness);
+  const dotSize = useCanvasStyleStore((state) => state.dotSize);
+  const setLineThickness = useCanvasStyleStore((state) => state.setLineThickness);
+  const setDotSize = useCanvasStyleStore((state) => state.setDotSize);
   const [savingChanges, setSavingChanges] = useState<boolean>(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
   const [viewerReady, setViewerReady] = useState(false);
@@ -471,7 +487,7 @@ export default function ProjectWorkspace() {
         const wsToken = getLocalAccessToken();
         const wsQuery = wsToken ? `?token=${encodeURIComponent(wsToken)}` : '';
         const ws = new WebSocket(
-          (process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000') + `/ws/progress/${jobId}${wsQuery}`,
+          getWebSocketUrl(`/ws/progress/${jobId}${wsQuery}`),
         );
         detectionWsRef.current = ws;
         ws.onmessage = (event) => { try { onEvent(JSON.parse(event.data)); } catch {} };
@@ -1058,11 +1074,13 @@ export default function ProjectWorkspace() {
         constrainDuringPan: true,
         maxZoomPixelRatio: 3,
         minZoomImageRatio: 0.8,
+        // Valid OpenSeadragon runtime option omitted from @types/openseadragon.
+        backgroundColor: '#FFFFFF',
         gestureSettingsMouse: {
           clickToZoom: false,
           dblClickToZoom: true,
         },
-      });
+      } as OpenSeadragon.Options);
 
       viewerRef.current = viewer;
       setViewerReady(true);
@@ -1885,13 +1903,13 @@ export default function ProjectWorkspace() {
   };
 
   return (
-    <div className="h-full flex flex-col bg-slate-100 text-slate-900 overflow-hidden select-none">
+    <div className="flex h-full select-none flex-col overflow-hidden bg-surface text-foreground">
       {/* Top Navigation Bar */}
-      <header className="bg-white border-b border-slate-200 px-3 lg:px-6 py-2.5 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 shadow-sm z-20">
-        <div className="order-1 flex items-center space-x-2 lg:space-x-4 min-w-0">
+      <header className="z-20 grid grid-cols-1 items-center gap-x-4 gap-y-2 border-b border-border bg-card px-3 py-2.5 shadow-sm lg:px-6 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+        <div className="order-1 flex min-w-0 items-center space-x-2 lg:space-x-4">
           <Link
             href={`/project/${projectId}`}
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-indigo-700 transition"
+            className="flex items-center space-x-1.5 rounded-lg px-2.5 py-1.5 text-muted-foreground transition hover:bg-accent hover:text-primary"
             title="Back to Project Folder (grid thumbnail)"
           >
             <ArrowLeft className="w-4 h-4 shrink-0" />
@@ -1901,7 +1919,7 @@ export default function ProjectWorkspace() {
           </Link>
           <div>
             <div className="flex items-center space-x-2">
-              <h1 className="font-bold text-base text-slate-900 leading-tight">
+              <h1 className="font-bold text-base text-foreground leading-tight">
                 {project?.name || 'Loading...'}
               </h1>
               {project?.sheets && project.sheets.length > 0 && activeSheet && (
@@ -1915,7 +1933,7 @@ export default function ProjectWorkspace() {
                         router.push(`/project/${projectId}/sheet/${sel.id}`);
                       }
                     }}
-                    className="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold px-2.5 py-1 rounded-lg border border-indigo-200 outline-none cursor-pointer max-w-[240px] truncate transition"
+                    className="max-w-[240px] cursor-pointer truncate rounded-lg border border-border bg-accent px-2.5 py-1 text-xs font-semibold text-primary outline-none transition hover:bg-accent/70"
                   >
                     {project.sheets.map((s) => (
                       <option key={s.id} value={s.id}>
@@ -1924,149 +1942,146 @@ export default function ProjectWorkspace() {
                       </option>
                     ))}
                   </select>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     onClick={() => setShowDeleteSheetModal(true)}
-                    className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                    className="h-7 w-7 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                     title="Delete current P&ID Sheet"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
-            <p className="text-[11px] text-slate-500 font-medium">
+            <p className="text-[11px] text-muted-foreground font-medium">
               API RP 970 · Corrosion Control Document (CCD)
             </p>
           </div>
         </div>
 
         {/* View Mode Switcher */}
-        <div className="order-3 xl:order-2 justify-self-start xl:justify-self-center flex bg-slate-100 p-1 rounded-xl border border-slate-200 overflow-x-auto max-w-full">
+        <div className="order-3 xl:order-2 justify-self-start xl:justify-self-center flex bg-muted p-1 rounded-lg border border-border overflow-x-auto max-w-full">
           <button
             onClick={() => setMode('digitize')}
-            className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
+            className={`px-3 py-1 text-xs font-semibold rounded-md transition ${
               mode === 'digitize'
-                ? 'bg-white text-indigo-600 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-card text-primary shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             Digitization
           </button>
           <button
             onClick={() => setMode('system')}
-            className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
+            className={`px-3 py-1 text-xs font-semibold rounded-md transition ${
               mode === 'system'
-                ? 'bg-white text-indigo-600 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-card text-primary shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             Corrosion System
           </button>
           <button
             onClick={() => setMode('circuit')}
-            className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
+            className={`px-3 py-1 text-xs font-semibold rounded-md transition ${
               mode === 'circuit'
-                ? 'bg-white text-indigo-600 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-card text-primary shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             Corrosion Circuit
           </button>
           <button
             onClick={() => setMode('topology')}
-            className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
+            className={`px-3 py-1 text-xs font-semibold rounded-md transition ${
               mode === 'topology'
-                ? 'bg-white text-indigo-600 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-card text-primary shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             Multi-Sheet Topology
           </button>
           <button
             onClick={() => setMode('report')}
-            className={`px-3 py-1 text-xs font-semibold rounded-lg transition ${
+            className={`px-3 py-1 text-xs font-semibold rounded-md transition ${
               mode === 'report'
-                ? 'bg-white text-indigo-600 shadow-sm'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-card text-primary shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
           >
-            Validation & Report
+            Validation &amp; Report
           </button>
         </div>
 
         <div className="order-2 xl:order-3 justify-self-start xl:justify-self-end flex flex-wrap items-center gap-2 min-w-0">
         {/* AI only synchronizes lines that the engineer has marked. */}
         {activeSheet && (
-          <button
+          <Button
             onClick={handleRunEnrichment}
             disabled={showDetectionProgress || !hasMarkedRuns}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition border ${
+            className={`text-xs font-semibold shadow-sm ${
               showDetectionProgress || !hasMarkedRuns
-                ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
-                : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white shadow-sm hover:shadow'
+                ? 'bg-muted text-muted-foreground border border-border'
+                : 'bg-gradient-to-r from-violet-600 to-navy-700 text-white hover:from-violet-700 hover:to-navy-800'
             }`}
             title="Isi nama pipa yang sudah di-marking dengan bantuan OCR dan YOLO"
           >
-            
+            <Sparkles className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Sync with AI / Auto-Fill</span>
             <span className="sm:hidden">Sync AI</span>
-          </button>
+          </Button>
         )}
 
         {/* Action Controls */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Import Line List Button */}
-          <button
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => setShowLineListModal(true)}
-            className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition"
             title="Import Line List Excel / CSV"
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
             <span className="hidden xl:inline">Line List</span>
-          </button>
+          </Button>
 
           {activeSheet && (
-            <button
+            <Button
+              size="sm"
               onClick={handleRunDetection}
               disabled={showDetectionProgress}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow transition ${
-                showDetectionProgress
-                  ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-              }`}
               title="Jalankan Fast Trace tanpa OCR dan YOLO"
             >
               <Zap className="w-3.5 h-3.5" />
               <span>{showDetectionProgress ? 'Tracing...' : 'Fast Trace'}</span>
-            </button>
+            </Button>
           )}
 
           {/* Circuit Overlay Toggle Button in Header Bar */}
           {(result || activeSheet?.status === 'detected' || activeSheet?.status === 'completed') && (
-            <button
+            <Button
+              variant={showOverlay ? 'default' : 'outline'}
+              size="sm"
               onClick={() => setShowOverlay(!showOverlay)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition ${
-                showOverlay
-                  ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow'
-                  : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
-              }`}
               title="Toggle Color-Coded Circuit Marking on Canvas"
             >
               <Layers className="w-3.5 h-3.5" />
               <span className="hidden 2xl:inline">{showOverlay ? 'Circuit Overlay: ON' : 'Circuit Overlay: OFF'}</span>
-            </button>
+            </Button>
           )}
 
           {/* Export Button (opens modal) */}
           {(result || activeSheet?.status === 'detected' || activeSheet?.status === 'completed') && (
-            <button
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => setShowExportModal(true)}
-              className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition"
               title="Export hasil digitization / corrosion"
             >
               <Download className="w-3.5 h-3.5" />
               <span className="hidden xl:inline">Export</span>
-            </button>
+            </Button>
           )}
         </div>
         </div>
@@ -2098,7 +2113,7 @@ export default function ProjectWorkspace() {
             The bar used to float over the drawing (absolute bottom-6 left-6), which
             swallowed clicks aimed at pipes underneath it — as a layout row it can
             never steal a canvas click, and every control stays visible. */}
-        <div className="flex-1 flex flex-col relative bg-slate-900 overflow-hidden min-w-0">
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
           {/* Canvas Container */}
           <div ref={canvasRef} className="flex-1 min-h-0 w-full" />
 
@@ -2106,24 +2121,24 @@ export default function ProjectWorkspace() {
               explanation on the canvas itself, so a remount mid-detection never
               shows a blank-looking image with no feedback. */}
           {showDetectionProgress && !result && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm pointer-events-none">
-              <div className="bg-white/95 border border-slate-200 rounded-2xl shadow-2xl px-8 py-6 flex flex-col items-center space-y-3 max-w-sm text-center">
-                <RefreshCw className="w-8 h-8 animate-spin text-indigo-600" />
-                <div className="text-sm font-bold text-slate-800">
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-navy-950/40 backdrop-blur-sm pointer-events-none">
+              <div className="flex max-w-sm flex-col items-center space-y-3 rounded-lg border border-border bg-card/95 px-8 py-6 text-center shadow-2xl">
+                <RefreshCw className="h-8 w-8 animate-spin text-primary" />
+                <div className="text-sm font-bold text-foreground">
                   Deteksi P&ID sedang berjalan…
                 </div>
-                <div className="text-xs text-slate-600 leading-relaxed">
+                <div className="text-xs leading-relaxed text-muted-foreground">
                   {progressMsg ||
                     'Sistem sedang membaca gambar, mendeteksi simbol, dan melacak garis pipa. Progres tetap berjalan di server walau Anda berpindah halaman.'}
                 </div>
-                <div className="w-full flex items-center space-x-2">
-                  <div className="flex-1 h-2 bg-indigo-100 rounded-full overflow-hidden">
+                <div className="flex w-full items-center space-x-2">
+                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-accent">
                     <div
-                      className="h-full bg-indigo-600 transition-all duration-300"
+                      className="h-full bg-primary transition-all duration-300"
                       style={{ width: `${progressPct}%` }}
                     />
                   </div>
-                  <span className="text-xs font-bold text-indigo-700 w-9 text-right">
+                  <span className="w-9 text-right text-xs font-bold text-primary">
                     {progressPct}%
                   </span>
                 </div>
@@ -2169,66 +2184,64 @@ export default function ProjectWorkspace() {
           )}
 
           {/* Canvas Control Bar — part of the layout, NOT an overlay (see above). */}
-          <div className="shrink-0 flex flex-wrap items-center bg-white border-t border-slate-300 px-3 py-1.5 space-x-1.5 z-40">
+          <div className="z-40 flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border bg-card px-3 py-1.5">
             {/* Zoom / Viewport controls */}
-            <button
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={() => handleZoom(1)}
-              className="p-2 hover:bg-slate-100 rounded-lg text-slate-700 transition"
               title="Zoom In"
             >
               <ZoomIn className="w-4 h-4" />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={() => handleZoom(-1)}
-              className="p-2 hover:bg-slate-100 rounded-lg text-slate-700 transition"
               title="Zoom Out"
             >
               <ZoomOut className="w-4 h-4" />
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={handleResetZoom}
-              className="p-2 hover:bg-slate-100 rounded-lg text-slate-700 transition"
               title="Reset View"
             >
               <Maximize2 className="w-4 h-4" />
-            </button>
+            </Button>
 
             {(result || activeSheet?.status === 'detected' || activeSheet?.status === 'completed') && (
               <>
-                <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
+                <Separator orientation="vertical" className="mx-0.5 h-6" />
 
                 {/* Visibility Toggle Button */}
-                <button
+                <Button
+                  variant={showOverlay ? 'default' : 'secondary'}
+                  size="sm"
                   onClick={() => setShowOverlay(!showOverlay)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
-                    showOverlay
-                      ? 'bg-indigo-600 text-white shadow-sm hover:bg-indigo-700'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
                   title="Tampilkan / Sembunyikan Garis Pipa (Show/Hide)"
                 >
                   {showOverlay ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
                   <span>{showOverlay ? 'Pipa: ON' : 'Pipa: OFF'}</span>
-                </button>
+                </Button>
 
                 {/* Auto-Trace (Fast Trace) visibility toggle */}
-                <button
+                <Button
+                  variant={showAutoTrace ? 'default' : 'secondary'}
+                  size="sm"
                   onClick={() => setShowAutoTrace((v) => !v)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
-                    showAutoTrace
-                      ? 'bg-amber-500 text-white shadow-sm hover:bg-amber-600'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
+                  className={showAutoTrace ? 'bg-amber-500 text-white hover:bg-amber-600' : ''}
                   title="Tampilkan/sembunyikan garis hasil Auto-Trace (Fast Trace). Matikan untuk marking manual bersih dengan Magic Wand."
                 >
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>{showAutoTrace ? 'Auto-Trace: ON' : 'Auto-Trace: OFF'}</span>
-                </button>
+                </Button>
 
                 {/* Opacity Slider */}
                 {showOverlay && (
-                  <div className="flex items-center space-x-1 px-1.5 text-xs text-slate-600 border-l border-slate-200 pl-2">
-                    <Sliders className="w-3 h-3 text-slate-400" />
+                  <div className="flex items-center space-x-1 border-l border-border px-1.5 pl-2 text-xs text-muted-foreground">
+                    <Sliders className="w-3 h-3 text-muted-foreground" />
                     <input
                       type="range"
                       min="0.1"
@@ -2236,51 +2249,95 @@ export default function ProjectWorkspace() {
                       step="0.05"
                       value={traceOpacity}
                       onChange={(e) => setTraceOpacity(parseFloat(e.target.value))}
-                      className="w-16 h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                      className="h-1.5 w-16 cursor-pointer appearance-none rounded-lg bg-muted accent-primary"
                       title={`Opasitas guideline auto-trace: ${Math.round(traceOpacity * 100)}%`}
                     />
-                    <span className="text-[10px] font-mono text-slate-500 w-7">
+                    <span className="w-7 font-mono text-[10px] text-muted-foreground">
                       {Math.round(traceOpacity * 100)}%
                     </span>
                   </div>
                 )}
 
-                <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
+                {/* Dynamic thickness & endpoint dot size (mirrors the popup inspector sliders) */}
+                {showOverlay && (
+                  <div
+                    className="flex items-center gap-3 border-l border-border px-1.5 pl-2 text-xs text-muted-foreground"
+                    onKeyDown={(e) => {
+                      // Keep canvas shortcuts (arrow nudge, delete selected, space temp-pan) away
+                      // from the focused slider thumb. See the popup sliders for the same guard.
+                      if (
+                        e.key === 'ArrowUp' ||
+                        e.key === 'ArrowDown' ||
+                        e.key === 'ArrowLeft' ||
+                        e.key === 'ArrowRight' ||
+                        e.key === 'Delete' ||
+                        e.key === 'Backspace' ||
+                        e.key === ' '
+                      ) {
+                        e.stopPropagation();
+                      }
+                    }}
+                  >
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider">Line Thickness</span>
+                      <Slider
+                        className="w-20"
+                        min={LINE_THICKNESS_MIN}
+                        max={LINE_THICKNESS_MAX}
+                        step={1}
+                        value={[lineThickness]}
+                        onValueChange={(values) => setLineThickness(values[0])}
+                        thumbAriaLabel="Line Thickness"
+                      />
+                      <span className="w-7 font-mono text-[10px]">{lineThickness}px</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider">Dot/Node Size</span>
+                      <Slider
+                        className="w-16"
+                        min={DOT_SIZE_MIN}
+                        max={DOT_SIZE_MAX}
+                        step={1}
+                        value={[dotSize]}
+                        onValueChange={(values) => setDotSize(values[0])}
+                        thumbAriaLabel="Dot/Node Size"
+                      />
+                      <span className="w-7 font-mono text-[10px]">{dotSize}px</span>
+                    </div>
+                  </div>
+                )}
+
+                <Separator orientation="vertical" className="mx-0.5 h-6" />
 
                 {/* Undo & Redo buttons */}
-                <button
+                <Button
+                  variant="ghost"
+                  size="icon"
                   onClick={handleUndo}
                   disabled={historyIndex < 0}
-                  className={`p-2 rounded-lg transition ${
-                    historyIndex >= 0
-                      ? 'text-slate-700 hover:bg-slate-100'
-                      : 'text-slate-300 cursor-not-allowed'
-                  }`}
                   title="Undo aksi terakhir (Ctrl+Z)"
                 >
                   <RotateCcw className="w-4 h-4" />
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
                   onClick={handleRedo}
                   disabled={historyIndex >= historyLength - 1}
-                  className={`p-2 rounded-lg transition ${
-                    historyIndex < historyLength - 1
-                      ? 'text-slate-700 hover:bg-slate-100'
-                      : 'text-slate-300 cursor-not-allowed'
-                  }`}
                   title="Redo aksi (Ctrl+Y)"
                 >
                   <RotateCw className="w-4 h-4" />
-                </button>
+                </Button>
 
                 {/* Save Changes Button */}
                 {hasUnsavedChanges && (
                   <>
-                    <div className="w-[1px] h-6 bg-slate-200 self-center my-auto mx-0.5" />
-                    <button
+                    <Separator orientation="vertical" className="mx-0.5 h-6" />
+                    <Button
+                      size="sm"
                       onClick={handleSaveAllChanges}
                       disabled={savingChanges}
-                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition animate-pulse"
+                      className="animate-pulse bg-emerald-600 text-white hover:bg-emerald-700"
                       title="Simpan Perubahan ke Database (Ctrl+S)"
                     >
                       {savingChanges ? (
@@ -2289,7 +2346,7 @@ export default function ProjectWorkspace() {
                         <Save className="w-3.5 h-3.5" />
                       )}
                       <span>Simpan Perubahan</span>
-                    </button>
+                    </Button>
                   </>
                 )}
               </>
@@ -2298,7 +2355,7 @@ export default function ProjectWorkspace() {
 
           {/* Temporary Status Toast */}
           {statusToast && (
-            <div className="absolute bottom-16 left-6 z-50 bg-slate-900/90 backdrop-blur text-white text-xs font-medium px-3.5 py-2 rounded-xl shadow-xl flex items-center space-x-2 animate-in fade-in slide-in-from-bottom-2 duration-150">
+            <div className="absolute bottom-16 left-6 z-50 flex items-center space-x-2 rounded-lg bg-navy-900/95 px-3.5 py-2 text-xs font-medium text-white shadow-xl backdrop-blur animate-in fade-in slide-in-from-bottom-2 duration-150">
               <Check className="w-4 h-4 text-emerald-400" />
               <span>{statusToast}</span>
             </div>
@@ -2306,8 +2363,8 @@ export default function ProjectWorkspace() {
 
           {/* Canvas Overlay Legend */}
           {mode === 'system' && systems.length > 0 && (
-            <div className="absolute top-4 left-4 bg-white/95 backdrop-blur border border-slate-200 rounded-xl shadow-xl p-3 max-w-xs max-h-80 overflow-y-auto z-10 text-xs">
-              <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[10px] mb-2">
+            <div className="absolute left-4 top-4 z-10 max-h-80 max-w-xs overflow-y-auto rounded-lg border border-border bg-card/95 p-3 text-xs shadow-xl backdrop-blur">
+              <h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-foreground">
                 Corrosion Systems (By Fluid)
               </h4>
               <div className="space-y-1.5">
@@ -2317,8 +2374,8 @@ export default function ProjectWorkspace() {
                       className="w-3.5 h-3.5 rounded shadow-sm shrink-0"
                       style={{ backgroundColor: `rgb(${s.color.join(',')})` }}
                     />
-                    <span className="font-bold text-slate-800">{s.fluid}</span>
-                    <span className="text-slate-500 text-[11px]">({s.n_pipes} pipes)</span>
+                    <span className="font-bold text-foreground">{s.fluid}</span>
+                    <span className="text-[11px] text-muted-foreground">({s.n_pipes} pipes)</span>
                   </div>
                 ))}
               </div>
@@ -2326,8 +2383,8 @@ export default function ProjectWorkspace() {
           )}
 
           {mode === 'circuit' && systems.length > 0 && (
-            <div className="absolute top-4 left-4 bg-white/95 backdrop-blur border border-slate-200 rounded-xl shadow-xl p-3 max-w-xs max-h-80 overflow-y-auto z-10 text-xs">
-              <h4 className="font-bold text-slate-900 uppercase tracking-wider text-[10px] mb-2">
+            <div className="absolute left-4 top-4 z-10 max-h-80 max-w-xs overflow-y-auto rounded-lg border border-border bg-card/95 p-3 text-xs shadow-xl backdrop-blur">
+              <h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-foreground">
                 Corrosion Circuits (API RP 970)
               </h4>
               <div className="space-y-1.5">
@@ -2338,8 +2395,8 @@ export default function ProjectWorkspace() {
                         className="w-3.5 h-3.5 rounded shadow-sm shrink-0"
                         style={{ backgroundColor: `rgb(${c.color.join(',')})` }}
                       />
-                      <span className="font-bold text-slate-800">{c.code}</span>
-                      <span className="text-slate-600">{s.fluid}-{c.material || '—'}</span>
+                      <span className="font-bold text-foreground">{c.code}</span>
+                      <span className="text-muted-foreground">{s.fluid}-{c.material || '—'}</span>
                     </div>
                   ))
                 )}
@@ -2349,10 +2406,10 @@ export default function ProjectWorkspace() {
         </div>
 
         {/* Right: Inspection & Data Tables Panel */}
-        <div className="w-80 xl:w-96 shrink-0 bg-white border-l border-slate-200 flex flex-col shadow-xl z-10">
+        <aside className="z-10 flex w-80 shrink-0 flex-col border-l border-border bg-card shadow-xl xl:w-96">
           {/* Panel Header */}
-          <div className="p-4 border-b border-slate-200 flex items-center justify-between">
-            <h3 className="font-bold text-sm text-slate-900 uppercase tracking-wider">
+          <div className="flex items-center justify-between border-b border-border p-4">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-foreground">
               {mode === 'digitize' && 'Piping Line Register'}
               {mode === 'system' && 'Corrosion Systems'}
               {mode === 'circuit' && 'Circuit Breakdown'}
@@ -2360,18 +2417,16 @@ export default function ProjectWorkspace() {
               {mode === 'topology' && 'Multi-Sheet Topology'}
             </h3>
             {mode === 'topology' ? (
-              <span className="text-xs bg-indigo-50 text-indigo-700 font-semibold px-2 py-0.5 rounded">
-                {topology?.edges.length || 0} links
-              </span>
+              <Badge variant="secondary">{topology?.edges.length || 0} links</Badge>
             ) : result ? (
-              <span className="text-xs bg-slate-100 text-slate-600 font-semibold px-2 py-0.5 rounded">
+              <Badge variant="secondary">
                 {mode === 'digitize' && `${result.piping_ids.length} lines`}
                 {mode === 'system' && `${systems.length} systems`}
                 {mode === 'circuit' &&
                   `${systems.reduce((acc, s) => acc + s.circuits.length, 0)} circuits`}
                 {mode === 'report' &&
                   (validation?.passed ? 'PASS' : 'REVIEW')}
-              </span>
+              </Badge>
             ) : null}
           </div>
 
@@ -3366,7 +3421,7 @@ export default function ProjectWorkspace() {
               </div>
             )}
           </div>
-        </div>
+        </aside>
       </div>
 
       {/* Export Modal */}

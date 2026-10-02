@@ -34,15 +34,23 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      cache_from:
+        - pidccs-backend:latest
     container_name: pidstudio-api
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     environment:
+      - APP_ENV
+      - DEBUG
+      - LOCAL_DEV_AUTH_BYPASS
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/pidstudio
       - DATABASE_SYNC_URL=postgresql://postgres:postgres@postgres:5432/pidstudio
       - REDIS_URL=redis://redis:6379/0
+      - BIMA_BASE_URL
+      - BIMA_CLIENT_ID
+      - CORS_ORIGINS
       - JWT_SECRET_KEY
       - SUPERUSER_SECRET_KEY
       - BIMA_SSO_MOCK_MODE
@@ -79,6 +87,11 @@ services:
 
   worker:
     image: pidccs-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      cache_from:
+        - pidccs-backend:latest
     container_name: pidstudio-worker
     restart: unless-stopped
     command: celery -A worker.celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 -O fair
@@ -111,16 +124,23 @@ services:
         condition: service_healthy
 
   frontend:
+    image: pidccs-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
+        NEXT_PUBLIC_BIMA_BASE_URL: ${NEXT_PUBLIC_BIMA_BASE_URL:-}
+        NEXT_PUBLIC_BIMA_CLIENT_ID: ${NEXT_PUBLIC_BIMA_CLIENT_ID:-}
+        NEXT_PUBLIC_BIMA_REDIRECT_URI: ${NEXT_PUBLIC_BIMA_REDIRECT_URI:-}
+        NEXT_PUBLIC_LOCAL_DEV_AUTH_BYPASS: ${NEXT_PUBLIC_LOCAL_DEV_AUTH_BYPASS:-false}
+      cache_from:
+        - pidccs-frontend:latest
     container_name: pidstudio-frontend
     restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
     depends_on:
       api:
         condition: service_healthy

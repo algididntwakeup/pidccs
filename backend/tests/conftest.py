@@ -4,3 +4,4 @@ import os
 # .delay() jatuh ke fallback in-process dan menjalankan tracing sungguhan di dalam request
 # upload — test upload jadi ikut menunggu pipeline. CI sudah aman karena eager=true.
 os.environ.setdefault("AUTO_TRACE_ON_UPLOAD", "false")
+os.environ.setdefault("LOCAL_DEV_AUTH_BYPASS", "false")

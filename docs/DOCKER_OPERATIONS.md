@@ -11,7 +11,7 @@ docker compose build frontend
 
 The API and worker now use the same explicit `pidccs-backend:latest` image. Only the API service builds the backend image; the worker reuses it and no longer performs a second large image export. Avoid `docker compose build --no-cache` unless deliberately rebuilding every dependency layer.
 
-The Dockerfiles use BuildKit cache mounts for APT, pip, and npm. Keep BuildKit enabled (it is the default in current Docker Desktop releases) so package archives survive source-code rebuilds.
+The Dockerfiles and `docker-compose.yml` use BuildKit cache mounts (`id=backend-pip-cache`, `id=backend-apt-cache`, `id=npm-cache`, and `id=nextjs-cache`) along with `cache_from` image references on `api`, `worker`, and `frontend`. Keep BuildKit enabled (it is the default in current Docker Desktop releases) so package archives and intermediate builds survive source-code changes and rebuilds.
 
 Start only the required service and its dependencies:
 

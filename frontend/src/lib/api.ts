@@ -1,7 +1,18 @@
 import { ProjectResponse, SheetResponse, DigitizationResult, CorrosionSystem, ValidationReport, JobResponse } from '@/types/schema';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/+$/, '');
 const AUTH_TOKEN_KEY = 'pid_access_token';
+
+export function isLocalDevAuthBypass(): boolean {
+  return process.env.NEXT_PUBLIC_LOCAL_DEV_AUTH_BYPASS === 'true';
+}
+
+export function getWebSocketUrl(path: string): string {
+  const configuredUrl = process.env.NEXT_PUBLIC_WS_URL?.trim();
+  const apiUrl = API_BASE || (typeof window !== 'undefined' ? window.location.origin : '');
+  const baseUrl = (configuredUrl || apiUrl.replace(/^http/i, 'ws')).replace(/\/+$/, '');
+  return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
 
 export function getLocalAccessToken(): string | null {
   if (typeof window === 'undefined') return null;

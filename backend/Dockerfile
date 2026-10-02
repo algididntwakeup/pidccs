@@ -3,8 +3,8 @@
 FROM python:3.13-slim AS runtime
 
 # Runtime dependencies for OpenCV, PyMuPDF, and PyTorch
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+RUN --mount=type=cache,target=/var/cache/apt,id=backend-apt-cache,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,id=backend-apt-lib,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -18,15 +18,15 @@ FROM runtime AS builder
 
 # Build wheels in a disposable stage. Build tools and pip caches never enter
 # the final API/worker image.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+RUN --mount=type=cache,target=/var/cache/apt,id=backend-apt-cache,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,id=backend-apt-lib,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN python -m venv /opt/venv
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/pip,id=backend-pip-cache,sharing=locked \
     /opt/venv/bin/pip install --upgrade pip && \
     /opt/venv/bin/pip install --prefer-binary -r requirements.txt
 

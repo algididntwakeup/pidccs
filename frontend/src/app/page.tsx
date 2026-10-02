@@ -1,14 +1,12 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   Plus,
   Folder,
   FolderPlus,
   Layers,
-  ArrowRight,
   Trash2,
   RefreshCw,
   Search,
@@ -16,7 +14,6 @@ import {
   LayoutGrid,
   List as ListIcon,
   FolderOpen,
-  Calendar,
   AlertTriangle,
   LogOut,
 } from 'lucide-react';
@@ -25,9 +22,22 @@ import {
   fetchProjects,
   createProject,
   deleteProject,
+  isLocalDevAuthBypass,
   setLocalAccessToken,
 } from '@/lib/api';
 import RequireAuth from '@/components/RequireAuth';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Badge } from '@/components/ui/badge';
 
 /**
  * Format timestamp to localized readable date & time (e.g. 28 Sep 2026, 14:30)
@@ -134,222 +144,224 @@ function ProjectsDashboard() {
   }, [projects, searchQuery]);
 
   return (
-    <div className="h-full flex flex-col bg-slate-50 text-slate-900 overflow-y-auto">
+    <div className="flex h-full flex-col overflow-y-auto bg-surface text-foreground">
       {/* Top Navbar */}
-      <header className="bg-white border-b border-slate-200 px-6 lg:px-8 py-4 flex items-center justify-between shadow-xs sticky top-0 z-30">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold text-xl shadow-md">
-            P
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h1 className="text-lg font-bold tracking-tight text-slate-900">
-                P&ID Studio Web Platform
-              </h1>
-              <span className="text-[11px] font-semibold bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded border border-indigo-200/60">
-                Drive Workspace
-              </span>
+      <header className="sticky top-0 z-30 border-b border-border bg-card px-6 py-4 lg:px-8">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-xl font-bold text-primary-foreground shadow-sm">
+              P
             </div>
-            <p className="text-xs text-slate-500 font-medium">
-              API RP 970 Corrosion Control Document (CCD) Digitization & Circuitization
-            </p>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-bold tracking-tight text-foreground">
+                  P&amp;ID Studio Web Platform
+                </h1>
+                <Badge variant="secondary">Drive Workspace</Badge>
+              </div>
+              <p className="text-xs font-medium text-muted-foreground">
+                API RP 970 Corrosion Control Document (CCD) Digitization &amp; Circuitization
+              </p>
+            </div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold text-sm flex items-center space-x-2 shadow-xs transition"
-          >
-            <FolderPlus className="w-4 h-4" />
-            <span>New Project Folder</span>
-          </button>
-          <button
-            onClick={() => {
-              setLocalAccessToken(null);
-              router.replace('/login');
-            }}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
-            title="Logout"
-          >
-            <LogOut className="h-4 w-4" />
-            <span>Logout</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <Button onClick={() => setShowCreateModal(true)}>
+              <FolderPlus className="h-4 w-4" />
+              <span className="hidden sm:inline">New Project Folder</span>
+            </Button>
+            {!isLocalDevAuthBypass() && <Button
+              variant="outline"
+              onClick={() => {
+                setLocalAccessToken(null);
+                router.replace('/login');
+              }}
+              title="Logout"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Logout</span>
+            </Button>}
+          </div>
         </div>
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 lg:p-8 space-y-6">
+      <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 p-6 lg:p-8">
         {/* Drive Explorer Toolbar */}
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center space-x-3 flex-1 min-w-0">
-            <div className="relative flex-1 max-w-md">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Cari folder project atau unit..."
-                className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition"
-              />
-            </div>
-            <span className="text-xs font-medium text-slate-500 shrink-0">
-              {filteredProjects.length} folder{filteredProjects.length === 1 ? '' : 's'}
-            </span>
-          </div>
-
-          <div className="flex items-center space-x-2 shrink-0 self-end sm:self-auto">
-            {/* View Mode Toggle */}
-            <div className="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200">
-              <button
-                type="button"
-                onClick={() => setViewMode('grid')}
-                className={`p-1.5 rounded-md text-xs font-medium flex items-center transition ${
-                  viewMode === 'grid'
-                    ? 'bg-white text-indigo-600 shadow-xs'
-                    : 'text-slate-500 hover:text-slate-900'
-                }`}
-                title="Tampilan Kisi (Grid)"
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('list')}
-                className={`p-1.5 rounded-md text-xs font-medium flex items-center transition ${
-                  viewMode === 'list'
-                    ? 'bg-white text-indigo-600 shadow-xs'
-                    : 'text-slate-500 hover:text-slate-900'
-                }`}
-                title="Tampilan Tabel (List)"
-              >
-                <ListIcon className="w-4 h-4" />
-              </button>
+        <Card>
+          <CardContent className="flex flex-col justify-between gap-3 p-4 sm:flex-row sm:items-center">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <div className="relative max-w-md flex-1">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Cari folder project atau unit..."
+                  className="pl-9"
+                />
+              </div>
+              <span className="shrink-0 text-xs font-medium text-muted-foreground">
+                {filteredProjects.length} folder{filteredProjects.length === 1 ? '' : 's'}
+              </span>
             </div>
 
-            <button
-              onClick={() => void loadProjects()}
-              disabled={loading}
-              className="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition"
-              title="Refresh daftar folder"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-indigo-600' : ''}`} />
-            </button>
-          </div>
-        </div>
+            <div className="flex shrink-0 items-center gap-2 self-end sm:self-auto">
+              {/* View Mode Toggle */}
+              <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted p-0.5">
+                <Button
+                  type="button"
+                  variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
+                  size="icon"
+                  onClick={() => setViewMode('grid')}
+                  className="h-7 w-7"
+                  title="Tampilan Kisi (Grid)"
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant={viewMode === 'list' ? 'secondary' : 'ghost'}
+                  size="icon"
+                  onClick={() => setViewMode('list')}
+                  className="h-7 w-7"
+                  title="Tampilan Tabel (List)"
+                >
+                  <ListIcon className="h-4 w-4" />
+                </Button>
+              </div>
+
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => void loadProjects()}
+                disabled={loading}
+                title="Refresh daftar folder"
+              >
+                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin text-primary' : ''}`} />
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Section Heading */}
-        <div className="flex items-center space-x-2 text-slate-700">
-          <FolderOpen className="w-5 h-5 text-indigo-600" />
+        <div className="flex items-center gap-2 text-foreground">
+          <FolderOpen className="h-5 w-5 text-primary" />
           <h2 className="text-base font-bold tracking-tight">Plant Projects &amp; Units</h2>
         </div>
 
         {/* Content body */}
         {loading && projects.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-slate-400 space-y-3 bg-white rounded-2xl border border-slate-200">
-            <RefreshCw className="w-7 h-7 animate-spin text-indigo-600" />
+          <Card className="flex h-64 flex-col items-center justify-center gap-3 text-muted-foreground">
+            <RefreshCw className="h-7 w-7 animate-spin text-primary" />
             <span className="text-sm font-medium">Memuat workspace folder...</span>
-          </div>
+          </Card>
         ) : filteredProjects.length === 0 ? (
-          <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 p-12 text-center max-w-md mx-auto my-8 shadow-xs">
-            <Folder className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-            <h3 className="text-base font-bold text-slate-800">
+          <Card className="mx-auto my-8 max-w-md border-dashed p-12 text-center">
+            <Folder className="mx-auto mb-3 h-12 w-12 text-muted-foreground/50" />
+            <h3 className="text-base font-bold text-foreground">
               {searchQuery ? 'Tidak Ada Folder yang Cocok' : 'Belum Ada Project'}
             </h3>
-            <p className="text-xs text-slate-500 mt-1 mb-5">
+            <p className="mb-5 mt-1 text-xs text-muted-foreground">
               {searchQuery
                 ? `Tidak ditemukan folder dengan nama "${searchQuery}". Coba kata kunci lain.`
                 : 'Buat folder project pertama Anda untuk mulai mengunggah dan mendigitasi diagram P&ID.'}
             </p>
             {!searchQuery && (
-              <button
-                onClick={() => setShowCreateModal(true)}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-xs transition"
-              >
+              <Button size="sm" onClick={() => setShowCreateModal(true)}>
                 Buat Folder Project
-              </button>
+              </Button>
             )}
-          </div>
+          </Card>
         ) : viewMode === 'grid' ? (
           /* ========================================================================= */
           /* GOOGLE DRIVE / EXPLORER STYLE FOLDER GRID                                */
           /* ========================================================================= */
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
             {/* Quick Action: New Folder Card */}
             <button
               type="button"
               onClick={() => setShowCreateModal(true)}
-              className="border-2 border-dashed border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/20 rounded-xl p-4 flex flex-col items-center justify-center text-center transition group min-h-[140px]"
+              className="group flex min-h-[140px] flex-col items-center justify-center rounded-lg border-2 border-dashed border-border p-4 text-center transition hover:border-primary/50 hover:bg-accent/40"
             >
-              <div className="w-11 h-11 rounded-full bg-slate-100 group-hover:bg-indigo-100 text-slate-400 group-hover:text-indigo-600 flex items-center justify-center mb-2.5 transition">
-                <Plus className="w-6 h-6" />
+              <div className="mb-2.5 flex h-11 w-11 items-center justify-center rounded-full bg-muted text-muted-foreground transition group-hover:bg-accent group-hover:text-primary">
+                <Plus className="h-6 w-6" />
               </div>
-              <span className="text-xs font-semibold text-slate-700 group-hover:text-indigo-600">
+              <span className="text-xs font-semibold text-foreground group-hover:text-primary">
                 + New Project Folder
               </span>
-              <span className="text-[10px] text-slate-400 mt-0.5">Tambah workspace baru</span>
+              <span className="mt-0.5 text-[10px] text-muted-foreground">
+                Tambah workspace baru
+              </span>
             </button>
 
             {/* Folder Cards */}
             {filteredProjects.map((p) => {
               const sheetCount = p.sheets?.length || 0;
               return (
-                <div
+                <Card
                   key={p.id}
                   onClick={() => router.push(`/project/${p.id}`)}
-                  className="bg-white hover:bg-slate-50/80 border border-slate-200 hover:border-indigo-300 rounded-xl p-4 shadow-2xs hover:shadow-md transition-all duration-150 flex flex-col justify-between group cursor-pointer relative min-h-[140px]"
+                  className="group relative flex min-h-[140px] cursor-pointer flex-col justify-between transition-all duration-150 hover:border-primary/40 hover:shadow-md"
                 >
-                  {/* Top Bar: Folder Icon & Delete Button */}
-                  <div className="flex items-start justify-between">
-                    <div className="w-11 h-11 rounded-xl bg-amber-50 border border-amber-200/70 flex items-center justify-center text-amber-500 group-hover:bg-indigo-50 group-hover:border-indigo-200 group-hover:text-indigo-600 transition-colors shrink-0">
-                      <Folder className="w-6 h-6 fill-amber-400/30 group-hover:fill-indigo-500/20 transition-colors" />
+                  <CardContent className="flex flex-1 flex-col justify-between p-4">
+                    {/* Top Bar: Folder Icon & Delete Button */}
+                    <div className="flex items-start justify-between">
+                      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-amber-200/70 bg-amber-50 text-amber-500 transition-colors group-hover:border-accent group-hover:bg-accent group-hover:text-primary">
+                        <Folder className="h-6 w-6 fill-amber-400/30 transition-colors group-hover:fill-primary/20" />
+                      </div>
+
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setProjectToDelete(p);
+                        }}
+                        className="h-8 w-8 text-muted-foreground opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                        title="Hapus Folder Project"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setProjectToDelete(p);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
-                      title="Hapus Folder Project"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
+                    {/* Middle: Project Title & Description */}
+                    <div className="my-2.5 min-w-0">
+                      <h3
+                        className="truncate text-sm font-bold text-foreground transition-colors group-hover:text-primary"
+                        title={p.name}
+                      >
+                        {p.name}
+                      </h3>
+                      <p
+                        className="mt-0.5 truncate text-xs text-muted-foreground"
+                        title={p.description || 'P&ID drawing sheets & corrosion circuit register'}
+                      >
+                        {p.description || 'P&ID drawing sheets & corrosion circuits'}
+                      </p>
+                    </div>
 
-                  {/* Middle: Project Title & Description */}
-                  <div className="my-2.5 min-w-0">
-                    <h3
-                      className="font-bold text-slate-900 text-sm group-hover:text-indigo-600 truncate transition-colors"
-                      title={p.name}
-                    >
-                      {p.name}
-                    </h3>
-                    <p
-                      className="text-xs text-slate-500 truncate mt-0.5"
-                      title={p.description || 'P&ID drawing sheets & corrosion circuit register'}
-                    >
-                      {p.description || 'P&ID drawing sheets & corrosion circuits'}
-                    </p>
-                  </div>
+                    {/* Bottom: Metadata Bar (Sheet Count & Upload Time) */}
+                    <div className="flex items-center justify-between border-t border-border pt-2 text-[11px] text-muted-foreground">
+                      <span className="flex items-center gap-1 font-semibold text-foreground/70">
+                        <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span>
+                          {sheetCount} Sheet{sheetCount === 1 ? '' : 's'}
+                        </span>
+                      </span>
 
-                  {/* Bottom: Metadata Bar (Sheet Count & Upload Time) */}
-                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-                    <span className="flex items-center space-x-1 font-semibold text-slate-600">
-                      <Layers className="w-3.5 h-3.5 text-slate-400" />
-                      <span>{sheetCount} Sheet{sheetCount === 1 ? '' : 's'}</span>
-                    </span>
-
-                    <span
-                      className="flex items-center space-x-1 text-slate-400"
-                      title={`Dibuat / Diunggah: ${formatUploadTime(p.created_at)}`}
-                    >
-                      <Clock className="w-3 h-3 text-slate-400" />
-                      <span className="truncate max-w-[110px]">{formatUploadTime(p.created_at)}</span>
-                    </span>
-                  </div>
-                </div>
+                      <span
+                        className="flex items-center gap-1 text-muted-foreground"
+                        title={`Dibuat / Diunggah: ${formatUploadTime(p.created_at)}`}
+                      >
+                        <Clock className="h-3 w-3" />
+                        <span className="max-w-[110px] truncate">
+                          {formatUploadTime(p.created_at)}
+                        </span>
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
               );
             })}
           </div>
@@ -357,71 +369,75 @@ function ProjectsDashboard() {
           /* ========================================================================= */
           /* WINDOWS EXPLORER / DRIVE STYLE LIST VIEW                                 */
           /* ========================================================================= */
-          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
-            <table className="w-full text-left border-collapse">
+          <Card className="overflow-hidden">
+            <table className="w-full border-collapse text-left">
               <thead>
-                <tr className="bg-slate-50/80 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                  <th className="py-3 px-4">Nama Folder / Project</th>
-                  <th className="py-3 px-4 w-40">Jumlah Sheets</th>
-                  <th className="py-3 px-4 w-48">Waktu Upload</th>
-                  <th className="py-3 px-4 text-right w-24">Aksi</th>
+                <tr className="border-b border-border bg-muted/60 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                  <th className="px-4 py-3">Nama Folder / Project</th>
+                  <th className="w-40 px-4 py-3">Jumlah Sheets</th>
+                  <th className="w-48 px-4 py-3">Waktu Upload</th>
+                  <th className="w-24 px-4 py-3 text-right">Aksi</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 text-xs">
+              <tbody className="divide-y divide-border text-xs">
                 {filteredProjects.map((p) => {
                   const sheetCount = p.sheets?.length || 0;
                   return (
                     <tr
                       key={p.id}
                       onClick={() => router.push(`/project/${p.id}`)}
-                      className="hover:bg-slate-50 cursor-pointer transition group"
+                      className="group cursor-pointer transition hover:bg-muted/50"
                     >
-                      <td className="py-3 px-4">
-                        <div className="flex items-center space-x-3">
-                          <Folder className="w-5 h-5 text-amber-500 fill-amber-400/20 group-hover:text-indigo-600 shrink-0 transition" />
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <Folder className="h-5 w-5 shrink-0 fill-amber-400/20 text-amber-500 transition group-hover:text-primary" />
                           <div className="min-w-0">
-                            <span className="font-semibold text-slate-900 group-hover:text-indigo-600 truncate block">
+                            <span className="block truncate font-semibold text-foreground group-hover:text-primary">
                               {p.name}
                             </span>
                             {p.description && (
-                              <span className="text-[11px] text-slate-400 truncate block">
+                              <span className="block truncate text-[11px] text-muted-foreground">
                                 {p.description}
                               </span>
                             )}
                           </div>
                         </div>
                       </td>
-                      <td className="py-3 px-4">
-                        <span className="inline-flex items-center space-x-1.5 bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded text-[11px]">
-                          <Layers className="w-3 h-3 text-slate-500" />
-                          <span>{sheetCount} Sheet{sheetCount === 1 ? '' : 's'}</span>
-                        </span>
+                      <td className="px-4 py-3">
+                        <Badge variant="secondary" className="gap-1.5">
+                          <Layers className="h-3 w-3" />
+                          <span>
+                            {sheetCount} Sheet{sheetCount === 1 ? '' : 's'}
+                          </span>
+                        </Badge>
                       </td>
-                      <td className="py-3 px-4 text-slate-500 text-[11px]">
-                        <span className="flex items-center space-x-1">
-                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                      <td className="px-4 py-3 text-[11px] text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-3.5 w-3.5" />
                           <span>{formatUploadTime(p.created_at)}</span>
                         </span>
                       </td>
-                      <td className="py-3 px-4 text-right">
-                        <button
+                      <td className="px-4 py-3 text-right">
+                        <Button
                           type="button"
+                          variant="ghost"
+                          size="icon"
                           onClick={(e) => {
                             e.stopPropagation();
                             setProjectToDelete(p);
                           }}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                          className="h-8 w-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                           title="Hapus Folder"
                         >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
-          </div>
+          </Card>
         )}
       </main>
 
@@ -429,63 +445,60 @@ function ProjectsDashboard() {
       {/* MODAL: CREATE PROJECT FOLDER                                              */}
       {/* ========================================================================= */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center space-x-2.5 pb-2 border-b border-slate-100">
-              <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                <FolderPlus className="w-5 h-5" />
-              </div>
-              <h3 className="text-base font-bold text-slate-900">Buat Folder Project Baru</h3>
-            </div>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-navy-950/40 p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-md shadow-xl">
+            <CardHeader className="border-b border-border">
+              <CardTitle className="flex items-center gap-2.5 text-base">
+                <span className="flex h-8 w-8 items-center justify-center rounded-md bg-accent text-primary">
+                  <FolderPlus className="h-5 w-5" />
+                </span>
+                Buat Folder Project Baru
+              </CardTitle>
+            </CardHeader>
 
-            <form onSubmit={handleCreateProject} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Nama Project / Plant Unit <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Contoh: Unit 605 Amine Treating"
-                  value={newProjectName}
-                  onChange={(e) => setNewProjectName(e.target.value)}
-                  className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
-                />
-              </div>
+            <CardContent className="pt-6">
+              <form onSubmit={handleCreateProject} className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="project-name">
+                    Nama Project / Plant Unit <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    id="project-name"
+                    required
+                    placeholder="Contoh: Unit 605 Amine Treating"
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                  />
+                </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Deskripsi / Catatan (Opsional)
-                </label>
-                <textarea
-                  rows={3}
-                  placeholder="Deskripsi spesifikasi sistem atau nomor gambar..."
-                  value={newProjectDesc}
-                  onChange={(e) => setNewProjectDesc(e.target.value)}
-                  className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
-                />
-              </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="project-desc">Deskripsi / Catatan (Opsional)</Label>
+                  <Textarea
+                    id="project-desc"
+                    rows={3}
+                    placeholder="Deskripsi spesifikasi sistem atau nomor gambar..."
+                    value={newProjectDesc}
+                    onChange={(e) => setNewProjectDesc(e.target.value)}
+                  />
+                </div>
 
-              <div className="flex justify-end space-x-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  disabled={isCreating}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  disabled={isCreating || !newProjectName.trim()}
-                  className="px-4 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white rounded-lg transition flex items-center space-x-1.5 shadow-xs"
-                >
-                  {isCreating && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                  <span>Buat Folder</span>
-                </button>
-              </div>
-            </form>
-          </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setShowCreateModal(false)}
+                    disabled={isCreating}
+                  >
+                    Batal
+                  </Button>
+                  <Button type="submit" disabled={isCreating || !newProjectName.trim()}>
+                    {isCreating && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                    <span>Buat Folder</span>
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -493,41 +506,48 @@ function ProjectsDashboard() {
       {/* MODAL: DELETE PROJECT CONFIRMATION                                        */}
       {/* ========================================================================= */}
       {projectToDelete && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center space-x-2.5 pb-2 border-b border-slate-100 text-rose-600">
-              <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
-                <AlertTriangle className="w-5 h-5" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-navy-950/40 p-4 backdrop-blur-sm">
+          <Card className="w-full max-w-md shadow-xl">
+            <CardHeader className="border-b border-border">
+              <CardTitle className="flex items-center gap-2.5 text-base">
+                <span className="flex h-8 w-8 items-center justify-center rounded-md bg-destructive/10 text-destructive">
+                  <AlertTriangle className="h-5 w-5" />
+                </span>
+                Hapus Folder Project?
+              </CardTitle>
+            </CardHeader>
+
+            <CardContent className="space-y-4 pt-6">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Folder <strong className="text-foreground">{projectToDelete.name}</strong> dan
+                seluruh{' '}
+                <strong className="text-foreground">
+                  {projectToDelete.sheets?.length || 0} sheet
+                </strong>{' '}
+                P&ID beserta hasil digitasinya di dalamnya akan dihapus permanen.
+              </p>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setProjectToDelete(null)}
+                  disabled={isDeleting}
+                >
+                  Batal
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={confirmDeleteProject}
+                  disabled={isDeleting}
+                >
+                  {isDeleting && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                  <span>Hapus Folder</span>
+                </Button>
               </div>
-              <h3 className="text-base font-bold text-slate-900">Hapus Folder Project?</h3>
-            </div>
-
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Folder <strong className="text-slate-900">{projectToDelete.name}</strong> dan seluruh{' '}
-              <strong className="text-slate-900">{projectToDelete.sheets?.length || 0} sheet</strong>{' '}
-              P&ID beserta hasil digitasinya di dalamnya akan dihapus permanen.
-            </p>
-
-            <div className="flex justify-end space-x-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setProjectToDelete(null)}
-                disabled={isDeleting}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
-              >
-                Batal
-              </button>
-              <button
-                type="button"
-                onClick={confirmDeleteProject}
-                disabled={isDeleting}
-                className="px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 text-white rounded-lg transition flex items-center space-x-1.5 shadow-xs"
-              >
-                {isDeleting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                <span>Hapus Folder</span>
-              </button>
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
       )}
     </div>

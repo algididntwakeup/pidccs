@@ -167,7 +167,8 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
             monitoring = await client.get("/api/v1/admin/monitoring")
             assert monitoring.status_code == 200, monitoring.text
             assert len(monitoring.json()["projects"]) == 2
-            assert monitoring.json()["projects"][0]["sheets"]
+            sheets_by_id = {item["id"]: item["sheets"] for item in monitoring.json()["projects"]}
+            assert sheets_by_id[project["id"]]
             assert monitoring.json()["activities"][0]["user_email"] == "owner@example.test"
     finally:
         app.dependency_overrides.pop(get_db, None)

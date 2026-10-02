@@ -28,6 +28,27 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    if settings.LOCAL_DEV_AUTH_BYPASS:
+        # Reserved identity for the explicitly gated local workspace only.
+        user = await db.get(User, "local-dev")
+        if user is None:
+            user = User(
+                id="local-dev",
+                bima_user_id="local-dev-bypass",
+                email="local-dev@pidstudio.invalid",
+                full_name="Local Development Engineer",
+                is_active=True,
+                role="SUPERADMIN",
+            )
+            db.add(user)
+            await db.flush()
+        elif user.bima_user_id != "local-dev-bypass":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Reserved local development identity is unavailable",
+            )
+        return user
+
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or expired authentication credentials",

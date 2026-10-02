@@ -21,6 +21,14 @@ import {
 } from 'lucide-react';
 import { ManualGroup, PipeRun, PipingID } from '@/types/schema';
 import { useCanvasOverlay, applyMouseNav } from '@/hooks/useCanvasOverlay';
+import { Slider } from '@/components/ui/slider';
+import {
+  useCanvasStyleStore,
+  LINE_THICKNESS_MIN,
+  LINE_THICKNESS_MAX,
+  DOT_SIZE_MIN,
+  DOT_SIZE_MAX,
+} from '@/lib/canvasStyleStore';
 
 // Liang-Barsky/Cohen-Sutherland style test: does segment (x0,y0)-(x1,y1) intersect an
 // axis-aligned rectangle? Used by the Multi-Select marquee so long pipes crossing the
@@ -194,6 +202,12 @@ export default function InteractivePipeCanvas({
   // Draggable popover: track pointer grab offset relative to popover top-left
   const [popoverDragging, setPopoverDragging] = useState(false);
   const popoverDragRef = useRef<{ offsetX: number; offsetY: number; moved: boolean } | null>(null);
+
+  // Session-only canvas style settings (shared with the bottom control bar)
+  const lineThickness = useCanvasStyleStore((state) => state.lineThickness);
+  const dotSize = useCanvasStyleStore((state) => state.dotSize);
+  const setLineThickness = useCanvasStyleStore((state) => state.setLineThickness);
+  const setDotSize = useCanvasStyleStore((state) => state.setDotSize);
 
   // Box Trace state
   const [roiStart, setRoiStart] = useState<{ x: number; y: number } | null>(null);
@@ -1004,7 +1018,11 @@ export default function InteractivePipeCanvas({
       : pointStrings[idx];
 
     return (
-      <g key={run.id || `run-${idx}`} className="group">
+      <g
+        key={run.id || `run-${idx}`}
+        className="group"
+        data-run-marked={run.marked === false ? 'false' : 'true'}
+      >
         {/* Invisible wide stroke for easy clicking & hovering (pointerEvents: stroke).
             In Multi-Select mode the lines yield pointer events to the SVG surface so a
             drag anywhere (even over a line) paints the selection marquee instead. */}
@@ -1012,7 +1030,7 @@ export default function InteractivePipeCanvas({
           points={ptsStr}
           fill="none"
           stroke="transparent"
-          strokeWidth={isSelected ? 26 : run.marked === false ? 20 : 22}
+          strokeWidth={run.marked === false ? (isSelected ? 26 : 20) : Math.max(isSelected ? 26 : 22, lineThickness + 8)}
           strokeLinecap="round"
           strokeLinejoin="round"
           style={{
@@ -1031,7 +1049,7 @@ export default function InteractivePipeCanvas({
             points={ptsStr}
             fill="none"
             stroke="#FBBF24"
-            strokeWidth={8}
+            strokeWidth={run.marked === false ? 8 : lineThickness > 8 ? lineThickness + 4 : 8}
             strokeLinecap="round"
             strokeLinejoin="round"
             filter="url(#select-halo)"
@@ -1044,7 +1062,7 @@ export default function InteractivePipeCanvas({
           points={ptsStr}
           fill="none"
           stroke={isSelected ? '#F59E0B' : run.marked === false ? '#94A3B8' : isDimmed ? '#CBD5E1' : strokeColor}
-          strokeWidth={isSelected ? 9 : isHovered ? 8 : isEquipOutline ? 6 : 7}
+          strokeWidth={run.marked === false ? (isSelected ? 9 : isHovered ? 8 : isEquipOutline ? 6 : 7) : lineThickness}
           strokeLinecap="round"
           strokeLinejoin="round"
           strokeDasharray={isSelected ? '10 5' : run.marked === false ? '5 6' : run.line_style === 'dashed' ? '8 6' : isEquipOutline ? '7 4' : undefined}
@@ -1055,6 +1073,30 @@ export default function InteractivePipeCanvas({
             transition: draggingVertex ? 'none' : 'stroke 0.15s ease, stroke-width 0.15s ease, opacity 0.15s ease',
           }}
         />
+
+        {/* Endpoint dots for marked runs: first & last vertex, always visible */}
+        {run.marked !== false && (
+          <>
+            <circle
+              cx={activePoints[0][0]}
+              cy={activePoints[0][1]}
+              r={dotSize}
+              fill={isSelected ? '#F59E0B' : isDimmed ? '#CBD5E1' : strokeColor}
+              stroke="#FFFFFF"
+              strokeWidth={1}
+              style={{ pointerEvents: 'none' }}
+            />
+            <circle
+              cx={activePoints[activePoints.length - 1][0]}
+              cy={activePoints[activePoints.length - 1][1]}
+              r={dotSize}
+              fill={isSelected ? '#F59E0B' : isDimmed ? '#CBD5E1' : strokeColor}
+              stroke="#FFFFFF"
+              strokeWidth={1}
+              style={{ pointerEvents: 'none' }}
+            />
+          </>
+        )}
       </g>
     );
   };
@@ -1823,6 +1865,61 @@ export default function InteractivePipeCanvas({
                   </button>
                 );
               })}
+            </div>
+          </div>
+
+          {/* Dynamic line & endpoint sizing (global canvas visual settings) */}
+          <div
+            className="space-y-2 border-t border-slate-100 pt-2"
+            onKeyDown={(e) => {
+              // The canvas listens on window for arrows (nudge), Delete/Backspace (delete
+              // selected), and Space (temp pan). Stop those while a slider thumb has focus so
+              // keyboard slider control never edits pipe geometry. Other shortcuts (Ctrl+Z/S,
+              // Escape) keep bubbling to the existing global handlers.
+              if (
+                e.key === 'ArrowUp' ||
+                e.key === 'ArrowDown' ||
+                e.key === 'ArrowLeft' ||
+                e.key === 'ArrowRight' ||
+                e.key === 'Delete' ||
+                e.key === 'Backspace' ||
+                e.key === ' '
+              ) {
+                e.stopPropagation();
+              }
+            }}
+          >
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                  Line Thickness
+                </span>
+                <span className="font-mono text-[10px] text-slate-600">{lineThickness}px</span>
+              </div>
+              <Slider
+                min={LINE_THICKNESS_MIN}
+                max={LINE_THICKNESS_MAX}
+                step={1}
+                value={[lineThickness]}
+                onValueChange={(values) => setLineThickness(values[0])}
+                thumbAriaLabel="Line Thickness"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                  Dot/Node Size
+                </span>
+                <span className="font-mono text-[10px] text-slate-600">{dotSize}px</span>
+              </div>
+              <Slider
+                min={DOT_SIZE_MIN}
+                max={DOT_SIZE_MAX}
+                step={1}
+                value={[dotSize]}
+                onValueChange={(values) => setDotSize(values[0])}
+                thumbAriaLabel="Dot/Node Size"
+              />
             </div>
           </div>
 
