@@ -24,6 +24,14 @@ tentang perilaku saat ini dengan kode dan test.
   karena tidak dipanggil oleh Fast Trace. Jangan membuat Fast Trace menunggu
   model AI atau mengubah default UI kembali ke full detection tanpa permintaan
   produk yang jelas.
+- BIMA hanya menyediakan **katalog project flat** (`bima_project_id`,
+  `project_number`, `name`) dan **tidak** mengatur assignment user per project.
+  Satu-satunya jalur pembuatan project dari BIMA adalah
+  `POST /api/v1/projects/import` (dipanggil modal **Import Project from BIMA** di
+  dashboard); row lokal dibuat dengan `owner_id` = user dari JWT, dan impor
+  duplikat dijawab `409`. Akses project hanya berbasis `owner_id`; jangan
+  menghidupkan kembali tabel assignment, `BimaProjectSyncService`, atau endpoint
+  `bima-sync`.
 
 ## Peta kode dan batas refactor
 

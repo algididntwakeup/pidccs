@@ -20,9 +20,6 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     projects: Mapped[List["Project"]] = relationship("Project", back_populates="owner")
-    project_assignments: Mapped[List["ProjectAssignment"]] = relationship(
-        "ProjectAssignment", back_populates="user", cascade="all, delete-orphan"
-    )
     ground_truth_logs: Mapped[List["GroundTruthLog"]] = relationship(
         "GroundTruthLog", back_populates="user", cascade="all, delete-orphan"
     )

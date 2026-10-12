@@ -12,9 +12,11 @@ ditautkan **bukan** batas keamanan: seluruh akses data tetap divalidasi backend.
    Daftarkan callback persis seperti `NEXT_PUBLIC_BIMA_REDIRECT_URI`; jika kosong,
    callback memakai origin website aktif ditambah `/login`. Untuk Docker, rebuild
    frontend setelah mengubah `NEXT_PUBLIC_*` karena nilainya ditanam saat build.
-2. Pastikan `BIMA_SSO_MOCK_MODE=false` dan `BIMA_PROJECTS_MOCK_MODE=false`, lalu
-   pastikan akun admin sudah memiliki klaim `is_admin: true` atau role BIMA
-   `SUPERADMIN`, `IT_ADMIN`, atau `IT-ADMIN`.
+2. Pastikan `BIMA_SSO_MOCK_MODE=false`, lalu pastikan akun admin sudah memiliki
+   klaim `is_admin: true` atau role BIMA `SUPERADMIN`, `IT_ADMIN`, atau `IT-ADMIN`.
+   Katalog project BIMA bersifat flat dan tidak memuat assignment user, jadi tidak
+   ada flag mock khusus untuk sinkronisasi project: engineer mengimpor baris
+   katalog lewat modal **Import Project from BIMA** di dashboard.
 3. Buka `/login` pada website yang dikonfigurasi dan pilih **Login dengan BIMA**.
 4. BIMA mengembalikan `token` dan `state` ke callback. Frontend mencocokkan state,
    lalu backend memverifikasi token melalui `/api/sso/verify` dan menerbitkan JWT
@@ -30,7 +32,7 @@ Dashboard dan route `/project/...` mengarahkan user tanpa token ke `/login`, dan
 tombol **Logout** menghapus token tersebut.
 
 Jika role belum sampai dari BIMA, minta pemilik administrasi BIMA memperbaiki
-akun/assignment. Untuk insiden yang tidak bisa menunggu sinkronisasi, gunakan
+akun tersebut. Untuk insiden yang tidak bisa menunggu sinkronisasi role, gunakan
 prosedur break-glass di bawah.
 
 ## Mengaktifkan break-glass

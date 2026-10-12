@@ -1,18 +1,15 @@
-from typing import List, Optional
-
-from pydantic import BaseModel, ConfigDict, Field
-
+from pydantic import BaseModel, Field
 
 class BimaProjectRecord(BaseModel):
+    """One row of BIMA's flat project catalog.
+
+    BIMA owns no assignment or role data per project: the catalog is a flat
+    directory and the engineer who imports a row becomes its local owner.
+    """
+
     bima_project_id: str = Field(min_length=1, max_length=255)
+    project_number: str = Field(default="", max_length=64)
     name: str = Field(min_length=1, max_length=255)
-    description: Optional[str] = ""
-    assigned_bima_user_ids: List[str] = Field(default_factory=list)
-
-
-class BimaProjectSyncRequest(BaseModel):
-    bima_access_token: Optional[str] = None
-
 
 class BimaIdentity(BaseModel):
     bima_user_id: str
@@ -20,16 +17,7 @@ class BimaIdentity(BaseModel):
     full_name: str
     role: str
 
-
-class SyncedProject(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    bima_project_id: Optional[str]
-    owner_id: Optional[str]
-    name: str
-    description: str
-
-class BimaProjectSyncResponse(BaseModel):
-    synced_count: int
-    projects: List[SyncedProject]
+class ProjectImportRequest(BaseModel):
+    bima_project_id: str = Field(min_length=1, max_length=255)
+    project_number: str = Field(default="", max_length=64)
+    name: str = Field(min_length=1, max_length=255)

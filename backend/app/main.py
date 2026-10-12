@@ -11,7 +11,7 @@ if _ROOT not in sys.path:
 
 from .config import settings
 from .db.session import init_db
-from .routers import projects, detection, results, grouping, validation, export, tiles, ws, linelist, topology, auth, tracking, admin
+from .routers import projects, bima, detection, results, grouping, validation, export, tiles, ws, linelist, topology, auth, tracking, admin
 
 
 @asynccontextmanager
@@ -44,6 +44,7 @@ app.add_middleware(
 # Include API v1 routers
 api_prefix = settings.API_V1_PREFIX
 app.include_router(projects.router, prefix=api_prefix)
+app.include_router(bima.router, prefix=api_prefix)
 app.include_router(auth.router, prefix=api_prefix)
 app.include_router(tracking.router, prefix=api_prefix)
 app.include_router(admin.router, prefix=api_prefix)

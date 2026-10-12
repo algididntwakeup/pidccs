@@ -36,7 +36,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db() -> None:
     """Initialize database tables."""
     # Import all models so Base has metadata registered
-    from ..models import project, sheet, job, user, ground_truth_log, project_assignment  # noqa: F401
+    from ..models import project, sheet, job, user, ground_truth_log  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # create_all does not add columns to existing databases. Keep old projects
@@ -54,12 +54,21 @@ async def init_db() -> None:
                     )
                 if "bima_project_id" not in project_columns:
                     sync_conn.exec_driver_sql("ALTER TABLE projects ADD COLUMN bima_project_id VARCHAR(255)")
+                if "project_number" not in project_columns:
+                    sync_conn.exec_driver_sql(
+                        "ALTER TABLE projects ADD COLUMN project_number VARCHAR(64) NOT NULL DEFAULT ''"
+                    )
                 sync_conn.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS ix_projects_owner_id ON projects (owner_id)"
                 )
                 sync_conn.exec_driver_sql(
                     "CREATE UNIQUE INDEX IF NOT EXISTS ix_projects_bima_project_id ON projects (bima_project_id)"
                 )
+
+            # BIMA exposes a flat project catalog and assigns no users, so the
+            # assignment table has no writer left. Local access is owner-only.
+            if "project_assignments" in tables:
+                sync_conn.exec_driver_sql("DROP TABLE IF EXISTS project_assignments")
 
             if "users" in tables:
                 user_columns = {column["name"] for column in inspector.get_columns("users")}

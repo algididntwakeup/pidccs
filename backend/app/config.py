@@ -20,12 +20,17 @@ class Settings(BaseSettings):
     SUPERUSER_SECRET_KEY: str = ""
     BIMA_BASE_URL: str = ""
     BIMA_CLIENT_ID: str = ""
-    # Live BIMA integration is the default. Enable mock behavior explicitly in
-    # local test/development environments so a deployed callback cannot accept
+    # Live BIMA SSO is the default. Enable the mock identity callback explicitly
+    # in local test/development environments so a deployed callback cannot accept
     # caller-supplied identities as authenticated users.
-    BIMA_PROJECTS_MOCK_MODE: bool = False
     BIMA_SSO_MOCK_MODE: bool = False
-    BIMA_MOCK_PROJECTS_JSON: str = '[{"bima_project_id":"BIMA-MOCK-001","name":"Mock P&ID Beta Project","description":"Sample project from the mock BIMA API","assigned_bima_user_ids":["bima-demo-user"]}]'
+    # Flat BIMA project catalog served by GET /api/v1/bima/projects. BIMA assigns
+    # no users per project, so a row only carries its number and name.
+    BIMA_MOCK_PROJECTS_JSON: str = (
+        '[{"bima_project_id":"BIMA-MOCK-001","project_number":"BCD3-605-42","name":"Unit 605 Amine Treating"},'
+        '{"bima_project_id":"BIMA-MOCK-002","project_number":"BCD3-612-07","name":"Unit 612 Sour Water Stripper"},'
+        '{"bima_project_id":"BIMA-MOCK-003","project_number":"BCD3-701-11","name":"Unit 701 Flare Header"}]'
+    )
 
     # Multi-tenancy forward-compatibility (Phase A/B hardcoded defaults)
     DEFAULT_TENANT_ID: str = "default_tenant"

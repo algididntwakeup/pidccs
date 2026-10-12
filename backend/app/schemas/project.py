@@ -62,6 +62,7 @@ class ProjectResponse(ProjectBase):
     id: str = Field(..., description="Unique project UUID")
     owner_id: Optional[str] = None
     bima_project_id: Optional[str] = None
+    project_number: str = Field(default="", description="Flat BIMA catalog number, e.g. BCD3-605-42")
     created_at: datetime
     updated_at: datetime
     sheets: List[SheetResponse] = Field(default_factory=list)

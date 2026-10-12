@@ -189,6 +189,9 @@ export interface ProjectResponse {
   id: string;
   name: string;
   description: string;
+  owner_id?: string | null;
+  bima_project_id?: string | null;
+  project_number?: string;
   created_at: string;
   updated_at: string;
   sheets: SheetResponse[];

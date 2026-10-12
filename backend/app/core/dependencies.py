@@ -3,26 +3,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clients.bima import BimaClient, MockBimaProjectClient
+from ..clients.bima import BimaClient
 from ..config import settings
 from ..db.session import get_db
 from ..models.project import Project
-from ..models.project_assignment import ProjectAssignment
 from ..models.user import User
 from .security import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
-
-def get_bima_project_client() -> BimaClient | MockBimaProjectClient:
-    if settings.BIMA_PROJECTS_MOCK_MODE:
-        return MockBimaProjectClient()
-    return BimaClient()
-
-
 def get_bima_sso_client() -> BimaClient:
     return BimaClient()
-
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
@@ -72,7 +63,6 @@ async def get_current_user(
         raise unauthorized
     return user
 
-
 async def require_project_access(
     project_id: str,
     current_user: User = Depends(get_current_user),
@@ -80,23 +70,14 @@ async def require_project_access(
 ) -> Project:
     query = select(Project).where(Project.id == project_id)
     if current_user.role.strip().upper() != "SUPERADMIN":
-        query = query.where(
-            (
-                (Project.owner_id == current_user.id)
-                | Project.id.in_(
-                    select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == current_user.id)
-                )
-            )
-        )
+        query = query.where(Project.owner_id == current_user.id)
     project = await db.scalar(query)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
 
-
 # Kept as a compatibility alias for routers added before BIMA assignments.
 require_project_owner = require_project_access
-
 
 async def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role.strip().upper() != "SUPERADMIN":

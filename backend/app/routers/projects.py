@@ -2,8 +2,9 @@ import os
 import uuid
 from typing import List, Optional
 import cv2
-from fastapi import APIRouter, Body, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -12,11 +13,9 @@ from ..schemas.project import ProjectCreate, ProjectResponse, SheetResponse
 from ..services.project_service import ProjectService
 from ..services.detection_service import queue_sheet_detection, dispatch_detection_job
 from ..core.dependencies import get_current_user
-from ..core.dependencies import get_bima_project_client
-from ..clients.bima import BimaClient, BimaServiceError, MockBimaProjectClient
+from ..models.project import Project
 from ..models.user import User
-from ..schemas.bima import BimaProjectSyncRequest, BimaProjectSyncResponse, SyncedProject
-from ..services.bima_sync_service import BimaProjectSyncService
+from ..schemas.bima import ProjectImportRequest
 
 router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(get_current_user)])
 
@@ -59,33 +58,33 @@ async def list_projects(
     )
 
 
-@router.post("/bima-sync", response_model=BimaProjectSyncResponse)
-async def sync_bima_projects(
-    payload: Optional[BimaProjectSyncRequest] = Body(None),
+@router.post("/import", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+async def import_bima_project(
+    payload: ProjectImportRequest,
     current_user: User = Depends(get_current_user),
-    bima_client: BimaClient | MockBimaProjectClient = Depends(get_bima_project_client),
     db: AsyncSession = Depends(get_db),
 ):
-    """Fetch this user's assigned projects from BIMA and upsert them locally."""
-    upstream_token = payload.bima_access_token if payload else None
-    if isinstance(bima_client, BimaClient):
-        if not upstream_token:
-            raise HTTPException(status_code=401, detail="A current BIMA SSO token is required")
-        try:
-            identity = await bima_client.verify_sso_token(upstream_token)
-        except BimaServiceError as exc:
-            raise HTTPException(status_code=401, detail="BIMA SSO token could not be verified") from exc
-        if identity.bima_user_id != current_user.bima_user_id:
-            raise HTTPException(status_code=403, detail="BIMA token does not match the signed-in user")
-    remote_projects = await bima_client.fetch_assigned_projects(
-        current_user.bima_user_id,
-        upstream_token,
+    """Import one row of BIMA's flat project catalog into this workspace.
+
+    BIMA assigns no users per project, so the importing engineer becomes the
+    local `owner_id` and is the only account that can see the folder.
+    """
+    existing = await db.scalar(
+        select(Project).where(Project.bima_project_id == payload.bima_project_id)
     )
-    projects = await BimaProjectSyncService.sync_user_projects(db, current_user, remote_projects)
-    await db.commit()
-    return BimaProjectSyncResponse(
-        synced_count=len(projects),
-        projects=[SyncedProject.model_validate(project) for project in projects],
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project {payload.project_number or payload.bima_project_id} has already been imported",
+        )
+    return await ProjectService.create_project(
+        db=db,
+        name=payload.name,
+        owner_id=current_user.id,
+        tenant_id=settings.DEFAULT_TENANT_ID,
+        user_id=current_user.id,
+        bima_project_id=payload.bima_project_id,
+        project_number=payload.project_number,
     )
 
 

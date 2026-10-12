@@ -30,6 +30,27 @@ Aturan ini cukup untuk routing umum dengan fallback, tetapi belum menjadi klasif
 
 Editor mengirim aksi marking, assignment grup, dan koreksi Piping ID ke `GroundTruthLog` secara best-effort melalui `POST /api/v1/tracking/log`. Ini membangun jejak umpan balik engineer untuk kurasi dan evaluasi ML di masa depan; log belum menjadi pipeline training otomatis dan aksi mentah tidak boleh langsung dianggap label ground truth. Rincian tipe event, payload, batas interpretasi, dan alur kurasinya ada di [dokumentasi Silent Tracking & ML](docs/ML_GROUND_TRUTH_TRACKING.md).
 
+### Integrasi BIMA: katalog flat & import project
+
+BIMA **tidak** mengatur assignment user per project. Yang disediakan BIMA adalah
+**katalog project flat**: setiap baris hanya berisi `bima_project_id`,
+`project_number`, dan `name`. Karena itu tidak ada sinkronisasi assignment:
+engineer membuka katalog di dashboard, memilih satu baris, lalu mengimpornya.
+
+| Endpoint | Perilaku |
+| :--- | :--- |
+| `GET /api/v1/bima/projects` | Simulasi API eksternal BIMA. Mengembalikan katalog flat dari `BIMA_MOCK_PROJECTS_JSON`. Semua user terautentikasi melihat daftar yang sama. |
+| `POST /api/v1/projects/import` | Membuat row `Project` lokal dari satu baris katalog dan menetapkan `owner_id` ke user pemanggil (dari JWT). `bima_project_id` unik, jadi impor ulang dijawab `409 Conflict`. |
+
+Hak akses project hanya berbasis `owner_id`: tidak ada tabel assignment, dan user
+lain tidak melihat atau membuka folder yang bukan miliknya (SUPERADMIN tetap
+melihat semua). Dashboard (`frontend/src/app/page.tsx`) memakai Shadcn Dialog
+untuk modal **Import Project from BIMA**; tombol *Create Project* manual sudah
+tidak ada di UI, meski `POST /api/v1/projects` masih tersedia untuk skrip/seed.
+Mengganti `BIMA_BASE_URL`/`BIMA_CLIENT_ID` hanya memengaruhi verifikasi SSO;
+katalog project dilayani endpoint mock sampai kontrak BIMA yang sebenarnya
+tersedia.
+
 ---
 
 ## Ringkasan Eksekutif / Executive Summary
@@ -295,13 +316,13 @@ File `.env` di root direktori mengatur seluruh parameter konfigurasi aplikasi:
 | `JWT_SECRET_KEY` | random per proses jika kosong | Kunci penandatanganan JWT lokal. Tetapkan nilai stabil yang sama pada semua replika backend produksi. |
 | `SUPERUSER_SECRET_KEY` | kosong (break-glass nonaktif) | Secret darurat untuk IT superuser. Simpan di secret manager atau `.env` lokal yang tidak di-commit. |
 | `CORS_ORIGINS` | `[]` | Daftar origin website yang diizinkan browser untuk memanggil API; format JSON. |
-| `BIMA_BASE_URL` | kosong | Base URL verifikasi SSO dan sinkronisasi project BIMA di backend. |
+| `BIMA_BASE_URL` | kosong | Base URL verifikasi SSO BIMA di backend. |
 | `BIMA_CLIENT_ID` | kosong | Client ID P&ID Studio yang didaftarkan di portal BIMA; dibutuhkan untuk memulai live SSO. |
 | `NEXT_PUBLIC_BIMA_BASE_URL` | kosong | Base URL portal BIMA yang dipakai frontend untuk memulai SSO. |
 | `NEXT_PUBLIC_BIMA_CLIENT_ID` | kosong | Client ID publik yang didaftarkan untuk aplikasi di BIMA. |
 | `NEXT_PUBLIC_BIMA_REDIRECT_URI` | origin website + `/login` | Callback frontend; bila disetel, nilainya harus sama persis dengan callback terdaftar di BIMA. |
 | `BIMA_SSO_MOCK_MODE` | `false` | Izinkan callback menerima identitas tiruan untuk development/test lokal saja. |
-| `BIMA_PROJECTS_MOCK_MODE` | `false` | Gunakan katalog project tiruan untuk development/test lokal saja. |
+| `BIMA_MOCK_PROJECTS_JSON` | 3 project contoh | Katalog project BIMA flat yang dilayani `GET /api/v1/bima/projects`; array `{bima_project_id, project_number, name}`. BIMA tidak mengatur assignment user per project. |
 | `NEXT_PUBLIC_API_URL` | kosong | Origin Backend API tanpa `/api/v1`; kosong berarti API disajikan melalui origin website/reverse proxy yang sama. |
 | `NEXT_PUBLIC_WS_URL` | otomatis | Origin WebSocket; bila kosong, diturunkan dari API URL atau origin website aktif. |
 

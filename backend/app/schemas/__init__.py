@@ -9,7 +9,7 @@ from .project import ProjectCreate, ProjectUpdate, ProjectResponse, SheetRespons
 from .job import JobResponse, ProgressEvent
 from .validation import ValidationReport, ValidationCheck, ValidationFlag
 from .auth import BimaSSOCallback, UserResponse, TokenResponse, SSOCallbackResponse
-from .bima import BimaProjectRecord, BimaProjectSyncRequest, BimaProjectSyncResponse
+from .bima import BimaProjectRecord, ProjectImportRequest
 from .tracking import GroundTruthLogCreate, GroundTruthLogAccepted
 
 __all__ = [
@@ -37,8 +37,7 @@ __all__ = [
     "TokenResponse",
     "SSOCallbackResponse",
     "BimaProjectRecord",
-    "BimaProjectSyncRequest",
-    "BimaProjectSyncResponse",
+    "ProjectImportRequest",
     "GroundTruthLogCreate",
     "GroundTruthLogAccepted",
 ]

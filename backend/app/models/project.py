@@ -15,6 +15,9 @@ class Project(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True, default="default_user")
     owner_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     bima_project_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, unique=True, index=True)
+    # Flat catalog number from BIMA (e.g. BCD3-605-42). BIMA assigns no users;
+    # the importer becomes the owner of the local row.
+    project_number: Mapped[str] = mapped_column(String(64), default="", nullable=False)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -30,5 +33,4 @@ class Project(Base):
     # Relationships
     sheets = relationship("Sheet", back_populates="project", cascade="all, delete-orphan", lazy="selectin")
     owner = relationship("User", back_populates="projects")
-    assignments = relationship("ProjectAssignment", back_populates="project", cascade="all, delete-orphan")
     ground_truth_logs = relationship("GroundTruthLog", back_populates="project", cascade="all, delete-orphan")

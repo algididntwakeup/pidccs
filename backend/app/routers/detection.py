@@ -9,7 +9,6 @@ from ..schemas.job import JobResponse
 from ..models.sheet import Sheet
 from ..models.job import Job
 from ..models.project import Project
-from ..models.project_assignment import ProjectAssignment
 from ..models.user import User
 from ..services.project_service import ProjectService
 from ..services.detection_service import (
@@ -208,12 +207,7 @@ async def get_job_status(
         .where(Job.id == job_id)
     )
     if current_user.role.strip().upper() != "SUPERADMIN":
-        query = query.where(
-            or_(
-                Project.owner_id == current_user.id,
-                Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == current_user.id)),
-            )
-        )
+        query = query.where(Project.owner_id == current_user.id)
     result = await db.execute(query)
     job = result.scalar_one_or_none()
     if not job:
@@ -251,10 +245,7 @@ async def list_jobs(
         .join(Project, Project.id == Sheet.project_id)
     )
     if current_user.role.strip().upper() != "SUPERADMIN":
-        query = query.where(or_(
-            Project.owner_id == current_user.id,
-            Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == current_user.id)),
-        ))
+        query = query.where(Project.owner_id == current_user.id)
     if sheet_id:
         query = query.where(Job.sheet_id == sheet_id)
     if project_id:

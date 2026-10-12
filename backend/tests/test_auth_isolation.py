@@ -19,8 +19,6 @@ from app.db.session import get_db
 from app.main import app
 from app.routers import tracking
 from app.models.sheet import Sheet
-from app.core.dependencies import get_bima_project_client
-from app.clients.bima import MockBimaProjectClient
 
 
 @pytest.mark.asyncio
@@ -127,22 +125,34 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
                 f"/api/v1/projects/{project['id']}/sheets/private-sheet/result"
             )).status_code == 404
 
-            app.dependency_overrides[get_bima_project_client] = lambda: MockBimaProjectClient([{
-                "bima_project_id": "BIMA-ASSIGNED-001",
-                "name": "Assigned by BIMA",
-                "description": "Shared test project",
-                "assigned_bima_user_ids": ["owner-bima-id", "other-bima-id"],
-            }])
+            # BIMA is a flat catalog: the engineer browses it and imports the rows
+            # they work on. Importing makes them the local owner.
+            catalog = await client.get("/api/v1/bima/projects")
+            assert catalog.status_code == 200, catalog.text
+            assert catalog.json(), "the mock BIMA catalog must not be empty"
+            assert {"bima_project_id", "project_number", "name"} <= set(catalog.json()[0])
+
             client.headers["Authorization"] = f"Bearer {owner_token}"
-            sync_response = await client.post("/api/v1/projects/bima-sync")
-            assert sync_response.status_code == 200, sync_response.text
-            assert sync_response.json()["synced_count"] == 1
-            assigned_project_id = sync_response.json()["projects"][0]["id"]
+            imported = await client.post("/api/v1/projects/import", json={
+                "bima_project_id": "BIMA-CATALOG-001",
+                "project_number": "BCD3-605-42",
+                "name": "Unit 605 Amine Treating",
+            })
+            assert imported.status_code == 201, imported.text
+            assigned_project_id = imported.json()["id"]
+            assert imported.json()["owner_id"] == owner_response.json()["user"]["id"]
+            assert imported.json()["project_number"] == "BCD3-605-42"
+
+            duplicate = await client.post("/api/v1/projects/import", json={
+                "bima_project_id": "BIMA-CATALOG-001",
+                "project_number": "BCD3-605-42",
+                "name": "Unit 605 Amine Treating",
+            })
+            assert duplicate.status_code == 409
 
             client.headers["Authorization"] = f"Bearer {other_token}"
-            visible_projects = (await client.get("/api/v1/projects")).json()
-            assert [item["id"] for item in visible_projects] == [assigned_project_id]
-            assert (await client.get(f"/api/v1/projects/{assigned_project_id}")).status_code == 200
+            assert (await client.get("/api/v1/projects")).json() == []
+            assert (await client.get(f"/api/v1/projects/{assigned_project_id}")).status_code == 404
             assert (await client.get(f"/api/v1/projects/{project['id']}")).status_code == 404
 
             client.headers["Authorization"] = f"Bearer {owner_token}"
@@ -172,5 +182,4 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
             assert monitoring.json()["activities"][0]["user_email"] == "owner@example.test"
     finally:
         app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(get_bima_project_client, None)
         await engine.dispose()

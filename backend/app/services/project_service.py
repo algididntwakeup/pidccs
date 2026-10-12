@@ -2,14 +2,13 @@ import os
 import math
 import uuid
 from typing import List, Optional
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import UploadFile
 
 from ..config import settings
 from ..models.project import Project
 from ..models.sheet import Sheet
-from ..models.project_assignment import ProjectAssignment
 from ..adapters.storage import LocalStorageAdapter
 from ..adapters.pdf_renderer import load_drawing_image
 
@@ -25,6 +24,8 @@ class ProjectService:
         description: str = "",
         tenant_id: str = "default_tenant",
         user_id: str = "default_user",
+        bima_project_id: Optional[str] = None,
+        project_number: str = "",
     ) -> Project:
         project = Project(
             id=str(uuid.uuid4()),
@@ -33,6 +34,8 @@ class ProjectService:
             tenant_id=tenant_id,
             user_id=user_id,
             owner_id=owner_id,
+            bima_project_id=bima_project_id,
+            project_number=project_number,
         )
         db.add(project)
         await db.flush()
@@ -50,10 +53,7 @@ class ProjectService:
         if not is_superadmin:
             query = query.where(
                 Project.tenant_id == tenant_id,
-                or_(
-                    Project.owner_id == owner_id,
-                    Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == owner_id)),
-                ),
+                Project.owner_id == owner_id,
             )
         query = query.order_by(Project.created_at.desc())
         result = await db.execute(query)
@@ -65,12 +65,7 @@ class ProjectService:
     ) -> Optional[Project]:
         query = select(Project).where(Project.id == project_id)
         if not is_superadmin:
-            query = query.where(
-                or_(
-                    Project.owner_id == owner_id,
-                    Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == owner_id)),
-                )
-            )
+            query = query.where(Project.owner_id == owner_id)
         result = await db.execute(query)
         return result.scalar_one_or_none()
 

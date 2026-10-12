@@ -20,24 +20,31 @@ import {
 import { ProjectResponse } from '@/types/schema';
 import {
   fetchProjects,
-  createProject,
+  fetchBimaCatalog,
+  importBimaProject,
   deleteProject,
   isLocalDevAuthBypass,
   setLocalAccessToken,
+  type BimaCatalogProject,
 } from '@/lib/api';
 import RequireAuth from '@/components/RequireAuth';
 import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 /**
  * Format timestamp to localized readable date & time (e.g. 28 Sep 2026, 14:30)
@@ -73,11 +80,13 @@ function ProjectsDashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
-  // Create Project Modal state
-  const [newProjectName, setNewProjectName] = useState('');
-  const [newProjectDesc, setNewProjectDesc] = useState('');
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
+  // BIMA import modal state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [catalog, setCatalog] = useState<BimaCatalogProject[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState('');
+  const [selectedBimaId, setSelectedBimaId] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   // Deletion modal state
   const [projectToDelete, setProjectToDelete] = useState<ProjectResponse | null>(null);
@@ -99,23 +108,33 @@ function ProjectsDashboard() {
     void loadProjects();
   }, []);
 
-  const handleCreateProject = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newProjectName.trim()) return;
+  const openImportModal = async () => {
+    setShowImportModal(true);
+    setSelectedBimaId(null);
+    setCatalogError('');
+    setCatalogLoading(true);
     try {
-      setIsCreating(true);
-      const created = await createProject(newProjectName.trim(), newProjectDesc.trim());
-      setNewProjectName('');
-      setNewProjectDesc('');
-      setShowCreateModal(false);
-      await loadProjects();
-      if (created?.id) {
-        router.push(`/project/${created.id}`);
-      }
+      setCatalog(await fetchBimaCatalog());
     } catch (err) {
-      alert('Gagal membuat project folder: ' + err);
+      setCatalogError(err instanceof Error ? err.message : 'Gagal memuat katalog project BIMA');
     } finally {
-      setIsCreating(false);
+      setCatalogLoading(false);
+    }
+  };
+
+  const handleImportProject = async () => {
+    const chosen = catalog.find((c) => c.bima_project_id === selectedBimaId);
+    if (!chosen) return;
+    try {
+      setIsImporting(true);
+      setCatalogError('');
+      await importBimaProject(chosen);
+      setShowImportModal(false);
+      await loadProjects();
+    } catch (err) {
+      setCatalogError(err instanceof Error ? err.message : 'Gagal mengimpor project BIMA');
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -139,6 +158,7 @@ function ProjectsDashboard() {
     return projects.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
+        (p.project_number && p.project_number.toLowerCase().includes(q)) ||
         (p.description && p.description.toLowerCase().includes(q))
     );
   }, [projects, searchQuery]);
@@ -166,9 +186,9 @@ function ProjectsDashboard() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button onClick={() => setShowCreateModal(true)}>
+            <Button onClick={() => void openImportModal()}>
               <FolderPlus className="h-4 w-4" />
-              <span className="hidden sm:inline">New Project Folder</span>
+              <span className="hidden sm:inline">Import Project from BIMA</span>
             </Button>
             {!isLocalDevAuthBypass() && <Button
               variant="outline"
@@ -264,11 +284,11 @@ function ProjectsDashboard() {
             <p className="mb-5 mt-1 text-xs text-muted-foreground">
               {searchQuery
                 ? `Tidak ditemukan folder dengan nama "${searchQuery}". Coba kata kunci lain.`
-                : 'Buat folder project pertama Anda untuk mulai mengunggah dan mendigitasi diagram P&ID.'}
+                : 'Impor project dari katalog BIMA untuk mulai mengunggah dan mendigitasi diagram P&ID.'}
             </p>
             {!searchQuery && (
-              <Button size="sm" onClick={() => setShowCreateModal(true)}>
-                Buat Folder Project
+              <Button size="sm" onClick={() => void openImportModal()}>
+                Import Project from BIMA
               </Button>
             )}
           </Card>
@@ -277,20 +297,20 @@ function ProjectsDashboard() {
           /* GOOGLE DRIVE / EXPLORER STYLE FOLDER GRID                                */
           /* ========================================================================= */
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-            {/* Quick Action: New Folder Card */}
+            {/* Quick Action: Import from BIMA */}
             <button
               type="button"
-              onClick={() => setShowCreateModal(true)}
+              onClick={() => void openImportModal()}
               className="group flex min-h-[140px] flex-col items-center justify-center rounded-lg border-2 border-dashed border-border p-4 text-center transition hover:border-primary/50 hover:bg-accent/40"
             >
               <div className="mb-2.5 flex h-11 w-11 items-center justify-center rounded-full bg-muted text-muted-foreground transition group-hover:bg-accent group-hover:text-primary">
                 <Plus className="h-6 w-6" />
               </div>
               <span className="text-xs font-semibold text-foreground group-hover:text-primary">
-                + New Project Folder
+                + Import Project from BIMA
               </span>
               <span className="mt-0.5 text-[10px] text-muted-foreground">
-                Tambah workspace baru
+                Ambil dari katalog BIMA
               </span>
             </button>
 
@@ -325,7 +345,7 @@ function ProjectsDashboard() {
                       </Button>
                     </div>
 
-                    {/* Middle: Project Title & Description */}
+                    {/* Middle: Project Title, BIMA Number & Description */}
                     <div className="my-2.5 min-w-0">
                       <h3
                         className="truncate text-sm font-bold text-foreground transition-colors group-hover:text-primary"
@@ -333,6 +353,11 @@ function ProjectsDashboard() {
                       >
                         {p.name}
                       </h3>
+                      {p.project_number && (
+                        <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
+                          {p.project_number}
+                        </span>
+                      )}
                       <p
                         className="mt-0.5 truncate text-xs text-muted-foreground"
                         title={p.description || 'P&ID drawing sheets & corrosion circuit register'}
@@ -395,11 +420,9 @@ function ProjectsDashboard() {
                             <span className="block truncate font-semibold text-foreground group-hover:text-primary">
                               {p.name}
                             </span>
-                            {p.description && (
-                              <span className="block truncate text-[11px] text-muted-foreground">
-                                {p.description}
-                              </span>
-                            )}
+                            <span className="block truncate text-[11px] text-muted-foreground">
+                              {[p.project_number, p.description].filter(Boolean).join(' · ')}
+                            </span>
                           </div>
                         </div>
                       </td>
@@ -442,65 +465,119 @@ function ProjectsDashboard() {
       </main>
 
       {/* ========================================================================= */}
-      {/* MODAL: CREATE PROJECT FOLDER                                              */}
+      {/* DIALOG: IMPORT PROJECT FROM BIMA (flat catalog)                           */}
       {/* ========================================================================= */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-navy-950/40 p-4 backdrop-blur-sm">
-          <Card className="w-full max-w-md shadow-xl">
-            <CardHeader className="border-b border-border">
-              <CardTitle className="flex items-center gap-2.5 text-base">
-                <span className="flex h-8 w-8 items-center justify-center rounded-md bg-accent text-primary">
-                  <FolderPlus className="h-5 w-5" />
-                </span>
-                Buat Folder Project Baru
-              </CardTitle>
-            </CardHeader>
+      <Dialog
+        open={showImportModal}
+        onOpenChange={(open) => {
+          if (!isImporting) setShowImportModal(open);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-md bg-accent text-primary">
+                <FolderPlus className="h-5 w-5" />
+              </span>
+              Import Project from BIMA
+            </DialogTitle>
+            <DialogDescription>
+              Katalog project BIMA bersifat flat tanpa assignment user. Pilih project yang Anda
+              kerjakan, lalu folder lokalnya menjadi milik akun Anda.
+            </DialogDescription>
+          </DialogHeader>
 
-            <CardContent className="pt-6">
-              <form onSubmit={handleCreateProject} className="space-y-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="project-name">
-                    Nama Project / Plant Unit <span className="text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="project-name"
-                    required
-                    placeholder="Contoh: Unit 605 Amine Treating"
-                    value={newProjectName}
-                    onChange={(e) => setNewProjectName(e.target.value)}
-                  />
-                </div>
+          {catalogError && (
+            <p
+              role="alert"
+              className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            >
+              {catalogError}
+            </p>
+          )}
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="project-desc">Deskripsi / Catatan (Opsional)</Label>
-                  <Textarea
-                    id="project-desc"
-                    rows={3}
-                    placeholder="Deskripsi spesifikasi sistem atau nomor gambar..."
-                    value={newProjectDesc}
-                    onChange={(e) => setNewProjectDesc(e.target.value)}
-                  />
-                </div>
+          <div className="max-h-80 overflow-y-auto rounded-md border border-border">
+            {catalogLoading ? (
+              <div className="flex items-center justify-center gap-2 py-10 text-xs text-muted-foreground">
+                <RefreshCw className="h-4 w-4 animate-spin text-primary" />
+                Memuat katalog project BIMA...
+              </div>
+            ) : catalog.length === 0 ? (
+              <p className="py-10 text-center text-xs text-muted-foreground">
+                Katalog project BIMA kosong.
+              </p>
+            ) : (
+              <table className="w-full border-collapse text-left text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-muted/60 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                    <th className="w-12 px-4 py-2" />
+                    <th className="w-40 px-4 py-2">No. Project</th>
+                    <th className="px-4 py-2">Nama Project</th>
+                    <th className="w-28 px-4 py-2 text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {catalog.map((item) => {
+                    const imported = projects.some(
+                      (p) => p.bima_project_id === item.bima_project_id
+                    );
+                    const selected = selectedBimaId === item.bima_project_id;
+                    return (
+                      <tr
+                        key={item.bima_project_id}
+                        onClick={() => !imported && setSelectedBimaId(item.bima_project_id)}
+                        className={`transition ${imported ? 'opacity-60' : 'cursor-pointer hover:bg-muted/50'} ${selected ? 'bg-accent/60' : ''}`}
+                      >
+                        <td className="px-4 py-3">
+                          <input
+                            type="radio"
+                            name="bima-project"
+                            className="h-4 w-4 accent-primary"
+                            checked={selected}
+                            disabled={imported}
+                            onChange={() => setSelectedBimaId(item.bima_project_id)}
+                            aria-label={`Pilih ${item.name}`}
+                          />
+                        </td>
+                        <td className="px-4 py-3 font-mono text-[11px] text-muted-foreground">
+                          {item.project_number || '—'}
+                        </td>
+                        <td className="px-4 py-3 font-semibold text-foreground">{item.name}</td>
+                        <td className="px-4 py-3 text-right">
+                          {imported ? (
+                            <Badge variant="secondary">Imported</Badge>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
 
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => setShowCreateModal(false)}
-                    disabled={isCreating}
-                  >
-                    Batal
-                  </Button>
-                  <Button type="submit" disabled={isCreating || !newProjectName.trim()}>
-                    {isCreating && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
-                    <span>Buat Folder</span>
-                  </Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setShowImportModal(false)}
+              disabled={isImporting}
+            >
+              Batal
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleImportProject()}
+              disabled={isImporting || !selectedBimaId}
+            >
+              {isImporting && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+              <span>Import</span>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ========================================================================= */}
       {/* MODAL: DELETE PROJECT CONFIRMATION                                        */}

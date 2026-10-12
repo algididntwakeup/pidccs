@@ -10,8 +10,7 @@ from ..models.project import Project
 from ..models.sheet import Sheet
 from ..models.user import User
 from ..core.security import decode_access_token
-from sqlalchemy import or_, select
-from ..models.project_assignment import ProjectAssignment
+from sqlalchemy import select
 
 router = APIRouter(tags=["websocket"])
 
@@ -52,12 +51,7 @@ async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
                 .where(Job.id == job_id)
             )
             if user is None or user.role.strip().upper() != "SUPERADMIN":
-                job_query = job_query.where(
-                    or_(
-                        Project.owner_id == user_id,
-                        Project.id.in_(select(ProjectAssignment.project_id).where(ProjectAssignment.user_id == user_id)),
-                    )
-                )
+                job_query = job_query.where(Project.owner_id == user_id)
             owns_job = await session.scalar(job_query)
         if user is None or not user.is_active or owns_job is None:
             raise ValueError("inactive user or inaccessible job")

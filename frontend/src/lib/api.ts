@@ -185,13 +185,30 @@ export async function fetchProjects(): Promise<ProjectResponse[]> {
   return res.json();
 }
 
-export async function createProject(name: string, description: string = ''): Promise<ProjectResponse> {
-  const res = await apiFetch(`${API_BASE}/api/v1/projects`, {
+export interface BimaCatalogProject {
+  bima_project_id: string;
+  project_number: string;
+  name: string;
+}
+
+/** Flat BIMA project catalog. BIMA assigns no users per project. */
+export async function fetchBimaCatalog(): Promise<BimaCatalogProject[]> {
+  const res = await apiFetch(`${API_BASE}/api/v1/bima/projects`);
+  if (!res.ok) throw new Error('Failed to load the BIMA project catalog');
+  return res.json();
+}
+
+/** Import one BIMA catalog row as a project folder owned by the signed-in user. */
+export async function importBimaProject(project: BimaCatalogProject): Promise<ProjectResponse> {
+  const res = await apiFetch(`${API_BASE}/api/v1/projects/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify(project),
   });
-  if (!res.ok) throw new Error('Failed to create project');
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.detail || 'Failed to import the BIMA project');
+  }
   return res.json();
 }
 
