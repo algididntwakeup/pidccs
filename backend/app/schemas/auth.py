@@ -9,7 +9,9 @@ class BimaSSOCallback(BaseModel):
     bima_user_id: Optional[str] = Field(default=None, max_length=255)
     email: Optional[str] = Field(default=None, max_length=320)
     full_name: str = Field(default="", max_length=255)
-    role: str = Field(default="engineer", min_length=1, max_length=32)
+    department: Optional[str] = Field(default=None, max_length=128)
+    role: Optional[str] = Field(default=None, max_length=64)
+    is_bima_superuser: bool = False
 
     @model_validator(mode="after")
     def require_sso_token_or_mock_identity(self):
@@ -30,7 +32,9 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     is_active: bool
+    department: str
     role: str
+    is_superuser: bool
 
 class TokenResponse(BaseModel):
     access_token: str

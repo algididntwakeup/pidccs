@@ -49,17 +49,16 @@ class BimaClient:
         if envelope.get("success") is False or data.get("valid") is False or not user:
             raise BimaServiceError("BIMA returned an invalid SSO profile")
 
-        roles = user.get("roles") or []
-        if not isinstance(roles, list):
-            roles = []
-        normalized_roles = [str(value).strip().casefold() for value in roles]
-        declared_role = user.get("role")
-        if user.get("is_admin") is True or str(declared_role or "").strip().casefold() in {
-            "superadmin", "it_admin", "it-admin"
-        } or any(value in {"superadmin", "it_admin", "it-admin"} for value in normalized_roles):
-            role = "SUPERADMIN"
-        else:
-            role = declared_role or (roles[0] if roles else None)
+        profile = user.get("profile")
+        if not isinstance(profile, dict):
+            profile = {}
+        department = user.get("department") or profile.get("department") or ""
+        bima_role = user.get("role") or profile.get("role") or ""
+        is_bima_superuser = (
+            user.get("is_bima_superuser") is True
+            or profile.get("is_bima_superuser") is True
+            or str(bima_role).strip().casefold() == "superuser"
+        )
         bima_user_id = str(user.get("bima_id") or user.get("bima_user_id") or "")
         email = str(user.get("email") or "")
         if not bima_user_id or "@" not in email:
@@ -68,5 +67,6 @@ class BimaClient:
             bima_user_id=bima_user_id,
             email=email,
             full_name=str(user.get("name") or user.get("full_name") or ""),
-            role=str(role or "engineer"),
+            department=str(department),
+            is_bima_superuser=is_bima_superuser,
         )

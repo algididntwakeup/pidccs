@@ -15,7 +15,8 @@ class BimaIdentity(BaseModel):
     bima_user_id: str
     email: str
     full_name: str
-    role: str
+    department: str
+    is_bima_superuser: bool = False
 
 class ProjectImportRequest(BaseModel):
     bima_project_id: str = Field(min_length=1, max_length=255)

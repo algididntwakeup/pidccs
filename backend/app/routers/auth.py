@@ -16,6 +16,7 @@ from ..schemas.auth import BimaSSOCallback, SSOCallbackResponse, SudoLoginReques
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
+ALLOWED_SSO_DEPARTMENTS = {"engineering"}
 
 
 @router.post("/sso-callback", response_model=SSOCallbackResponse)
@@ -36,31 +37,53 @@ async def sso_callback(
         bima_user_id = identity.bima_user_id.strip()
         email = identity.email.strip().lower()
         full_name = identity.full_name.strip()
-        role = identity.role.strip()
+        department = identity.department.strip()
+        is_bima_superuser = identity.is_bima_superuser
     else:
         if not settings.BIMA_SSO_MOCK_MODE:
             raise HTTPException(status_code=401, detail="Mock BIMA callback is disabled")
         bima_user_id = (payload.bima_user_id or "").strip()
         email = (payload.email or "").strip().lower()
         full_name = payload.full_name.strip()
-        role = payload.role.strip()
-    if not bima_user_id or "@" not in email or not role:
-        raise HTTPException(status_code=422, detail="BIMA identity, email, and role are required")
+        department = (payload.department or "").strip()
+        is_bima_superuser = (
+            payload.is_bima_superuser
+            or (payload.role or "").strip().casefold() == "superuser"
+        )
+    if not bima_user_id or "@" not in email:
+        raise HTTPException(status_code=422, detail="BIMA identity and email are required")
+    if is_bima_superuser:
+        local_role = "SUPERADMIN"
+        local_is_superuser = True
+    elif department.casefold() in ALLOWED_SSO_DEPARTMENTS:
+        local_role = "ENGINEER"
+        local_is_superuser = False
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Akses ditolak: Privilege tidak mencukupi",
+        )
 
     user = await db.scalar(select(User).where(User.bima_user_id == bima_user_id))
+    if user is not None and user.id == "sudo":
+        raise HTTPException(status_code=409, detail="BIMA identity conflicts with a reserved local account")
     if user is None:
         user = User(
             bima_user_id=bima_user_id,
             email=email,
             full_name=full_name or email.split("@", 1)[0],
-            role=role,
+            department=department,
+            role=local_role,
+            is_superuser=local_is_superuser,
             is_active=True,
         )
         db.add(user)
     else:
         user.email = email
         user.full_name = full_name or user.full_name or email.split("@", 1)[0]
-        user.role = role
+        user.department = department
+        user.role = local_role
+        user.is_superuser = local_is_superuser
         user.is_active = True
 
     try:
@@ -71,7 +94,14 @@ async def sso_callback(
         raise HTTPException(status_code=409, detail="BIMA identity conflicts with an existing account") from exc
 
     return SSOCallbackResponse(
-        access_token=create_access_token(user.id),
+        access_token=create_access_token(
+            user.id,
+            claims={
+                "department": user.department,
+                "role": user.role,
+                "is_superuser": user.is_superuser,
+            },
+        ),
         user=UserResponse.model_validate(user),
     )
 
@@ -103,7 +133,9 @@ async def sudo_login(
             bima_user_id="local-breakglass-sudo",
             email="breakglass@localhost.invalid",
             full_name="Emergency IT Superuser",
+            department="IT",
             role="SUPERADMIN",
+            is_superuser=True,
             is_active=True,
         )
         db.add(sudo_user)
@@ -111,7 +143,9 @@ async def sudo_login(
         logger.error("Reserved break-glass principal ID collision detected")
         raise HTTPException(status_code=503, detail="Break-glass principal is unavailable")
     else:
+        sudo_user.department = "IT"
         sudo_user.role = "SUPERADMIN"
+        sudo_user.is_superuser = True
         sudo_user.is_active = True
 
     try:
@@ -123,7 +157,13 @@ async def sudo_login(
     logger.warning("Break-glass login succeeded user_id=sudo client=%s", client_host)
     return TokenResponse(access_token=create_access_token(
         "sudo",
-        claims={"user_id": "sudo", "role": "SUPERADMIN", "auth_method": "breakglass"},
+        claims={
+            "user_id": "sudo",
+            "department": sudo_user.department,
+            "role": sudo_user.role,
+            "is_superuser": True,
+            "auth_method": "breakglass",
+        },
     ))
 
 

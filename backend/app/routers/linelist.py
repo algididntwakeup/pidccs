@@ -28,7 +28,7 @@ async def import_linelist_endpoint(
     """Import Line List Excel or CSV spreadsheet and enrich all P&ID sheets in the project."""
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
@@ -173,7 +173,7 @@ async def get_linelist_endpoint(
     """Retrieve the currently active project Line List and operating parameters."""
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")

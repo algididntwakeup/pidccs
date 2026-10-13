@@ -39,7 +39,7 @@ async def log_ground_truth(
     db: AsyncSession = Depends(get_db),
 ) -> GroundTruthLogAccepted:
     project_query = select(Project).where(Project.id == payload.project_id)
-    if current_user.role.strip().upper() != "SUPERADMIN":
+    if not current_user.is_superuser:
         project_query = project_query.where(Project.owner_id == current_user.id)
     project = await db.scalar(project_query)
     if project is None:

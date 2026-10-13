@@ -50,7 +50,7 @@ async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
                 .join(Project, Project.id == Sheet.project_id)
                 .where(Job.id == job_id)
             )
-            if user is None or user.role.strip().upper() != "SUPERADMIN":
+            if user is None or not user.is_superuser:
                 job_query = job_query.where(Project.owner_id == user_id)
             owns_job = await session.scalar(job_query)
         if user is None or not user.is_active or owns_job is None:

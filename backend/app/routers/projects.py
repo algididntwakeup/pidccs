@@ -54,7 +54,7 @@ async def list_projects(
     """List all projects for the given tenant."""
     return await ProjectService.list_projects(
         db=db, tenant_id=tenant_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
 
 
@@ -97,7 +97,7 @@ async def get_project(
     """Get project details including all uploaded P&ID drawing sheets."""
     project = await ProjectService.get_project(
         db=db, project_id=project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -113,7 +113,7 @@ async def delete_project(
     """Delete project and associated sheets."""
     deleted = await ProjectService.delete_project(
         db=db, project_id=project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -144,7 +144,7 @@ async def upload_sheet(
     """
     project = await ProjectService.get_project(
         db=db, project_id=project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -185,7 +185,7 @@ async def list_sheets(
     """
     project = await ProjectService.get_project(
         db=db, project_id=project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -228,7 +228,7 @@ async def trace_region(
 
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -510,7 +510,7 @@ async def get_sheet(
     sheet = await ProjectService.get_sheet(db=db, sheet_id=sheet_id)
     if not sheet or sheet.project_id != project_id or not await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     ):
         raise HTTPException(status_code=404, detail="Sheet not found in this project")
     return sheet
@@ -526,7 +526,7 @@ async def delete_sheet(
     """Delete an individual P&ID sheet drawing from a project."""
     if not await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     ):
         raise HTTPException(status_code=404, detail="Project not found")
     deleted = await ProjectService.delete_sheet(db=db, project_id=project_id, sheet_id=sheet_id)

@@ -54,24 +54,57 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
                 "bima_user_id": "owner-bima-id",
                 "email": "owner@example.test",
                 "full_name": "Owner",
-                "role": "engineer",
+                "department": "Engineering",
             })
             other_response = await client.post("/api/v1/auth/sso-callback", json={
                 "bima_user_id": "other-bima-id",
                 "email": "other@example.test",
                 "full_name": "Other",
-                "role": "engineer",
+                "department": "engineering",
             })
-            admin_response = await client.post("/api/v1/auth/sso-callback", json={
-                "bima_user_id": "admin-bima-id",
-                "email": "admin@example.test",
-                "full_name": "IT Admin",
-                "role": "SUPERADMIN",
+            bima_superuser_response = await client.post("/api/v1/auth/sso-callback", json={
+                "bima_user_id": "executive-bima-id",
+                "email": "executive@example.test",
+                "full_name": "BIMA Executive",
+                "department": "executive",
+                "role": "superuser",
+            })
+            bima_flag_superuser_response = await client.post("/api/v1/auth/sso-callback", json={
+                "bima_user_id": "flag-executive-bima-id",
+                "email": "flag-executive@example.test",
+                "full_name": "Flag Executive",
+                "department": "finance",
+                "is_bima_superuser": True,
+            })
+            denied_response = await client.post("/api/v1/auth/sso-callback", json={
+                "bima_user_id": "blocked-bima-id",
+                "email": "blocked@example.test",
+                "full_name": "Non Engineering",
+                "department": "operations",
+                "role": "admin",
             })
             assert owner_response.status_code == 200
             assert other_response.status_code == 200
-            assert admin_response.status_code == 200
-            assert admin_response.json()["user"]["role"] == "SUPERADMIN"
+            assert owner_response.json()["user"]["department"] == "Engineering"
+            assert owner_response.json()["user"]["role"] == "ENGINEER"
+            assert owner_response.json()["user"]["is_superuser"] is False
+            from app.core.security import decode_access_token
+            owner_claims = decode_access_token(owner_response.json()["access_token"])
+            assert owner_claims["department"] == "Engineering"
+            assert owner_claims["role"] == "ENGINEER"
+            assert owner_claims["is_superuser"] is False
+            assert bima_superuser_response.status_code == 200
+            assert bima_superuser_response.json()["user"]["department"] == "executive"
+            assert bima_superuser_response.json()["user"]["role"] == "SUPERADMIN"
+            assert bima_superuser_response.json()["user"]["is_superuser"] is True
+            bima_superuser_claims = decode_access_token(bima_superuser_response.json()["access_token"])
+            assert bima_superuser_claims["role"] == "SUPERADMIN"
+            assert bima_superuser_claims["is_superuser"] is True
+            assert bima_flag_superuser_response.status_code == 200
+            assert bima_flag_superuser_response.json()["user"]["role"] == "SUPERADMIN"
+            assert bima_flag_superuser_response.json()["user"]["is_superuser"] is True
+            assert denied_response.status_code == 403
+            assert denied_response.json()["detail"] == "Akses ditolak: Privilege tidak mencukupi"
 
             invalid_sudo = await client.post("/api/v1/auth/sudo-login", json={"secret_key": "wrong"})
             assert invalid_sudo.status_code == 401
@@ -79,11 +112,12 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
                 "secret_key": "test-only-breakglass-secret",
             })
             assert sudo_login.status_code == 200
-            from app.core.security import decode_access_token
             sudo_claims = decode_access_token(sudo_login.json()["access_token"])
             assert sudo_claims["sub"] == "sudo"
             assert sudo_claims["user_id"] == "sudo"
+            assert sudo_claims["department"] == "IT"
             assert sudo_claims["role"] == "SUPERADMIN"
+            assert sudo_claims["is_superuser"] is True
             assert "password" not in owner_response.json()["user"]
             assert "hashed_password" not in owner_response.json()["user"]
 
@@ -92,11 +126,11 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
                 "bima_user_id": "owner-bima-id",
                 "email": "owner@example.test",
                 "full_name": "Owner Updated",
-                "role": "senior_engineer",
+                "department": "engineering",
             })
             assert owner_again.status_code == 200
             assert owner_again.json()["user"]["id"] == owner_response.json()["user"]["id"]
-            assert owner_again.json()["user"]["role"] == "senior_engineer"
+            assert owner_again.json()["user"]["department"] == "engineering"
 
             owner_token = owner_again.json()["access_token"]
             other_token = other_response.json()["access_token"]
@@ -142,6 +176,12 @@ async def test_auth_project_isolation_and_ground_truth_tracking(monkeypatch):
             assigned_project_id = imported.json()["id"]
             assert imported.json()["owner_id"] == owner_response.json()["user"]["id"]
             assert imported.json()["project_number"] == "BCD3-605-42"
+
+            # BIMA superusers have the same global project visibility as break-glass IT.
+            client.headers["Authorization"] = f"Bearer {bima_superuser_response.json()['access_token']}"
+            executive_projects = await client.get("/api/v1/projects")
+            assert {item["id"] for item in executive_projects.json()} == {project["id"], assigned_project_id}
+            assert (await client.get(f"/api/v1/projects/{project['id']}")).status_code == 200
 
             duplicate = await client.post("/api/v1/projects/import", json={
                 "bima_project_id": "BIMA-CATALOG-001",

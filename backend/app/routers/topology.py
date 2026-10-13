@@ -22,7 +22,7 @@ async def get_project_topology(
     """Retrieve full multi-page topology graph linking drawing sheets across OPC connections."""
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
@@ -39,7 +39,7 @@ async def get_project_circuits(
     """Retrieve project-wide unified API RP 970 corrosion circuits spanning multiple drawings."""
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")

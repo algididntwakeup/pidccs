@@ -16,7 +16,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    role: Mapped[str] = mapped_column(String(32), default="engineer", nullable=False)
+    department: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="ENGINEER", nullable=False)
+    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     projects: Mapped[List["Project"]] = relationship("Project", back_populates="owner")

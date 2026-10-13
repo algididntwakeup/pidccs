@@ -51,6 +51,16 @@ Mengganti `BIMA_BASE_URL`/`BIMA_CLIENT_ID` hanya memengaruhi verifikasi SSO;
 katalog project dilayani endpoint mock sampai kontrak BIMA yang sebenarnya
 tersedia.
 
+SSO membaca departemen dari `user.department` atau `user.profile.department`
+yang dikembalikan BIMA. BIMA superuser (flag `is_bima_superuser: true` atau
+`role: "superuser"`, juga di dalam `profile`) selalu mendapat role lokal
+`SUPERADMIN` tanpa bergantung pada departemen. Pengguna lain hanya dapat login
+dari departemen `Engineering` (pencocokan tanpa membedakan huruf besar/kecil)
+dan mendapat role lokal `ENGINEER`; sisanya ditolak. JWT menyertakan `role`,
+`department`, dan `is_superuser`. Otorisasi global memakai `is_superuser`, jadi
+BIMA superuser dan break-glass `/api/v1/auth/sudo-login` sama-sama melewati
+pembatasan `owner_id`; engineer tetap hanya melihat project miliknya.
+
 ---
 
 ## Ringkasan Eksekutif / Executive Summary

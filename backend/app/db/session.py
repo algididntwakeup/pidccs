@@ -72,6 +72,18 @@ async def init_db() -> None:
 
             if "users" in tables:
                 user_columns = {column["name"] for column in inspector.get_columns("users")}
+                if "department" not in user_columns:
+                    sync_conn.exec_driver_sql(
+                        "ALTER TABLE users ADD COLUMN department VARCHAR(128) NOT NULL DEFAULT ''"
+                    )
+                if "role" not in user_columns:
+                    sync_conn.exec_driver_sql(
+                        "ALTER TABLE users ADD COLUMN role VARCHAR(32) NOT NULL DEFAULT 'ENGINEER'"
+                    )
+                if "is_superuser" not in user_columns:
+                    sync_conn.exec_driver_sql(
+                        "ALTER TABLE users ADD COLUMN is_superuser BOOLEAN NOT NULL DEFAULT FALSE"
+                    )
                 if "bima_user_id" not in user_columns:
                     sync_conn.exec_driver_sql("ALTER TABLE users ADD COLUMN bima_user_id VARCHAR(255)")
                 if "hashed_password" in user_columns:

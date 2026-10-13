@@ -91,7 +91,7 @@ async def trigger_project_detection(
     """Trigger detection for a project using its active or first sheet."""
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project or not project.sheets:
         raise HTTPException(status_code=404, detail="Project or sheets not found")
@@ -176,7 +176,7 @@ async def trigger_project_enrichment(
     """Trigger enrichment on the specified or first sheet of a project."""
     project = await ProjectService.get_project(
         db, project_id, owner_id=current_user.id,
-        is_superadmin=current_user.role.upper() == "SUPERADMIN",
+        is_superadmin=current_user.is_superuser,
     )
     if not project or not project.sheets:
         raise HTTPException(status_code=404, detail="Project or sheets not found")
@@ -206,7 +206,7 @@ async def get_job_status(
         .join(Project, Project.id == Sheet.project_id)
         .where(Job.id == job_id)
     )
-    if current_user.role.strip().upper() != "SUPERADMIN":
+    if not current_user.is_superuser:
         query = query.where(Project.owner_id == current_user.id)
     result = await db.execute(query)
     job = result.scalar_one_or_none()
@@ -244,7 +244,7 @@ async def list_jobs(
         .join(Sheet, Sheet.id == Job.sheet_id)
         .join(Project, Project.id == Sheet.project_id)
     )
-    if current_user.role.strip().upper() != "SUPERADMIN":
+    if not current_user.is_superuser:
         query = query.where(Project.owner_id == current_user.id)
     if sheet_id:
         query = query.where(Job.sheet_id == sheet_id)

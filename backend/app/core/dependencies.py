@@ -29,7 +29,9 @@ async def get_current_user(
                 email="local-dev@pidstudio.invalid",
                 full_name="Local Development Engineer",
                 is_active=True,
+                department="engineering",
                 role="SUPERADMIN",
+                is_superuser=True,
             )
             db.add(user)
             await db.flush()
@@ -38,6 +40,10 @@ async def get_current_user(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Reserved local development identity is unavailable",
             )
+        else:
+            user.department = "engineering"
+            user.role = "SUPERADMIN"
+            user.is_superuser = True
         return user
 
     unauthorized = HTTPException(
@@ -69,7 +75,7 @@ async def require_project_access(
     db: AsyncSession = Depends(get_db),
 ) -> Project:
     query = select(Project).where(Project.id == project_id)
-    if current_user.role.strip().upper() != "SUPERADMIN":
+    if not current_user.is_superuser:
         query = query.where(Project.owner_id == current_user.id)
     project = await db.scalar(query)
     if project is None:
@@ -80,6 +86,6 @@ async def require_project_access(
 require_project_owner = require_project_access
 
 async def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role.strip().upper() != "SUPERADMIN":
+    if not current_user.is_superuser:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin role required")
     return current_user
