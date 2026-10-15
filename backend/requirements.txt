@@ -1,6 +1,17 @@
 # ============================================================
 #  Backend & Inference Worker Dependencies - P&ID Studio Web
 # ============================================================
+#
+# Torch resolves to CPU-only wheels by default. Since torch 2.13 the PyPI
+# Linux wheels pull cuda-toolkit + nvidia-* packages (~10 GB), which
+# overflows the GitHub runner disk ([Errno 28] No space left on device)
+# and bloats the image to ~10.8 GB so `exporting to image` crawls.
+#
+# GPU servers: leave this file as-is and add the CUDA index at build time
+# (its +cuXXX wheels outrank +cpu), e.g.
+#   TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126 docker compose build api
+# or set TORCH_INDEX_URL in .env before `docker compose up -d --build`.
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 # Core API & ASGI
 fastapi>=0.115.0
@@ -23,6 +34,8 @@ redis>=5.2.0
 # Computer Vision & Perception
 numpy>=1.26,<2.3
 opencv-python>=4.9
+torch==2.14.1
+torchvision==0.29.1
 ultralytics==8.4.70
 sahi>=0.11.18
 rapidocr-onnxruntime==1.2.3

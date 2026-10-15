@@ -26,9 +26,22 @@ RUN --mount=type=cache,target=/var/cache/apt,id=backend-apt-cache,sharing=locked
 
 COPY requirements.txt .
 RUN python -m venv /opt/venv
+
+# Torch wheel source for pip. Unset (default) installs the CPU-only wheels from
+# the index configured in requirements.txt. GPU hosts pass a CUDA index so the
+# +cuXXX wheels win, e.g. --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+ARG TORCH_INDEX_URL
+
 RUN --mount=type=cache,target=/root/.cache/pip,id=backend-pip-cache,sharing=locked \
     /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install --prefer-binary -r requirements.txt
+    /opt/venv/bin/pip install --prefer-binary \
+        ${TORCH_INDEX_URL:+--extra-index-url ${TORCH_INDEX_URL}} \
+        -r requirements.txt
+
+# A GPU build must not silently fall back to CPU-only inference.
+RUN if [ -n "$TORCH_INDEX_URL" ]; then \
+        /opt/venv/bin/python -c "import torch,sys; print('torch', torch.__version__, '| cuda', torch.version.cuda); sys.exit(0 if torch.version.cuda else 'ERROR: TORCH_INDEX_URL was set but CPU-only torch got installed')"; \
+    fi
 
 FROM runtime AS base
 
